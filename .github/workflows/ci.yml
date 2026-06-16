@@ -35,11 +35,11 @@ jobs:
       - name: Run benchmark
         run: ./build/tests/benchmark_ssm_block
 
-      - name: Generate test weights
+      - name: Generate test weights (Mamba-3)
         run: |
           python3 scripts/export_mamba_weights.py \
-            --state-dim 16 --model-dim 16 --inner-dim 32 --conv-dim 4 \
-            --layers 2 --cond-dim 16 --random-init \
+            --state-dim 16 --model-dim 16 --inner-dim 32 --nheads 2 \
+            --layers 2 --random-init \
             --output models/ci_test_model.bin
 
       - name: Validate weight export
