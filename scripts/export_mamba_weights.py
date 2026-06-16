@@ -211,9 +211,11 @@ class Mamba3Block(nn.Module):
         x_h = x_proj.view(batch, seq_len, self.nheads, self.headdim)
         d_skip = (self.D_proj.view(1, 1, -1, 1)
                   * x_h).view(batch, seq_len, self.nheads * self.headdim)
-        # Pad to d_model if needed
-        if self.d_inner < self.d_model:
-            d_skip = F.pad(d_skip, (0, self.d_model - self.d_inner))
+        # Match d_model: truncate or pad as needed
+        if d_skip.size(-1) < self.d_model:
+            d_skip = F.pad(d_skip, (0, self.d_model - d_skip.size(-1)))
+        elif d_skip.size(-1) > self.d_model:
+            d_skip = d_skip[..., :self.d_model]
         out = out + d_skip
 
         # Residual from FiLM'd input

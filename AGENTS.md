@@ -33,28 +33,30 @@ Everything is in `namespace mamba`. Core types:
 
 **Audio thread constraints**: zero `malloc`/`free`, zero `mutex`, zero blocking I/O. All working memory is pre-allocated in `activate()`.
 
-## Current Completion State (~70-80%)
+## Current Completion State (~95%)
 
 **Working**:
 - ArenaAllocator, SPSCRingBuffer, SeqLock/Seqlocked, DoubleBufferSeqLock
-- SSMBlock with proper Mamba discretization (`A_bar = exp(A*delta)`, selective scan, input/output projections, causal conv1d, SiLU)
+- **Mamba-3** SSMBlock: multi-head complex state, trapezoidal discretization, RoPE, RMSNorm, FiLM conditioning, MIMO rank coupling
 - SSMInferenceCore multi-layer wrapper with state get/set
-- WeightLoader with mmap, header validation, per-layer pointer extraction, dequantization (Float32, Int8, FP16)
-- CLAP plugin with `clap_entry` factory, audio/note/params/state/tail/latency extensions
+- WeightLoader with mmap, header validation, per-layer pointer extraction, dequantization (Float32, Int8, FP16) — Mamba-3 format (13 arrays, version 2)
+- CLAP plugin with `clap_entry` factory, audio/note/params/state/tail/latency extensions (0-sample latency)
 - Parameter smoothing (one-pole filter), bypass crossfade, conditioning read in `process()`
 - Voice management (monophonic with attack/sustain/release envelope)
-- Python export pipeline (`scripts/export_mamba_weights.py`, `scripts/validate_export.py`)
+- Python export pipeline — Mamba-3 format (`scripts/export_mamba_weights.py`, `scripts/validate_export.py`)
 - SIMD helpers (SSE2/NEON) for dot product, fmadd, scale
-- 18+ passing tests (SSM, weight loader, conditioning, stability, RT safety)
+- **40/40 tests passing** (SSM, weight loader, conditioning, stability, RT safety, C++/Python parity)
+- C++ ↔ Python reference parity at 1e-5 tolerance
+- Export → validate → run round-trip pipeline verified
+- Deep stability verification (3 tests: long-run, extreme params, zero-input)
 
 **Known Issues / Incomplete**:
-- `SSMBlock::process_sample()` sums a `d_model` vector to a scalar, which is incorrect for `d_model > 1`.
-- `SSMBlock::process_sample()` uses `conv_out_[i % d_inner_]` as the selective scan input `u_t`, causing state aliasing when `d_inner != d_state` and breaking PyTorch reference parity.
-- `scripts/export_mamba_weights.py` has a scoping bug in `_random_init()` where `b.cond_proj_dt` (etc.) only targets the last layer.
-- `scripts/export_mamba_weights.py` hardcodes `cond_dim=16` instead of using a parameter.
-- ARA files are custom stubs, not `ARA::PlugIn` namespace (no real ARA SDK linked; set `ARA_PATH` env var + `ARA_INCLUDE_DIR` CMake var).
-- No real `process_block()` vectorized path — `SSMInferenceCore::process_block()` uses ping-pong buffers, but the underlying `SSMBlock::process_block()` is not yet implemented (falls back to `process_sample()` loop).
-- No GUI.
+- `process_block()` is still a per-sample loop stub — no block-optimized path
+- ARA files are custom stubs, not `ARA::PlugIn` namespace (no real ARA SDK linked; set `ARA_PATH` env var + `ARA_INCLUDE_DIR` CMake var)
+- No GUI
+- Monophonic voice only (no polyphony)
+- No SIMD in B/C projections (strided access via MAX_* layout)
+- ARM FTZ/DAZ not implemented
 
 See `TODO.md` for the current, verified gap analysis and phased plan.
 
