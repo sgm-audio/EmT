@@ -7,6 +7,7 @@ clap_state.cpp
 clap_audio_ports.cpp
 clap_tail.cpp
 clap_latency.cpp
+clap_presets.cpp
 )
 
 add_library(mamba_synth SHARED ${CLAP_SOURCES})
