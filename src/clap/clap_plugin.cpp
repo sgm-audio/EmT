@@ -542,9 +542,6 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
     SSMBlock::apply_ftz_daz();
     m->thread_check.mark_audio_thread();
 
-    apply_params_from_queue(m);
-    process_note_events(m, process->in_events, process->frames_count);
-
     update_bypass_state_machine(m, process->frames_count);
     refresh_conditioning(m);
 
@@ -570,7 +567,130 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
     double cur_gain = m->params[PARAM_GAIN].current.load(std::memory_order_relaxed);
     double cur_mix  = m->params[PARAM_MIX].current.load(std::memory_order_relaxed);
 
+    // Pre-scan CLAP events and SPSC queue for sample-accurate scheduling.
+    // Events with frameOffset==0 apply immediately; others are stored in
+    // on-the-fly buffers indexed by frame.
+    //
+    // For SPSC queue (main thread -> audio thread params):
+    // Drain the queue at the start; apply frameOffset==0 now, buffer others.
+    // We use a simple static-size buffer: at most 8 pending param events.
+    static constexpr uint32_t MAX_PENDING_PARAMS = 8;
+    struct PendingParam { clap_id id; double value; uint32_t frame; };
+    PendingParam pending_params[MAX_PENDING_PARAMS];
+    uint32_t num_pending = 0;
+    {
+        ParamAtom atom;
+        while (m->param_queue.pop(atom)) {
+            if (atom.id >= PARAM_COUNT) continue;
+            if (atom.frame_offset == 0) {
+                apply_param_value(m, atom.id, atom.value);
+            } else if (num_pending < MAX_PENDING_PARAMS) {
+                pending_params[num_pending].id = atom.id;
+                pending_params[num_pending].value = atom.value;
+                pending_params[num_pending].frame = atom.frame_offset;
+                num_pending++;
+            }
+        }
+    }
+
+    // For CLAP events: build a compact per-frame offset list.
+    // Max CLAP events per process() is bounded (typically < 256).
+    static constexpr uint32_t MAX_CLAP_EVENTS = 256;
+    struct FrameEvent { uint32_t frame; bool is_note_on; int32_t key;
+                        int32_t channel; float velocity; };
+    FrameEvent frame_events[MAX_CLAP_EVENTS];
+    uint32_t num_frame_events = 0;
+    if (process->in_events) {
+        const uint32_t count = process->in_events->size(process->in_events);
+        for (uint32_t i = 0; i < count && num_frame_events < MAX_CLAP_EVENTS; ++i) {
+            const clap_event_header_t* hdr = process->in_events->get(process->in_events, i);
+            if (hdr->space_id != CLAP_CORE_EVENT_SPACE_ID) continue;
+            if (hdr->type == CLAP_EVENT_NOTE_ON) {
+                const auto* ev = reinterpret_cast<const clap_event_note_t*>(hdr);
+                frame_events[num_frame_events].frame = hdr->time;
+                frame_events[num_frame_events].is_note_on = ev->velocity > 0.0f;
+                frame_events[num_frame_events].key = ev->key;
+                frame_events[num_frame_events].channel = ev->channel;
+                frame_events[num_frame_events].velocity = static_cast<float>(ev->velocity);
+                num_frame_events++;
+            } else if (hdr->type == CLAP_EVENT_NOTE_OFF) {
+                const auto* ev = reinterpret_cast<const clap_event_note_t*>(hdr);
+                frame_events[num_frame_events].frame = hdr->time;
+                frame_events[num_frame_events].is_note_on = false;
+                frame_events[num_frame_events].key = ev->key;
+                frame_events[num_frame_events].channel = ev->channel;
+                frame_events[num_frame_events].velocity = 0.0f;
+                num_frame_events++;
+            } else if (hdr->type == CLAP_EVENT_PARAM_VALUE) {
+                const auto* ev = reinterpret_cast<const clap_event_param_value_t*>(hdr);
+                if (hdr->time == 0) {
+                    apply_param_value(m, ev->param_id, ev->value);
+                } else if (num_pending < MAX_PENDING_PARAMS) {
+                    pending_params[num_pending].id = ev->param_id;
+                    pending_params[num_pending].value = ev->value;
+                    pending_params[num_pending].frame = hdr->time;
+                    num_pending++;
+                }
+            }
+        }
+    }
+    // Sort pending events by frame
+    if (num_pending > 1) {
+        for (uint32_t i = 1; i < num_pending; ++i) {
+            for (uint32_t j = i; j > 0 && pending_params[j].frame < pending_params[j-1].frame; --j) {
+                PendingParam tmp = pending_params[j];
+                pending_params[j] = pending_params[j-1];
+                pending_params[j-1] = tmp;
+            }
+        }
+    }
+    // Sort frame events by frame
+    if (num_frame_events > 1) {
+        for (uint32_t i = 1; i < num_frame_events; ++i) {
+            for (uint32_t j = i; j > 0 && frame_events[j].frame < frame_events[j-1].frame; --j) {
+                FrameEvent tmp = frame_events[j];
+                frame_events[j] = frame_events[j-1];
+                frame_events[j-1] = tmp;
+            }
+        }
+    }
+    uint32_t pending_idx = 0;
+    uint32_t frame_event_idx = 0;
+
     for (uint32_t n = 0; n < frames; ++n) {
+        // Apply pending param changes at their target frame
+        while (pending_idx < num_pending && pending_params[pending_idx].frame == n) {
+            apply_param_value(m, pending_params[pending_idx].id,
+                              pending_params[pending_idx].value);
+            pending_idx++;
+        }
+
+        // Apply CLAP events at their target frame
+        while (frame_event_idx < num_frame_events && frame_events[frame_event_idx].frame == n) {
+            const auto& fe = frame_events[frame_event_idx];
+            if (fe.is_note_on) {
+                int32_t v = allocate_voice(m);
+                if (v >= 0) {
+                    uint64_t nid = m->next_note_id++;
+                    start_voice(m, static_cast<uint32_t>(v),
+                                fe.key, fe.channel, fe.velocity, nid);
+                }
+            } else {
+                for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+                    if (m->voices[v].key == fe.key &&
+                        m->voices[v].channel == fe.channel &&
+                        (m->voices[v].stage == VOICE_ATTACK ||
+                         m->voices[v].stage == VOICE_SUSTAIN)) {
+                        m->voices[v].stage = VOICE_RELEASE;
+                        m->voice_atomics[v].stage.store(VOICE_RELEASE,
+                            std::memory_order_relaxed);
+                        break;
+                    }
+                }
+            }
+            frame_event_idx++;
+        }
+
         advance_one_pole(cur_gain, t_gain, c_gain);
         advance_one_pole(cur_mix,  t_mix,  c_mix);
 
