@@ -16,14 +16,19 @@ void PlaybackRenderer_create(PlaybackRenderer* renderer) {
     auto* ctx = new PlaybackRendererContext();
     std::memset(ctx, 0, sizeof(PlaybackRendererContext));
 
-    ctx->ssm_block = new (&ctx->ssm_storage) SSMBlock(MAX_D_STATE, MAX_D_MODEL, MAX_D_INNER, MAX_D_CONV);
+    ctx->ssm_block = new (&ctx->ssm_storage) SSMBlock(
+        MAX_D_STATE, MAX_D_MODEL, MAX_D_INNER,
+        MAX_NHEADS, MAX_HEADDIM, MAX_MIMO_RANK,
+        MAX_NUM_BC_HEADS, COND_DIM);
     ctx->buffer_fill = 0;
 
     renderer->user_data = ctx;
     renderer->render = [](PlaybackRenderer* r, float* output, size_t num_samples) {
         auto* c = static_cast<PlaybackRendererContext*>(r->user_data);
+        alignas(64) float buf[MAX_D_MODEL];
         for (size_t i = 0; i < num_samples; ++i) {
-            output[i] = c->ssm_block->process_sample(0.0f);
+            c->ssm_block->process_sample(0.0f, buf);
+            output[i] = buf[0];
         }
     };
 }

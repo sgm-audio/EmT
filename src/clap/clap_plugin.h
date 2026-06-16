@@ -6,11 +6,16 @@
 #include <cstdint>
 #include <array>
 #include <cstring>
+#include <cmath>
 
 #include "core/ssm_inference_core.h"
 #include "core/weight_loader.h"
+#include "core/arena_allocator.h"
 #include "common/ring_buffer.h"
 #include "common/seqlock.h"
+#include "common/conditioning_frame.h"
+#include "common/double_buffer_seqlock.h"
+#include "clap/clap_thread_check.h"
 #include "ara/ara_document_controller.h"
 #include "config.h"
 
@@ -25,17 +30,67 @@ enum ParamIds : clap_id {
     PARAM_COUNT = 5
 };
 
+enum ParamCurve : uint8_t {
+    PARAM_CURVE_LINEAR = 0,
+    PARAM_CURVE_LOG    = 1,
+    PARAM_CURVE_STEPPED = 2,
+};
+
 struct ParamAtom {
     clap_id id;
     double value;
     uint32_t frame_offset;
 };
 
-struct alignas(64) ConditioningFrame {
-    float tempo_bpm;
-    float key_sig;
-    float chord_one_hot[12];
-    float reserved[2];
+// Per-parameter smoothing state. The target is the latest value the
+// host automation asked for; the current is what the audio thread is
+// reading. Both are atomic so the host thread (via flush) can update
+// targets and the audio thread can read them.
+struct alignas(64) ParamSmooth {
+    std::atomic<double> target{0.0};
+    std::atomic<double> current{0.0};
+    double min_value{0.0};
+    double max_value{1.0};
+    double default_value{0.0};
+    ParamCurve curve{PARAM_CURVE_LINEAR};
+    float smooth_time_s{0.010f};
+    double coeff{0.0};
+};
+
+struct alignas(64) ActiveNote {
+    std::atomic<int32_t> key{-1};
+    std::atomic<int32_t> channel{-1};
+    std::atomic<float> velocity{0.0f};
+    std::atomic<uint64_t> note_id{0};
+    std::atomic<bool> is_pressed{false};
+};
+
+enum BypassState : uint8_t {
+    BYPASS_PROCESSING    = 0,
+    BYPASS_FADING_OUT    = 1,
+    BYPASS_BYPASSED      = 2,
+    BYPASS_FADING_IN     = 3,
+};
+
+enum VoiceState : uint8_t {
+    VOICE_IDLE     = 0,
+    VOICE_ATTACK   = 1,
+    VOICE_SUSTAIN  = 2,
+    VOICE_RELEASE  = 3,
+    VOICE_SILENT   = 4,
+};
+
+constexpr size_t kMaxWeightPath = 512;
+
+// Snapshot used for state save. The audio thread writes to the back
+// slot of a double-buffer seqlock each process() call; the main thread
+// reads from the front slot when the host asks for a state save.
+struct alignas(64) StateMirror {
+    MambaState h_state;
+    double param_values[PARAM_COUNT];
+    bool bypass_target;
+    float bypass_fade;
+    char weight_path[kMaxWeightPath];
 };
 
 struct MambaSynth {
@@ -52,29 +107,49 @@ struct MambaSynth {
 
     std::atomic<bool> weights_loaded;
 
+    // SPSC queue from main thread to audio thread for parameter changes
+    // delivered with sample-accurate offsets via params_flush().
     SPSCRingBuffer<ParamAtom, 256> param_queue;
 
+    // Per-parameter smoothing state, with cache-line alignment on the
+    // first one. The audio thread reads target/current atomically.
+    alignas(64) ParamSmooth params[PARAM_COUNT];
     std::atomic<double> param_values[PARAM_COUNT];
 
+    // Bypass state machine.
     std::atomic<bool> bypass_target;
+    alignas(64) std::atomic<uint32_t> bypass_state;
     alignas(64) std::atomic<float> bypass_fade;
-    static constexpr float BYPASS_FADE_RATE = 1.0f / 256.0f;
+    static constexpr float BYPASS_FADE_RATE = 1.0f / 64.0f;
 
-    int32_t active_note;
-    float active_velocity;
+    // Voice state (monophonic for now).
+    alignas(64) ActiveNote active_note;
 
+    // Voice envelope state machine. Audio thread only.
+    alignas(64) std::atomic<uint8_t> voice_state;
+    alignas(64) std::atomic<float> voice_env;
+    uint32_t voice_sample_count;
+    float voice_attack_rate;
+    float voice_release_rate;
+    float voice_velocity;
+    int32_t voice_key;
+
+    // Conditioning (main thread writes, audio thread reads via seqlock).
     Seqlocked<ConditioningFrame> conditioning;
-
     Seqlocked<ARAConditioningFrame> ara_conditioning;
 
-    alignas(64) std::atomic<float> smoothed_gain;
-    alignas(64) std::atomic<float> smoothed_mix;
+    // Snapshot of h_state for state save. The audio thread writes to
+    // the back slot; main thread reads from front.
+    alignas(64) DoubleBufferSeqLock<StateMirror> state_mirror;
 
     uint32_t latency;
 
-    static constexpr size_t MAX_WEIGHT_PATH = 512;
-    alignas(64) char weight_path[MAX_WEIGHT_PATH];
+    static constexpr size_t MAX_WEIGHT_PATH = kMaxWeightPath;
+    alignas(64) char weight_path[kMaxWeightPath];
     WeightLoader weight_loader;
+
+    // Host thread-check extension cache.
+    alignas(64) ThreadCheck thread_check;
 
     bool load_weights(const char* path);
 };

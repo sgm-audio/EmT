@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """
-Mamba-SSM Weight Export Validator
+Mamba-3 Weight Export Validator
 
-Loads a flat-binary weight file, reconstructs the model in PyTorch,
-and verifies that the C++ inference would produce the same output as
-the PyTorch forward pass (within quantization tolerance).
+Loads a flat-binary weight file (version 2), reconstructs the model in
+PyTorch, and verifies that the forward pass produces valid output.
 
 Usage:
-    # Basic validation of a binary against PyTorch reimplementation
-    python scripts/validate_export.py models/test_model.bin
-
-    # Full round-trip with random weights
     python scripts/export_mamba_weights.py --random-init --layers 2 \\
+        --state-dim 16 --model-dim 16 --inner-dim 32 --nheads 2 \\
         --output /tmp/test_model.bin
     python scripts/validate_export.py /tmp/test_model.bin
 """
@@ -25,15 +21,16 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(__file__))
-from export_mamba_weights import (WEIGHT_MAGIC, WEIGHT_VERSION, HEADER_SIZE,
-                                  floats_per_layer, MambaBlock, SimpleMamba)
+from export_mamba_weights import (
+    WEIGHT_MAGIC, WEIGHT_VERSION, HEADER_SIZE,
+    floats_per_layer, Mamba3Block, Mamba3Model
+)
 
-# Tolerance for float32 comparison
 ATOL = 1e-5
 RTOL = 1e-5
 
 
-def load_header(path: str):
+def load_header(path: str) -> dict:
     with open(path, 'rb') as f:
         raw = f.read(HEADER_SIZE)
     fields = struct.unpack('<9I4I4x Q', raw)
@@ -43,25 +40,31 @@ def load_header(path: str):
         'd_state': fields[2],
         'd_model': fields[3],
         'd_inner': fields[4],
-        'd_conv': fields[5],
+        'nheads': fields[5],
         'num_layers': fields[6],
-        'expansion_factor': fields[7],
+        'headdim': fields[7],
         'cond_dim': fields[8],
         'reserved': list(fields[9:13]),
         'weight_data_size': fields[13],
     }
 
 
-def load_weights_into_model(model: SimpleMamba, path: str) -> SimpleMamba:
-    """Load flat-binary weights into a PyTorch model for verification."""
+def load_weights_into_model(model: Mamba3Model, path: str) -> Mamba3Model:
+    """Load flat-binary weights into a PyTorch Mamba-3 model."""
     hdr = load_header(path)
     ds = hdr['d_state']
     dm = hdr['d_model']
     di = hdr['d_inner']
-    dc = hdr['d_conv']
+    nh = hdr['nheads']
+    hd = hdr['headdim']
     nl = hdr['num_layers']
-    fpl = floats_per_layer(ds, dm, di, dc)
+    cd = hdr['cond_dim']
+    mr = 1  # mimo_rank (fixed at 1 for now)
+    nra = ds // 2
 
+    in_proj_out = di * 2 + nh * mr * ds * 2 + nh * 3 + nra
+
+    fpl = floats_per_layer(ds, dm, di, nh, mr, hd, cd)
     file_size = os.path.getsize(path)
     expected = HEADER_SIZE + fpl * nl * 4
     assert file_size == expected, (
@@ -84,53 +87,52 @@ def load_weights_into_model(model: SimpleMamba, path: str) -> SimpleMamba:
             offset += n
             return data
 
-        # 1. A_log
-        block.A_log.data = read((ds,))
-        # 2. D_proj
-        block.D_proj.data = read((ds,))
-        # 3. dt_bias
-        block.dt_bias.data = read((ds,))
-        # 4. dt_proj_w
-        block.dt_proj_w.data = read((ds, di))
-        # 5. B_proj_w
-        block.B_proj_w.data = read((di, ds))
-        # 6. C_proj_w
-        block.C_proj_w.data = read((di, ds))
-        # 7. conv1d_w: (dc, di) -> reshape to conv weight (di, 1, dc)
-        conv_w = read((dc, di)).t().contiguous().view(di, 1, dc)
-        block.conv1d.weight.data = conv_w
-        # 8. conv1d_b
-        block.conv1d.bias.data = read((di,))
-        # 9. W_in.weight (di, dm)
-        block.W_in.weight.data = read((di, dm))
-        # 10. W_out.weight (dm, di)
-        block.W_out.weight.data = read((dm, di))
-        # 11. W_ssm.weight (dm, ds)
-        block.W_ssm.weight.data = read((dm, ds))
-        # 12. b_in
-        block.W_in.bias.data = read((di,))
-        # 13. cond_proj_dt
-        block.cond_proj_dt.data = read((ds, hdr['cond_dim']))
-        # 14. cond_proj_B
-        block.cond_proj_B.data = read((ds, hdr['cond_dim']))
+        # 1. in_proj_w: (in_proj_out, d_model)
+        block.in_proj.weight.data = read((in_proj_out, dm))
+        # 2. dt_bias: (nheads,)
+        block.dt_bias.data = read((nh,))
+        # 3. B_bias: (nheads, mimo_rank, d_state)
+        block.B_bias.data = read((nh, mr, ds))
+        # 4. C_bias: (nheads, mimo_rank, d_state)
+        block.C_bias.data = read((nh, mr, ds))
+        # 5. B_norm_weight: (d_state,)
+        block.B_norm_weight.data = read((ds,))
+        # 6. C_norm_weight: (d_state,)
+        block.C_norm_weight.data = read((ds,))
+        # 7. mimo_x: (nheads, mimo_rank, headdim)
+        block.mimo_x.data = read((nh, mr, hd))
+        # 8. mimo_z: (nheads, mimo_rank, headdim)
+        block.mimo_z.data = read((nh, mr, hd))
+        # 9. mimo_o: (nheads, mimo_rank, headdim)
+        block.mimo_o.data = read((nh, mr, hd))
+        # 10. D_proj: (nheads,)
+        block.D_proj.data = read((nh,))
+        # 11. out_proj_w: (d_model, d_inner)
+        block.out_proj.weight.data = read((dm, di))
+        # 12. film_proj_w: (2*d_model, d_cond)
+        block.film_proj.weight.data = read((2 * dm, cd))
+        # 13. dt_film_proj_w: (2*nheads, d_cond)
+        block.dt_film_proj.weight.data = read((2 * nh, cd))
 
-    assert offset == floats_per_layer(ds, dm, di, dc, hdr['cond_dim']) * nl, (
-        f"Read {offset} floats, expected "
-        f"{floats_per_layer(ds, dm, di, dc, hdr['cond_dim']) * nl}")
+    assert offset == fpl * nl, (
+        f"Read {offset} floats, expected {fpl * nl}")
     return model
 
 
-def validate(path: str, batch: int = 2, seq_len: int = 64):
+def validate(path: str, batch: int = 1, seq_len: int = 64):
     """Validate that flat-binary round-trips through PyTorch correctly."""
     hdr = load_header(path)
     assert hdr['magic'] == WEIGHT_MAGIC, f"Bad magic: {hdr['magic']:#x}"
-    assert hdr['version'] == WEIGHT_VERSION, f"Bad version: {hdr['version']}"
+    assert hdr['version'] == WEIGHT_VERSION, (
+        f"Bad version: {hdr['version']} (expected {WEIGHT_VERSION})")
 
     print(f"Header: layers={hdr['num_layers']} ds={hdr['d_state']} "
-          f"dm={hdr['d_model']} di={hdr['d_inner']} dc={hdr['d_conv']}")
+          f"dm={hdr['d_model']} di={hdr['d_inner']} "
+          f"nh={hdr['nheads']} hd={hdr['headdim']}")
 
-    model = SimpleMamba(hdr['d_state'], hdr['d_model'],
-                        hdr['d_inner'], hdr['d_conv'], hdr['num_layers'])
+    model = Mamba3Model(hdr['d_state'], hdr['d_model'],
+                        hdr['d_inner'], hdr['nheads'], hdr['headdim'],
+                        hdr['num_layers'], cond_dim=hdr['cond_dim'])
     load_weights_into_model(model, path)
     model.eval()
 
@@ -150,17 +152,20 @@ def validate(path: str, batch: int = 2, seq_len: int = 64):
         y2 = model(x2)
     assert torch.allclose(y, y2, atol=ATOL), "Non-deterministic output!"
 
+    output_sum = y.abs().sum().item()
     print(f"Forward pass OK: shape={list(y.shape)} "
           f"range=[{y.min().item():.4f}, {y.max().item():.4f}]")
-    print(f"Non-zero output: {y.abs().sum().item() > 0}")
+    print(f"Non-zero output: {output_sum > 0}")
     print(f"Deterministic: yes")
     print(f"Validation PASSED")
 
+    return output_sum > 0
+
 
 def main():
-    p = argparse.ArgumentParser(description="Validate exported Mamba weights")
+    p = argparse.ArgumentParser(description="Validate exported Mamba-3 weights")
     p.add_argument('path', help='Path to .bin weight file')
-    p.add_argument('--batch', type=int, default=2)
+    p.add_argument('--batch', type=int, default=1)
     p.add_argument('--seq-len', type=int, default=64)
     args = p.parse_args()
 
@@ -168,7 +173,8 @@ def main():
         print(f"ERROR: {args.path} not found")
         sys.exit(1)
 
-    validate(args.path, args.batch, args.seq_len)
+    ok = validate(args.path, args.batch, args.seq_len)
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == '__main__':

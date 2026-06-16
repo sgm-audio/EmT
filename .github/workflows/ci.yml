@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ python3 python3-pip
+
+      - name: Install Python dependencies
+        run: |
+          pip3 install numpy torch --break-system-packages
+
+      - name: Configure CMake
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel $(nproc)
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure --timeout 120
+
+      - name: Run benchmark
+        run: ./build/tests/benchmark_ssm_block
+
+      - name: Generate test weights
+        run: |
+          python3 scripts/export_mamba_weights.py \
+            --state-dim 16 --model-dim 16 --inner-dim 32 --conv-dim 4 \
+            --layers 2 --cond-dim 16 --random-init \
+            --output models/ci_test_model.bin
+
+      - name: Validate weight export
+        run: python3 scripts/validate_export.py models/ci_test_model.bin
+
+      - name: clap-validator
+        run: |
+          if command -v clap-validator &> /dev/null; then
+            clap-validator ./build/src/clap/MambaSynth.clap
+          else
+            echo "clap-validator not installed — skipping"
+            echo "Install from: https://github.com/free-audio/clap"
+          fi

@@ -17,7 +17,11 @@ void EditorRenderer_create(EditorRenderer* renderer, ARAHostDocument* doc) {
     std::memset(ctx, 0, sizeof(EditorRendererContext));
 
     ctx->ring_capacity = 8192;
+#if defined(_MSC_VER)
+    ctx->ring_buffer = static_cast<float*>(::_aligned_malloc(ctx->ring_capacity * sizeof(float), 64));
+#else
     ctx->ring_buffer = static_cast<float*>(std::aligned_alloc(64, ctx->ring_capacity * sizeof(float)));
+#endif
     ctx->ring_write_pos = 0;
     ctx->document = doc;
 
@@ -33,7 +37,11 @@ void EditorRenderer_create(EditorRenderer* renderer, ARAHostDocument* doc) {
 
 void EditorRenderer_destroy(EditorRenderer* renderer) {
     auto* ctx = static_cast<EditorRendererContext*>(renderer->user_data);
+#if defined(_MSC_VER)
+    ::_aligned_free(ctx->ring_buffer);
+#else
     std::free(ctx->ring_buffer);
+#endif
     std::free(ctx);
 }
 

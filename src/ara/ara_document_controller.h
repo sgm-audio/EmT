@@ -1,56 +1,77 @@
-#ifndef ARA_DOCUMENT_CONTROLLER_H
-#define ARA_DOCUMENT_CONTROLLER_H
+#ifndef MAMBA_ARA_DOCUMENT_CONTROLLER_H
+#define MAMBA_ARA_DOCUMENT_CONTROLLER_H
 
+#include "ara_types.h"
+#include "common/seqlock.h"
+#include "common/conditioning_frame.h"
 #include <cstdint>
+#include <cstddef>
 
 namespace mamba {
 
-struct alignas(64) ARAConditioningFrame {
-    float tempo_bpm;
-    float key_sig;
-    float chord_one_hot[12];
-    float reserved[2];
-};
+// ---------------------------------------------------------------------------
+// ARADocumentControllerStub — stub document controller.
+//
+// Lifecycle (mirrors ARA::PlugIn::DocumentController):
+//   createDocument()   -> allocates a per-document context
+//   destroyDocument()  -> frees the context
+//   updateMusicalContext() -> pushes ARAConditioningFrame to the seqlock
+//
+// In real-SDK mode, this class would inherit from
+// ARA::PlugIn::DocumentController instead.
+// ---------------------------------------------------------------------------
 
-template<typename T> struct Seqlocked;
-
-struct ARADocumentController {
-uint32_t version;
-uint32_t document_size;
-void* document_instance;
-
-bool (*createDocument)(ARADocumentController* controller, const char* file_path);
-bool (*loadDocument)(ARADocumentController* controller, const char* file_path);
-bool (*saveDocument)(ARADocumentController* controller, const char* file_path);
-void (*destroyDocument)(ARADocumentController* controller);
-};
-
-class ARAHostDocument {
+class ARADocumentControllerStub {
 public:
-    ARAHostDocument();
-    ~ARAHostDocument();
+    ARADocumentControllerStub();
+    ~ARADocumentControllerStub();
 
-    void set_tempo(float bpm);
-    void set_key_signature(float key);
-    void set_chord(const float* chord_one_hot);
+    // Document lifecycle.
+    ARADocumentID createDocument();
+    void destroyDocument(ARADocumentID doc_id);
+    ARADocumentID activeDocument() const { return active_doc_; }
 
-    float get_tempo() const;
-    float get_key_signature() const;
-    void get_chord(float* out_chord) const;
+    // Musical context update — pushes to the conditioning seqlock.
+    void updateMusicalContext(float tempo_bpm, float key_sig,
+                              const float* chord_one_hot);
+
+    // ARA seqlock — the audio thread reads conditioning from here.
+    // The CLAP plugin's process() calls this to get the seqlock pointer.
+    Seqlocked<ARAConditioningFrame>* conditioningSeqlock() {
+        return &conditioning_sl_;
+    }
+
+    // Renderer access (created by createPlaybackRenderer / createEditorRenderer).
+    void* playbackRendererData() const { return pb_renderer_data_; }
+    void setPlaybackRendererData(void* d) { pb_renderer_data_ = d; }
+    void* editorRendererData() const { return ed_renderer_data_; }
+    void setEditorRendererData(void* d) { ed_renderer_data_ = d; }
 
 private:
-    float tempo_bpm_;
-    float key_sig_;
-    float chord_[12];
+    ARADocumentID next_doc_id_;
+    ARADocumentID active_doc_;
+    Seqlocked<ARAConditioningFrame> conditioning_sl_;
+    void* pb_renderer_data_;
+    void* ed_renderer_data_;
 };
+
+// ---------------------------------------------------------------------------
+// Global-conditioning free functions (backward-compatible with existing
+// CLAP plugin code that includes the old ara_document_controller.h API).
+// These delegate to the global ARADocumentControllerStub instance.
+// ---------------------------------------------------------------------------
 
 void ARA_set_tempo(float bpm);
 void ARA_set_key_signature(float key);
 void ARA_set_chord(const float* chord_one_hot);
 bool ARA_get_conditioning(float& tempo, float& key, float* chord);
 Seqlocked<ARAConditioningFrame>* ARA_get_conditioning_seqlock();
+void ARA_write_conditioning_to(Seqlocked<ARAConditioningFrame>* target,
+                               float bpm, float key,
+                               const float* chord_one_hot);
 
-void ARA_write_conditioning_to(Seqlocked<ARAConditioningFrame>* target, float bpm, float key, const float* chord_one_hot);
+// Get/init the global document controller (used by CLAP bridge).
+ARADocumentControllerStub* ARA_get_document_controller();
 
 } // namespace mamba
 
