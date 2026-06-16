@@ -449,7 +449,12 @@ TEST(WeightLoaderPath, MAMBAWeightsEnvVar) {
     hdr.d_state = 1; hdr.d_model = 1; hdr.d_inner = 1;
     hdr.nheads = 1; hdr.num_layers = 1; hdr.headdim = 1;
     hdr.cond_dim = 1;
-    size_t fpl = 1*1 + 1 + 1*1*1 + 1*1*1 + 1 + 1 + 1*1*1 + 1*1*1 + 1*1*1 + 1 + 1*1 + 2*1*1 + 2*1*1;
+    // Must match bytes_per_layer() which uses MAX_MIMO_RANK and MAX_NUM_ROPE_ANGLES
+    size_t ds = hdr.d_state, dm = hdr.d_model, di = hdr.d_inner;
+    size_t nh = hdr.nheads, hd = hdr.headdim, cd = hdr.cond_dim;
+    size_t in_proj_out = di * 2 + nh * MAX_MIMO_RANK * ds * 2 + nh * 3 + MAX_NUM_ROPE_ANGLES;
+    size_t fpl = in_proj_out * dm + nh + nh * MAX_MIMO_RANK * ds * 2 + ds * 2
+               + nh * MAX_MIMO_RANK * hd * 3 + nh + dm * di + 2 * dm * cd + 2 * nh * cd;
     hdr.weight_data_size = fpl * sizeof(float);
     std::FILE* f = std::fopen(tmp_path, "wb");
     std::fwrite(&hdr, sizeof(hdr), 1, f);

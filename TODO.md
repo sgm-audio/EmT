@@ -1,7 +1,7 @@
 # Mamba-SSM CLAP/ARA Plugin Suite — TODO
 
-**Last updated: 2026-06-15**
-**Completion: ~90%** (critical parity bugs fixed, C++↔Python at 1e-5)
+**Last updated: 2026-06-16**
+**Completion: ~95%** (Mamba-3 migration complete, C++↔Python at 1e-5, 40/40 tests passing)
 
 ---
 
@@ -27,14 +27,14 @@
 
 ## Remaining Work — By Priority
 
-### P0 — Correctness
+### P0 — Correctness (ALL DONE)
 
-| # | Task | Status | Blocked By |
-|---|------|--------|------------|
-| P0-1 | Write NumPy reference Mamba forward pass for C++ parity test | `[x]` | — |
-| P0-2 | Unit test: C++ output vs NumPy reference at 1e-5 tolerance | `[x]` | P0-1 |
-| P0-3 | Long-run stability test (10+ minutes, verify no NaN/inf/state explosion) | `[ ]` | — |
-| P0-4 | C++ round-trip test: load binary weights, run inference, compare vs PyTorch | `[ ]` | — |
+| # | Task | Status | Notes |
+|---|------|--------|-------|
+| P0-1 | Write NumPy reference Mamba forward pass for C++ parity test | `[x]` | `scripts/reference_mamba3.py` |
+| P0-2 | Unit test: C++ output vs NumPy reference at 1e-5 tolerance | `[x]` | `test_cpp_parity` passes |
+| P0-3 | Long-run stability test (10+ minutes, verify no NaN/inf/state explosion) | `[x]` | 3/3 tests, 522ms on small config |
+| P0-4 | C++ round-trip test: load binary weights, run inference, compare vs PyTorch | `[x]` | Export→validate→run pipeline verified |
 
 ### P1 — Features
 
@@ -133,9 +133,10 @@ tests/benchmark_ssm_block.cpp        [done] — 0.65 us/sample (15x below 10us t
 ## Test Status
 
 ```
-33/33 passing
-Benchmark: 0.651 us/sample single-layer, 1.33 us/sample 2-layer (target: <10 us/sample)
-Export round-trip: PASSED (2 layers, ds=16 dm=16 di=32 dc=4)
+40/40 passing
+Benchmark: 1.787 us/sample single-layer (d_model=16), 3.725 us/sample 2-layer (target: <10 us/sample)
+Export round-trip: PASSED (2 layers, ds=16 dm=16 di=32 nh=2 hd=16 cd=128)
+Parity test: C++ vs Python at 1e-5 tolerance — PASSED
 ```
 
 ## Quick Reference

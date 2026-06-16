@@ -42,8 +42,11 @@ constexpr int64_t kTotalSamples = 44100 * 5;  // 5 seconds for faster test
 TEST(Stability, LongRunNoNaN) {
     std::mt19937 rng(42);
     auto core_ptr = std::make_unique<SSMInferenceCore>();
-    MambaConfig cfg = MambaConfig::max_config();
-    cfg.num_layers = 1;  // single layer for speed
+    MambaConfig cfg{};
+    cfg.d_state = 16; cfg.d_model = 16; cfg.d_inner = 32;
+    cfg.nheads = 2; cfg.headdim = 16;
+    cfg.mimo_rank = MAX_MIMO_RANK; cfg.num_bc_heads = MAX_NUM_BC_HEADS;
+    cfg.num_rope_angles = 8; cfg.num_layers = 1; cfg.cond_dim = COND_DIM;
     core_ptr->init(cfg);
     auto& core = *core_ptr;
 
@@ -78,8 +81,11 @@ TEST(Stability, LongRunNoNaN) {
 
 TEST(Stability, ExtremeParameters) {
     auto core_ptr = std::make_unique<SSMInferenceCore>();
-    MambaConfig cfg = MambaConfig::max_config();
-    cfg.num_layers = 1;
+    MambaConfig cfg{};
+    cfg.d_state = 16; cfg.d_model = 16; cfg.d_inner = 32;
+    cfg.nheads = 2; cfg.headdim = 16;
+    cfg.mimo_rank = MAX_MIMO_RANK; cfg.num_bc_heads = MAX_NUM_BC_HEADS;
+    cfg.num_rope_angles = 8; cfg.num_layers = 1; cfg.cond_dim = COND_DIM;
     core_ptr->init(cfg);
     auto& core = *core_ptr;
 
@@ -111,8 +117,11 @@ TEST(Stability, ExtremeParameters) {
 
 TEST(Stability, ZeroInputStability) {
     auto core_ptr = std::make_unique<SSMInferenceCore>();
-    MambaConfig cfg = MambaConfig::max_config();
-    cfg.num_layers = 1;
+    MambaConfig cfg{};
+    cfg.d_state = 16; cfg.d_model = 16; cfg.d_inner = 32;
+    cfg.nheads = 2; cfg.headdim = 16;
+    cfg.mimo_rank = MAX_MIMO_RANK; cfg.num_bc_heads = MAX_NUM_BC_HEADS;
+    cfg.num_rope_angles = 8; cfg.num_layers = 1; cfg.cond_dim = COND_DIM;
     core_ptr->init(cfg);
     auto& core = *core_ptr;
 

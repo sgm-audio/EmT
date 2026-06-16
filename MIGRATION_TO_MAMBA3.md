@@ -14,11 +14,11 @@
 | 2 | Weight Loading (`weight_loader.h/.cpp`) | ✅ **DONE** |
 | 3 | Multi-Layer Core (`ssm_inference_core.h/.cpp`) | ✅ **DONE** |
 | 4 | CLAP Plugin Shell (`clap_plugin.cpp`, `clap_latency.cpp`, `conditioning_frame.h`) | ✅ **DONE** |
-| 5 | Python Export Pipeline (`export_mamba_weights.py`, `validate_export.py`) | ⬜ Pending |
-| 6 | Tests (6 files need rewrite) | ⬜ Pending |
-| 7 | ss_block.cpp `process_sample()` Mamba-3 forward pass | ✅ **DONE** (initial implementation) |
+| 5 | Python Export Pipeline (`export_mamba_weights.py`, `validate_export.py`) | ✅ **DONE** |
+| 6 | Tests (6 files) | ✅ **DONE** — 40/40 passing |
+| 7 | ss_block.cpp `process_sample()` Mamba-3 forward pass | ✅ **DONE** |
 
-**Build status:** Core library + CLAP plugin (`mamba_synth`) compiles and links. Tests need Phase 6 rewrite.
+**Build status:** Core library + CLAP plugin (`mamba_synth`) compiles and links. **40/40 tests pass.** Benchmark: 1.79 us/sample single-layer, 3.73 us/sample 2-layer.
 
 ---
 
@@ -519,19 +519,19 @@ These files/systems require **zero modifications**:
 
 ---
 
-## Estimated Timeline
+## Estimated Timeline (ALL COMPLETED)
 
-| Phase | Files | Hours |
-|-------|-------|-------|
-| 1. Config + SSMBlock types/header | `config.h`, `ssm_block.h` | 0.5 |
-| 2. SSMBlock process_sample/block rewrite | `ssm_block.cpp` | 2.0 |
-| 3. SSMInferenceCore update | `ssm_inference_core.h/cpp` | 1.0 |
-| 4. Weight loader rewrite | `weight_loader.h/cpp` | 1.5 |
-| 5. Export/validate rewrite | `export_mamba_weights.py`, `validate_export.py` | 1.5 |
-| 6. CLAP plugin integration | `clap_plugin.cpp`, `clap_latency.cpp` | 0.5 |
-| 7. Tests rewrite | 5 test files | 2.0 |
-| 8. Build, test, debug, benchmark | — | 1.5 |
-| **Total** | **~16 files** | **~10 hours** |
+| Phase | Files | Hours | Status |
+|-------|-------|-------|--------|
+| 1. Config + SSMBlock types/header | `config.h`, `ssm_block.h` | 0.5 | ✅ |
+| 2. SSMBlock process_sample/block rewrite | `ssm_block.cpp` | 2.0 | ✅ |
+| 3. SSMInferenceCore update | `ssm_inference_core.h/cpp` | 1.0 | ✅ |
+| 4. Weight loader rewrite | `weight_loader.h/cpp` | 1.5 | ✅ |
+| 5. Export/validate rewrite | `export_mamba_weights.py`, `validate_export.py` | 1.5 | ✅ |
+| 6. CLAP plugin integration | `clap_plugin.cpp`, `clap_latency.cpp` | 0.5 | ✅ |
+| 7. Tests rewrite | 5 test files | 2.0 | ✅ |
+| 8. Build, test, debug, benchmark | — | 1.5 | ✅ |
+| **Total** | **~16 files** | **~10 hours** | **ALL DONE** |
 
 ---
 
