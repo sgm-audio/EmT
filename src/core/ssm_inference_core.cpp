@@ -25,16 +25,24 @@ void SSMInferenceCore::init(const MambaConfig& cfg) {
     }
 
     cfg_ = cfg;
+    // Clamp to MAX limits
     if (cfg_.num_layers > MAX_LAYERS) cfg_.num_layers = MAX_LAYERS;
     if (cfg_.d_state > MAX_D_STATE) cfg_.d_state = MAX_D_STATE;
     if (cfg_.d_model > MAX_D_MODEL) cfg_.d_model = MAX_D_MODEL;
     if (cfg_.d_inner > MAX_D_INNER) cfg_.d_inner = MAX_D_INNER;
-    if (cfg_.d_conv > MAX_D_CONV) cfg_.d_conv = MAX_D_CONV;
+    if (cfg_.nheads > MAX_NHEADS) cfg_.nheads = MAX_NHEADS;
+    if (cfg_.headdim > MAX_HEADDIM) cfg_.headdim = MAX_HEADDIM;
+    if (cfg_.mimo_rank > MAX_MIMO_RANK) cfg_.mimo_rank = MAX_MIMO_RANK;
+    if (cfg_.num_bc_heads > MAX_NUM_BC_HEADS) cfg_.num_bc_heads = MAX_NUM_BC_HEADS;
+    if (cfg_.num_rope_angles > MAX_NUM_ROPE_ANGLES) cfg_.num_rope_angles = MAX_NUM_ROPE_ANGLES;
     if (cfg_.cond_dim > COND_DIM) cfg_.cond_dim = COND_DIM;
 
     layers_ = reinterpret_cast<SSMBlock*>(layers_storage_);
     for (size_t i = 0; i < cfg_.num_layers; ++i) {
-        new (&layers_[i]) SSMBlock(cfg_.d_state, cfg_.d_model, cfg_.d_inner, cfg_.d_conv);
+        new (&layers_[i]) SSMBlock(
+            cfg_.d_state, cfg_.d_model, cfg_.d_inner,
+            cfg_.nheads, cfg_.headdim, cfg_.mimo_rank,
+            cfg_.num_bc_heads, cfg_.cond_dim);
         num_constructed_++;
     }
 
@@ -42,7 +50,7 @@ void SSMInferenceCore::init(const MambaConfig& cfg) {
 }
 
 SSMInferenceCore::~SSMInferenceCore() {
-    for (size_t i = 0; i < num_constructed_;++i) {
+    for (size_t i = 0; i < num_constructed_; ++i) {
         layers_[i].~SSMBlock();
     }
 }
@@ -53,17 +61,51 @@ void SSMInferenceCore::reset() {
     }
 }
 
-float SSMInferenceCore::process_sample(float input) {
-    float x = input;
-    for (size_t i = 0; i < cfg_.num_layers; ++i) {
-        x = layers_[i].process_sample(x);
+void SSMInferenceCore::process_sample(float input, float* output) {
+    if (cfg_.num_layers == 0) {
+        output[0] = input;
+        return;
     }
-    return x;
+    alignas(64) float buf[MAX_D_MODEL];
+    layers_[0].process_sample(input, buf);
+    for (size_t i = 1; i < cfg_.num_layers; ++i) {
+        // Sum d_model outputs to mono for next layer's scalar input
+        float next = 0.0f;
+        for (size_t j = 0; j < cfg_.d_model; ++j) {
+            next += buf[j];
+        }
+        layers_[i].process_sample(next, buf);
+    }
+    std::copy(buf, buf + cfg_.d_model, output);
 }
 
 void SSMInferenceCore::process_block(const float* input, float* output, size_t size) {
-    for (size_t n = 0; n < size; ++n) {
-        output[n] = process_sample(input[n]);
+    if (cfg_.num_layers == 0) {
+        if (output != input) {
+            std::memcpy(output, input, size * sizeof(float));
+        }
+        return;
+    }
+    if (cfg_.num_layers == 1) {
+        layers_[0].process_block(input, output, size);
+        return;
+    }
+    alignas(64) float buf_dm[MAX_BLOCK_SIZE * MAX_D_MODEL];
+    alignas(64) float buf_mono[MAX_BLOCK_SIZE];
+    layers_[0].process_block(input, buf_dm, size);
+    for (size_t i = 1; i < cfg_.num_layers; ++i) {
+        for (size_t t = 0; t < size; ++t) {
+            float sum = 0.0f;
+            for (size_t j = 0; j < cfg_.d_model; ++j) {
+                sum += buf_dm[t * cfg_.d_model + j];
+            }
+            buf_mono[t] = sum;
+        }
+        if (i == cfg_.num_layers - 1) {
+            layers_[i].process_block(buf_mono, output, size);
+        } else {
+            layers_[i].process_block(buf_mono, buf_dm, size);
+        }
     }
 }
 
