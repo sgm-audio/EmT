@@ -12,7 +12,7 @@
 namespace {
 
 void set_mxcsr_ftz_daz_impl() {
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) && (defined(__x86_64__) || defined(_M_X64) || defined(__i386__))
     unsigned int mxcsr = _mm_getcsr();
     mxcsr |= 0x8040;
     _mm_setcsr(mxcsr);
@@ -21,6 +21,13 @@ void set_mxcsr_ftz_daz_impl() {
     __asm__ __volatile__ ("stmxcsr %0" : "=m"(mxcsr));
     mxcsr |= 0x8040;
     __asm__ __volatile__ ("ldmxcsr %0" : "=m"(mxcsr));
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    // ARM: Flush-to-Zero (FZ) bit in FPCR, bit 24.
+    // DAZ is not needed on ARM — FZ alone flushes all denormals.
+    uint64_t fpcr;
+    __asm__ __volatile__ ("mrs %0, fpcr" : "=r"(fpcr));
+    fpcr |= (uint64_t{1} << 24);  // FZ: flush-to-zero
+    __asm__ __volatile__ ("msr fpcr, %0" : : "r"(fpcr));
 #endif
 }
 
