@@ -106,12 +106,10 @@ void SSMBlock::process_sample(float input, float* output) {
     // Broadcast scalar input to d_model channels, optionally modulated
     // by conditioning-dependent gamma and beta.
     if (conditioning_active_) {
+        const float* cond_ptr = cond_.data();
         for (size_t j = 0; j < d_model_; ++j) {
-            float gamma = 0.0f, beta = 0.0f;
-            for (size_t k = 0; k < d_cond_; ++k) {
-                gamma += weights_.film_proj_w[2 * j][k] * cond_[k];
-                beta  += weights_.film_proj_w[2 * j + 1][k] * cond_[k];
-            }
+            float gamma = simd::dot_product(weights_.film_proj_w[2 * j], cond_ptr, d_cond_);
+            float beta  = simd::dot_product(weights_.film_proj_w[2 * j + 1], cond_ptr, d_cond_);
             u_film_[j] = input * (1.0f + gamma) + beta;
         }
     } else {
@@ -135,11 +133,8 @@ void SSMBlock::process_sample(float input, float* output) {
                            + nheads_ * 3
                            + num_rope_angles_;
     for (size_t out_idx = 0; out_idx < in_proj_out_dim; ++out_idx) {
-        float sum = 0.0f;
-        for (size_t j = 0; j < d_model_; ++j) {
-            sum += weights_.in_proj_w[out_idx][j] * u_film_[j];
-        }
-        in_proj_out_[out_idx] = sum;
+        in_proj_out_[out_idx] = simd::dot_product(
+            weights_.in_proj_w[out_idx], u_film_.data(), d_model_);
     }
 
     // Split in_proj output into components
@@ -317,12 +312,7 @@ void SSMBlock::process_sample(float input, float* output) {
     // ===== Step 7: Output projection + residual =====
     // out = out_proj(concat_head(y)) + residual (identity skip)
     for (size_t j = 0; j < d_model_; ++j) {
-        float sum = 0.0f;
-        // out_proj_w: [d_model, d_inner]
-        // concat_head(y) is d_inner elements (nheads * headdim)
-        for (size_t i = 0; i < d_inner_; ++i) {
-            sum += weights_.out_proj_w[j][i] * y_head_[i];
-        }
+        float sum = simd::dot_product(weights_.out_proj_w[j], y_head_.data(), d_inner_);
         // D skip connection (per-head, broadcast to d_model)
         if (j < nheads_) {
             sum += weights_.D_proj[j] * x_ptr[j * headdim_];  // simplified skip
@@ -333,9 +323,7 @@ void SSMBlock::process_sample(float input, float* output) {
     }
 
     // Apply gain and copy to output
-    for (size_t j = 0; j < d_model_; ++j) {
-        output[j] = out_[j] * params_.gain;
-    }
+    simd::scale(output, out_.data(), params_.gain, d_model_);
 
     // ===== Step 8: Periodic state normalization =====
     sample_count_++;
