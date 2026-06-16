@@ -57,14 +57,6 @@ struct alignas(64) ParamSmooth {
     double coeff{0.0};
 };
 
-struct alignas(64) ActiveNote {
-    std::atomic<int32_t> key{-1};
-    std::atomic<int32_t> channel{-1};
-    std::atomic<float> velocity{0.0f};
-    std::atomic<uint64_t> note_id{0};
-    std::atomic<bool> is_pressed{false};
-};
-
 enum BypassState : uint8_t {
     BYPASS_PROCESSING    = 0,
     BYPASS_FADING_OUT    = 1,
@@ -80,17 +72,54 @@ enum VoiceState : uint8_t {
     VOICE_SILENT   = 4,
 };
 
+static constexpr uint32_t MAX_VOICES = 8;
+
+// Per-voice state (audio thread only, not atomic).
+// Each voice holds its own SSM state snapshot for save/restore with
+// the shared SSMInferenceCore.
+struct alignas(64) Voice {
+    MambaState ssm_state;       // SSM state snapshot
+    float env;                  // envelope amplitude 0..1
+    float attack_rate;          // envelope attack increment per sample
+    float release_rate;         // envelope release decrement per sample
+    uint8_t stage;              // VoiceState: IDLE/ATTACK/SUSTAIN/RELEASE/SILENT
+    float velocity;             // note velocity 0..1
+    int32_t key;                // MIDI key
+    int32_t channel;            // MIDI channel
+    uint64_t note_id;           // unique note ID for matching note-off
+};
+
+// Per-voice snapshot for state save (trivially copyable for seqlock).
+struct alignas(64) VoiceSnapshot {
+    MambaState ssm_state;
+    float env;
+    uint8_t stage;  // VoiceState
+    uint8_t pad[3]; // padding
+};
+
 constexpr size_t kMaxWeightPath = 512;
 
 // Snapshot used for state save. The audio thread writes to the back
 // slot of a double-buffer seqlock each process() call; the main thread
 // reads from the front slot when the host asks for a state save.
+// Must be trivially copyable for DoubleBufferSeqLock.
 struct alignas(64) StateMirror {
-    MambaState h_state;
+    VoiceSnapshot voice_snapshots[MAX_VOICES];
     double param_values[PARAM_COUNT];
     bool bypass_target;
     float bypass_fade;
     char weight_path[kMaxWeightPath];
+};
+
+// Per-voice atomic flags visible to the main thread. NOT part of
+// StateMirror (to keep it trivially copyable). Updated by audio thread,
+// read by main thread for UI.
+struct alignas(64) VoiceAtomics {
+    std::atomic<uint8_t> stage{VOICE_IDLE};
+    std::atomic<float> env{0.0f};
+    std::atomic<int32_t> key{-1};
+    std::atomic<int32_t> channel{-1};
+    std::atomic<float> velocity{0.0f};
 };
 
 struct MambaSynth {
@@ -122,17 +151,15 @@ struct MambaSynth {
     alignas(64) std::atomic<float> bypass_fade;
     static constexpr float BYPASS_FADE_RATE = 1.0f / 64.0f;
 
-    // Voice state (monophonic for now).
-    alignas(64) ActiveNote active_note;
+    // Voice pool: N voices sharing one SSMInferenceCore.
+    // Each voice has its own SSM state (saved/restored per-sample).
+    // The atomic mirrors are for the main thread (state save, UI).
+    alignas(64) Voice voices[MAX_VOICES];
+    alignas(64) VoiceAtomics voice_atomics[MAX_VOICES];
+    uint64_t next_note_id;      // monotonic, for matching note-on/off
 
-    // Voice envelope state machine. Audio thread only.
-    alignas(64) std::atomic<uint8_t> voice_state;
-    alignas(64) std::atomic<float> voice_env;
-    uint32_t voice_sample_count;
-    float voice_attack_rate;
-    float voice_release_rate;
-    float voice_velocity;
-    int32_t voice_key;
+    static constexpr float VOICE_ATTACK_RATE  = 1.0f / 1024.0f;
+    static constexpr float VOICE_RELEASE_RATE = 1.0f / 4096.0f;
 
     // Conditioning (main thread writes, audio thread reads via seqlock).
     Seqlocked<ConditioningFrame> conditioning;

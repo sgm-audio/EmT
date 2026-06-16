@@ -14,23 +14,23 @@ static MambaSynth* get_synth(const clap_plugin_t* plugin) {
 //   uint32 magic   = 0x4D424D53   'MBM S'  -- "Mamba Synth State"
 //   uint32 version = (MAJ<<16)|(MIN<<8)|PATCH
 //   uint32 reserved = 0           (alignment / future flags)
-//   uint32 schema  = SCHEMA_V1
+//   uint32 schema  = SCHEMA_V2 (V1 = monophonic, V2 = polyphonic)
+//   uint32 num_voices             (V2: must == MAX_VOICES)
 //   uint32 param_count
 //   double param_values[param_count]
 //   uint32 bypass_target (0/1)
 //   float  bypass_fade
 //   uint32 h_state_present (0/1)
-//   MambaState h_state (if present)
+//   MambaState h_state[num_voices] (if present, V2)
+//   float  voice_envs[num_voices]  (if present, V2)
 //   uint32 weight_path_len
 //   char   weight_path[weight_path_len]  (no terminator in stream)
-//
-// The first 4 fields are 16 bytes (4 * uint32). All offsets are
-// stable so partial reads/writes from a buffered stream still work.
 
 static constexpr uint32_t kStateMagic   = 0x4D424D53u; // 'MBM S'
 static constexpr uint32_t kStateVersion =
     (VERSION_MAJOR << 16) | (VERSION_MINOR << 8) | VERSION_PATCH;
 static constexpr uint32_t kStateSchemaV1 = 0x00010000u;
+static constexpr uint32_t kStateSchemaV2 = 0x00020000u;
 
 static bool stream_write_all(const clap_ostream_t* stream, const void* data, uint64_t size) {
     const uint8_t* ptr = static_cast<const uint8_t*>(data);
@@ -84,7 +84,7 @@ static bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream
     if (!stream_write_u32(stream, kStateMagic)) return false;
     if (!stream_write_u32(stream, kStateVersion)) return false;
     if (!stream_write_u32(stream, 0)) return false;             // reserved
-    if (!stream_write_u32(stream, kStateSchemaV1)) return false;
+    if (!stream_write_u32(stream, kStateSchemaV2)) return false;
 
     // Pull a fresh state-mirror snapshot from the audio thread.
     StateMirror mirror;
@@ -92,11 +92,14 @@ static bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream
         constexpr int kMaxRetries = 8;
         bool ok = false;
         for (int retry = 0; retry < kMaxRetries; ++retry) {
-            std::memset(&mirror, 0, sizeof(mirror));
+            mirror = StateMirror{};
             if (m->state_mirror.read(mirror)) { ok = true; break; }
         }
         if (!ok) return false;
     }
+
+    // V2: num_voices
+    if (!stream_write_u32(stream, MAX_VOICES)) return false;
 
     if (!stream_write_u32(stream, PARAM_COUNT)) return false;
     for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
@@ -111,7 +114,12 @@ static bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream
     const bool h_present = m->weights_loaded.load(std::memory_order_acquire);
     if (!stream_write_u32(stream, h_present ? 1u : 0u)) return false;
     if (h_present) {
-        if (!stream_write_all(stream, &mirror.h_state, sizeof(mirror.h_state))) return false;
+        // Save all voice states + envelope levels
+        for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+            if (!stream_write_all(stream, &mirror.voice_snapshots[v].ssm_state,
+                                  sizeof(MambaState))) return false;
+            if (!stream_write_f32(stream, mirror.voice_snapshots[v].env)) return false;
+        }
     }
 
     uint32_t path_len = 0;
@@ -147,7 +155,14 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
 
     uint32_t schema = 0;
     if (!stream_read_u32(stream, schema)) return false;
-    if (schema != kStateSchemaV1) return false;
+    if (schema != kStateSchemaV2 && schema != kStateSchemaV1) return false;
+
+    uint32_t num_voices = 0;
+    if (schema == kStateSchemaV2) {
+        if (!stream_read_u32(stream, num_voices)) return false;
+        if (num_voices > MAX_VOICES) return false;
+    }
+    // V1: no num_voices field, reading continues at param_count
 
     uint32_t param_count = 0;
     if (!stream_read_u32(stream, param_count)) return false;
@@ -165,9 +180,22 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
 
     uint32_t h_present = 0;
     if (!stream_read_u32(stream, h_present)) return false;
-    MambaState ms{};
+
+    // Read per-voice state (V2: all voices; V1: single voice into voice 0)
+    struct { MambaState state; float env; } voice_states[MAX_VOICES];
+    std::memset(voice_states, 0, sizeof(voice_states));
+
     if (h_present) {
-        if (!stream_read_all(stream, &ms, sizeof(ms))) return false;
+        if (schema == kStateSchemaV2 && num_voices > 0) {
+            for (uint32_t v = 0; v < num_voices; ++v) {
+                if (!stream_read_all(stream, &voice_states[v].state, sizeof(MambaState))) return false;
+                if (!stream_read_f32(stream, voice_states[v].env)) return false;
+            }
+        } else if (schema == kStateSchemaV1) {
+            // V1: single MambaState into voice 0
+            if (!stream_read_all(stream, &voice_states[0].state, sizeof(MambaState))) return false;
+            voice_states[0].env = 1.0f;  // assume active
+        }
     }
 
     uint32_t path_len = 0;
@@ -183,8 +211,6 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
     for (uint32_t i = 0; i < param_count; ++i) {
         m->param_values[i].store(pv[i], std::memory_order_release);
         m->params[i].target.store(pv[i], std::memory_order_release);
-        // Snap current to target too; otherwise the smoother would
-        // glide to a stale value after load.
         m->params[i].current.store(pv[i], std::memory_order_release);
     }
     m->bypass_target.store(bypass_int != 0, std::memory_order_release);
@@ -194,10 +220,16 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
         std::memory_order_relaxed);
 
     if (h_present && m->weights_loaded.load(std::memory_order_acquire)) {
-        // Only restore h_state if weights are actually loaded; the
-        // validator would otherwise crash on a fresh plugin instance
-        // with no weights (SSM state h is uninitialized garbage).
-        m->core->set_state(ms);
+        // Restore per-voice states into the voice pool
+        for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+            m->voices[v].ssm_state = voice_states[v].state;
+            m->voices[v].env = voice_states[v].env;
+            m->voices[v].stage = voice_states[v].env > 0.0f ? VOICE_SUSTAIN : VOICE_IDLE;
+            voice_states[v].state = m->voices[v].ssm_state; // for core set_state below
+        }
+        // Set voice 0 state into core (the core's state doesn't persist
+        // across save/load, but set it so audio starts from a valid state)
+        m->core->set_state(voice_states[0].state);
     }
 
     std::memset(m->weight_path, 0, sizeof(m->weight_path));

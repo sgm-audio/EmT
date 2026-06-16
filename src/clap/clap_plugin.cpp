@@ -128,19 +128,23 @@ static bool plugin_init(const clap_plugin_t* plugin) {
     m->bypass_state.store(BYPASS_PROCESSING, std::memory_order_relaxed);
     m->bypass_fade.store(0.0f, std::memory_order_relaxed);
 
-    m->active_note.key.store(-1, std::memory_order_relaxed);
-    m->active_note.channel.store(-1, std::memory_order_relaxed);
-    m->active_note.velocity.store(0.0f, std::memory_order_relaxed);
-    m->active_note.note_id.store(0, std::memory_order_relaxed);
-    m->active_note.is_pressed.store(false, std::memory_order_relaxed);
-
-    m->voice_state.store(VOICE_IDLE, std::memory_order_relaxed);
-    m->voice_env.store(0.0f, std::memory_order_relaxed);
-    m->voice_sample_count = 0;
-    m->voice_attack_rate = 1.0f / 1024.0f;
-    m->voice_release_rate = 1.0f / 4096.0f;
-    m->voice_velocity = 0.0f;
-    m->voice_key = -1;
+    // Initialize voice pool
+    m->next_note_id = 1;
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+        auto& voice = m->voices[v];
+        std::memset(&voice, 0, sizeof(voice));
+        voice.stage = VOICE_IDLE;
+        voice.key = -1;
+        voice.channel = -1;
+        voice.attack_rate = MambaSynth::VOICE_ATTACK_RATE;
+        voice.release_rate = MambaSynth::VOICE_RELEASE_RATE;
+        auto& va = m->voice_atomics[v];
+        va.stage.store(VOICE_IDLE, std::memory_order_relaxed);
+        va.env.store(0.0f, std::memory_order_relaxed);
+        va.key.store(-1, std::memory_order_relaxed);
+        va.channel.store(-1, std::memory_order_relaxed);
+        va.velocity.store(0.0f, std::memory_order_relaxed);
+    }
 
     m->ara_conditioning.data = ARAConditioningFrame{};
 
@@ -159,7 +163,7 @@ static bool plugin_init(const clap_plugin_t* plugin) {
     // Initialize the double-buffer state mirror with empty content.
     {
         StateMirror* slot = m->state_mirror.begin_write();
-        std::memset(slot, 0, sizeof(StateMirror));
+        *slot = StateMirror{};
         for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
             slot->param_values[i] = m->params[i].default_value;
         }
@@ -202,15 +206,24 @@ static bool plugin_activate(const clap_plugin_t* plugin,
     // doesn't produce a click.
     reset_smoothing_to_targets(m);
 
-    m->active_note.key.store(-1, std::memory_order_relaxed);
-    m->active_note.channel.store(-1, std::memory_order_relaxed);
-    m->active_note.velocity.store(0.0f, std::memory_order_relaxed);
-    m->active_note.is_pressed.store(false, std::memory_order_relaxed);
-    m->voice_state.store(VOICE_IDLE, std::memory_order_relaxed);
-    m->voice_env.store(0.0f, std::memory_order_relaxed);
-    m->voice_sample_count = 0;
-    m->voice_velocity = 0.0f;
-    m->voice_key = -1;
+    // Reset all voices
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+        auto& voice = m->voices[v];
+        std::memset(&voice.ssm_state, 0, sizeof(voice.ssm_state));
+        voice.env = 0.0f;
+        voice.stage = VOICE_IDLE;
+        voice.key = -1;
+        voice.channel = -1;
+        voice.velocity = 0.0f;
+        voice.attack_rate = MambaSynth::VOICE_ATTACK_RATE;
+        voice.release_rate = MambaSynth::VOICE_RELEASE_RATE;
+        auto& va = m->voice_atomics[v];
+        va.stage.store(VOICE_IDLE, std::memory_order_relaxed);
+        va.env.store(0.0f, std::memory_order_relaxed);
+        va.key.store(-1, std::memory_order_relaxed);
+        va.channel.store(-1, std::memory_order_relaxed);
+        va.velocity.store(0.0f, std::memory_order_relaxed);
+    }
 
     return true;
 }
@@ -242,15 +255,22 @@ static void plugin_reset(const clap_plugin_t* plugin) {
 
     reset_smoothing_to_targets(m);
 
-    m->active_note.key.store(-1, std::memory_order_relaxed);
-    m->active_note.channel.store(-1, std::memory_order_relaxed);
-    m->active_note.velocity.store(0.0f, std::memory_order_relaxed);
-    m->active_note.is_pressed.store(false, std::memory_order_relaxed);
-    m->voice_state.store(VOICE_IDLE, std::memory_order_relaxed);
-    m->voice_env.store(0.0f, std::memory_order_relaxed);
-    m->voice_sample_count = 0;
-    m->voice_velocity = 0.0f;
-    m->voice_key = -1;
+    // Reset all voices
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+        auto& voice = m->voices[v];
+        std::memset(&voice.ssm_state, 0, sizeof(voice.ssm_state));
+        voice.env = 0.0f;
+        voice.stage = VOICE_IDLE;
+        voice.key = -1;
+        voice.channel = -1;
+        voice.velocity = 0.0f;
+        auto& va = m->voice_atomics[v];
+        va.stage.store(VOICE_IDLE, std::memory_order_relaxed);
+        va.env.store(0.0f, std::memory_order_relaxed);
+        va.key.store(-1, std::memory_order_relaxed);
+        va.channel.store(-1, std::memory_order_relaxed);
+        va.velocity.store(0.0f, std::memory_order_relaxed);
+    }
 }
 
 // Apply any param events drained from the SPSC queue. The audio thread
@@ -345,6 +365,59 @@ static void update_bypass_state_machine(MambaSynth* m, uint32_t frames) {
     m->bypass_state.store(state, std::memory_order_relaxed);
 }
 
+// Find a free voice slot, or steal the oldest released/silent one.
+// Returns the voice index or -1 if all voices are busy attacking.
+static int32_t allocate_voice(MambaSynth* m) {
+    // First pass: find VOICE_IDLE or VOICE_SILENT
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+        uint8_t st = m->voices[v].stage;
+        if (st == VOICE_IDLE || st == VOICE_SILENT) {
+            return static_cast<int32_t>(v);
+        }
+    }
+    // Second pass: steal the oldest RELEASE voice (lowest note_id)
+    uint64_t oldest_id = UINT64_MAX;
+    int32_t oldest_v = -1;
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+        if (m->voices[v].stage == VOICE_RELEASE && m->voices[v].note_id < oldest_id) {
+            oldest_id = m->voices[v].note_id;
+            oldest_v = static_cast<int32_t>(v);
+        }
+    }
+    if (oldest_v >= 0) return oldest_v;
+    // Third pass: steal the oldest SUSTAIN voice
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+        if (m->voices[v].note_id < oldest_id) {
+            oldest_id = m->voices[v].note_id;
+            oldest_v = static_cast<int32_t>(v);
+        }
+    }
+    return oldest_v;  // may be -1 if no voices exist (shouldn't happen)
+}
+
+// Start a new note on the given voice slot.
+static void start_voice(MambaSynth* m, uint32_t v, int32_t key, int32_t channel,
+                         float velocity, uint64_t note_id) {
+    auto& voice = m->voices[v];
+    // Reset SSM state for this voice
+    std::memset(&voice.ssm_state, 0, sizeof(voice.ssm_state));
+    voice.env = 0.0f;
+    voice.stage = VOICE_ATTACK;
+    voice.velocity = velocity;
+    voice.key = key;
+    voice.channel = channel;
+    voice.note_id = note_id;
+    voice.attack_rate = MambaSynth::VOICE_ATTACK_RATE;
+    voice.release_rate = MambaSynth::VOICE_RELEASE_RATE;
+
+    auto& va = m->voice_atomics[v];
+    va.stage.store(VOICE_ATTACK, std::memory_order_relaxed);
+    va.env.store(0.0f, std::memory_order_relaxed);
+    va.key.store(key, std::memory_order_relaxed);
+    va.channel.store(channel, std::memory_order_relaxed);
+    va.velocity.store(velocity, std::memory_order_relaxed);
+}
+
 // Iterate note events in the input event list with sample-accurate
 // frame offsets. Each event's time is the offset within the current
 // process() block at which the event should take effect.
@@ -361,39 +434,41 @@ static void process_note_events(MambaSynth* m,
             const auto* ev = reinterpret_cast<const clap_event_note_t*>(hdr);
             if (ev->velocity <= 0.0) {
                 // NOTE_ON with velocity 0 is a release (per CLAP spec).
-                uint8_t st = m->voice_state.load(std::memory_order_relaxed);
-                if (st == VOICE_ATTACK || st == VOICE_SUSTAIN) {
-                    m->voice_state.store(VOICE_RELEASE, std::memory_order_relaxed);
-                    m->voice_sample_count = 0;
+                // Find the voice playing this note and release it.
+                for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+                    if (m->voices[v].key == ev->key &&
+                        m->voices[v].channel == ev->channel &&
+                        (m->voices[v].stage == VOICE_ATTACK ||
+                         m->voices[v].stage == VOICE_SUSTAIN)) {
+                        m->voices[v].stage = VOICE_RELEASE;
+                        m->voice_atomics[v].stage.store(VOICE_RELEASE,
+                            std::memory_order_relaxed);
+                        break;
+                    }
                 }
-                m->active_note.is_pressed.store(false, std::memory_order_relaxed);
             } else {
-                // Steal voice: reset SSM state, start attack.
-                m->core->reset();
-                m->voice_state.store(VOICE_ATTACK, std::memory_order_relaxed);
-                m->voice_sample_count = 0;
-                m->voice_velocity = static_cast<float>(ev->velocity);
-                m->voice_key = ev->key;
-                m->active_note.key.store(ev->key, std::memory_order_relaxed);
-                m->active_note.channel.store(ev->channel, std::memory_order_relaxed);
-                m->active_note.velocity.store(
-                    static_cast<float>(ev->velocity), std::memory_order_relaxed);
-                m->active_note.is_pressed.store(true, std::memory_order_relaxed);
-                m->active_note.note_id.fetch_add(1, std::memory_order_relaxed);
+                // Allocate a voice and start the note.
+                int32_t v = allocate_voice(m);
+                if (v >= 0) {
+                    uint64_t nid = m->next_note_id++;
+                    start_voice(m, static_cast<uint32_t>(v),
+                                ev->key, ev->channel,
+                                static_cast<float>(ev->velocity), nid);
+                }
             }
         } else if (hdr->type == CLAP_EVENT_NOTE_OFF) {
             const auto* ev = reinterpret_cast<const clap_event_note_t*>(hdr);
-            int32_t cur = m->active_note.key.load(std::memory_order_relaxed);
-            if (ev->key == cur) {
-                uint8_t st = m->voice_state.load(std::memory_order_relaxed);
-                if (st == VOICE_ATTACK || st == VOICE_SUSTAIN) {
-                    m->voice_state.store(VOICE_RELEASE, std::memory_order_relaxed);
-                    m->voice_sample_count = 0;
+            // Find the voice playing this note and release it.
+            for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+                if (m->voices[v].key == ev->key &&
+                    m->voices[v].channel == ev->channel &&
+                    (m->voices[v].stage == VOICE_ATTACK ||
+                     m->voices[v].stage == VOICE_SUSTAIN)) {
+                    m->voices[v].stage = VOICE_RELEASE;
+                    m->voice_atomics[v].stage.store(VOICE_RELEASE,
+                        std::memory_order_relaxed);
+                    break;
                 }
-                m->active_note.key.store(-1, std::memory_order_relaxed);
-                m->active_note.channel.store(-1, std::memory_order_relaxed);
-                m->active_note.velocity.store(0.0f, std::memory_order_relaxed);
-                m->active_note.is_pressed.store(false, std::memory_order_relaxed);
             }
         } else if (hdr->type == CLAP_EVENT_PARAM_VALUE) {
             const auto* ev = reinterpret_cast<const clap_event_param_value_t*>(hdr);
@@ -402,9 +477,8 @@ static void process_note_events(MambaSynth* m,
     }
 }
 
-// Update the conditioning vector based on the active note (if any) and
-// the latest ARA conditioning frame. Called once per process() block
-// since the note is monophonic and the ARA frame changes slowly.
+// Build a conditioning frame from the most recently pressed voice
+// (highest note_id in ATTACK or SUSTAIN) and ARA context.
 static void refresh_conditioning(MambaSynth* m) {
     ConditioningFrame cf{};
     cf.tempo_bpm = 120.0f;
@@ -413,14 +487,21 @@ static void refresh_conditioning(MambaSynth* m) {
     cf.reserved[0] = 0.0f;
     cf.reserved[1] = 0.0f;
 
-    const int32_t key = m->active_note.key.load(std::memory_order_relaxed);
-    const float vel = m->active_note.velocity.load(std::memory_order_relaxed);
-    if (key >= 0) {
-        const int pitch_class = key % 12;
-        cf.key_sig = static_cast<float>(pitch_class);
-        cf.chord_one_hot[pitch_class] = vel;
-        cf.reserved[0] = static_cast<float>(key) / 127.0f;
-        cf.reserved[1] = vel;
+    // Find the most recent active voice for conditioning.
+    uint64_t newest_id = 0;
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+        uint8_t st = m->voices[v].stage;
+        if ((st == VOICE_ATTACK || st == VOICE_SUSTAIN) &&
+            m->voices[v].note_id > newest_id) {
+            newest_id = m->voices[v].note_id;
+            int32_t key = m->voices[v].key;
+            float vel = m->voices[v].velocity;
+            int pitch_class = key % 12;
+            cf.key_sig = static_cast<float>(pitch_class);
+            cf.chord_one_hot[pitch_class] = vel;
+            cf.reserved[0] = static_cast<float>(key) / 127.0f;
+            cf.reserved[1] = vel;
+        }
     }
 
     // ARA overrides conditioning when it has a non-default value.
@@ -438,7 +519,11 @@ static void refresh_conditioning(MambaSynth* m) {
 // audio thread calls this at the end of each process() call.
 static void publish_state_mirror(MambaSynth* m) {
     StateMirror* slot = m->state_mirror.begin_write();
-    m->core->get_state(slot->h_state);
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+        slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
+        slot->voice_snapshots[v].env = m->voices[v].env;
+        slot->voice_snapshots[v].stage = m->voices[v].stage;
+    }
     for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
         slot->param_values[i] = m->param_values[i].load(std::memory_order_acquire);
     }
@@ -486,50 +571,67 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
     double cur_mix  = m->params[PARAM_MIX].current.load(std::memory_order_relaxed);
 
     for (uint32_t n = 0; n < frames; ++n) {
-        // Smooth only audio-rate params; bypass/attack/release don't
-        // affect the per-sample coefficient here.
         advance_one_pole(cur_gain, t_gain, c_gain);
         advance_one_pole(cur_mix,  t_mix,  c_mix);
 
-        // Voice envelope state machine (per-sample).
-        float env = m->voice_env.load(std::memory_order_relaxed);
-        uint8_t vs = m->voice_state.load(std::memory_order_relaxed);
-        switch (vs) {
-        case VOICE_ATTACK:
-            env += m->voice_attack_rate;
-            if (env >= 1.0f) {
-                env = 1.0f;
-                m->voice_state.store(VOICE_SUSTAIN, std::memory_order_relaxed);
-            }
-            break;
-        case VOICE_SUSTAIN:
-            env = 1.0f;
-            break;
-        case VOICE_RELEASE:
-            env -= m->voice_release_rate;
-            if (env <= 0.0f) {
-                env = 0.0f;
-                m->voice_state.store(VOICE_SILENT, std::memory_order_relaxed);
-            }
-            break;
-        case VOICE_SILENT:
-            env = 0.0f;
-            break;
-        case VOICE_IDLE:
-        default:
-            env = 0.0f;
-            break;
-        }
-        m->voice_env.store(env, std::memory_order_relaxed);
-        m->voice_sample_count++;
-
         const float in_sample = input ? input[n] : 0.0f;
-        alignas(64) float outbuf[MAX_D_MODEL];
-        m->core->process_sample(in_sample, outbuf);
-        const float processed = outbuf[0];
+        float voice_sum = 0.0f;
 
+        // Process each active voice, accumulating output.
+        for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+            auto& voice = m->voices[v];
+            uint8_t vs = voice.stage;
+            if (vs == VOICE_IDLE) continue;
+
+            // Envelope state machine
+            switch (vs) {
+            case VOICE_ATTACK:
+                voice.env += voice.attack_rate;
+                if (voice.env >= 1.0f) {
+                    voice.env = 1.0f;
+                    voice.stage = VOICE_SUSTAIN;
+                    m->voice_atomics[v].stage.store(VOICE_SUSTAIN,
+                        std::memory_order_relaxed);
+                }
+                break;
+            case VOICE_SUSTAIN:
+                voice.env = 1.0f;
+                break;
+            case VOICE_RELEASE:
+                voice.env -= voice.release_rate;
+                if (voice.env <= 0.0f) {
+                    voice.env = 0.0f;
+                    voice.stage = VOICE_SILENT;
+                    m->voice_atomics[v].stage.store(VOICE_SILENT,
+                        std::memory_order_relaxed);
+                }
+                break;
+            case VOICE_SILENT:
+                voice.env = 0.0f;
+                break;
+            default:
+                voice.env = 0.0f;
+                break;
+            }
+
+            if (voice.env <= 0.0f) continue;
+
+            // Restore voice's SSM state, process, save state
+            m->core->set_state(voice.ssm_state);
+            alignas(64) float outbuf[MAX_D_MODEL];
+            m->core->process_sample(in_sample, outbuf);
+            m->core->get_state(voice.ssm_state);
+
+            float processed = outbuf[0];
+            voice_sum += processed * voice.env * voice.velocity;
+
+            // Update atomic mirror for this voice
+            m->voice_atomics[v].env.store(voice.env, std::memory_order_relaxed);
+        }
+
+        // Mix dry/wet with gain
         const float dry = in_sample;
-        const float wet = processed * static_cast<float>(cur_gain) * env * m->voice_velocity;
+        const float wet = voice_sum * static_cast<float>(cur_gain);
         const float mixed = dry * static_cast<float>(1.0 - cur_mix)
                           + wet  * static_cast<float>(cur_mix);
 
@@ -678,17 +780,22 @@ const clap_plugin_t* mamba_synth_create(const clap_host_t* host) {
     m->bypass_target.store(false, std::memory_order_relaxed);
     m->bypass_state.store(BYPASS_PROCESSING, std::memory_order_relaxed);
     m->bypass_fade.store(0.0f, std::memory_order_relaxed);
-    m->active_note.key.store(-1, std::memory_order_relaxed);
-    m->active_note.channel.store(-1, std::memory_order_relaxed);
-    m->active_note.velocity.store(0.0f, std::memory_order_relaxed);
-    m->active_note.is_pressed.store(false, std::memory_order_relaxed);
-    m->voice_state.store(VOICE_IDLE, std::memory_order_relaxed);
-    m->voice_env.store(0.0f, std::memory_order_relaxed);
-    m->voice_sample_count = 0;
-    m->voice_attack_rate = 1.0f / 1024.0f;
-    m->voice_release_rate = 1.0f / 4096.0f;
-    m->voice_velocity = 0.0f;
-    m->voice_key = -1;
+    m->next_note_id = 1;
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+        auto& voice = m->voices[v];
+        std::memset(&voice, 0, sizeof(voice));
+        voice.stage = VOICE_IDLE;
+        voice.key = -1;
+        voice.channel = -1;
+        voice.attack_rate = MambaSynth::VOICE_ATTACK_RATE;
+        voice.release_rate = MambaSynth::VOICE_RELEASE_RATE;
+        auto& va = m->voice_atomics[v];
+        va.stage.store(VOICE_IDLE, std::memory_order_relaxed);
+        va.env.store(0.0f, std::memory_order_relaxed);
+        va.key.store(-1, std::memory_order_relaxed);
+        va.channel.store(-1, std::memory_order_relaxed);
+        va.velocity.store(0.0f, std::memory_order_relaxed);
+    }
     m->ara_conditioning.data = ARAConditioningFrame{};
     for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
         m->param_values[i].store(0.0, std::memory_order_relaxed);
