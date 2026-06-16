@@ -1,4 +1,5 @@
 #include "clap/clap_plugin.h"
+#include "clap/clap_gui.h"
 #include "config.h"
 #include "core/arena_allocator.h"
 #include <cstring>
@@ -797,6 +798,9 @@ static const void* plugin_get_extension(const clap_plugin_t* plugin, const char*
     }
     if (strcmp(id, CLAP_EXT_LATENCY) == 0) {
         return &s_latency;
+    }
+    if (strcmp(id, CLAP_EXT_GUI) == 0) {
+        return &s_gui;
     }
     return nullptr;
 }

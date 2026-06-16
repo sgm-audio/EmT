@@ -1,5 +1,6 @@
 #include <clap/clap.h>
 #include "clap/clap_plugin.h"
+#include "clap/clap_fx_plugin.h"
 #include <cstring>
 
 namespace mamba {
@@ -11,13 +12,14 @@ const clap_plugin_t* mamba_synth_create(const clap_host_t* host);
 
 static uint32_t factory_get_plugin_count(const clap_plugin_factory_t* factory) {
     (void)factory;
-    return 1;
+    return 2;
 }
 
 static const clap_plugin_descriptor_t* factory_get_plugin_descriptor(
     const clap_plugin_factory_t* factory, uint32_t index) {
     (void)factory;
     if (index == 0) return &mamba::mamba_synth_descriptor;
+    if (index == 1) return &mamba::mamba_fx_descriptor;
     return nullptr;
 }
 
@@ -26,6 +28,9 @@ static const clap_plugin_t* factory_create_plugin(
     (void)factory;
     if (!strcmp(plugin_id, mamba::mamba_synth_descriptor.id)) {
         return mamba::mamba_synth_create(host);
+    }
+    if (!strcmp(plugin_id, mamba::mamba_fx_descriptor.id)) {
+        return mamba::mamba_fx_create(host);
     }
     return nullptr;
 }
