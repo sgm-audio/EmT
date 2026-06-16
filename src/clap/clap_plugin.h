@@ -189,6 +189,7 @@ extern const clap_plugin_params_t s_params;
 extern const clap_plugin_state_t s_state;
 extern const clap_plugin_tail_t s_tail;
 extern const clap_plugin_latency_t s_latency;
+extern const clap_plugin_gui_t s_gui;
 
 } // namespace mamba
 
