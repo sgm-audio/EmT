@@ -3,7 +3,6 @@
 #include "clap/clap_gui.h"
 #include "core/ssm_inference_core.h"
 #include "core/weight_loader.h"
-#include "core/arena_allocator.h"
 #include "common/ring_buffer.h"
 #include "common/conditioning_frame.h"
 #include "config.h"
@@ -11,14 +10,14 @@
 #include <cmath>
 #include <algorithm>
 #include <new>
+#include <cstdlib>
+#include <cstdio>
 
 // ponytail: Mamba FX reuses the synth's SSM core with minimal wrapper.
 // If the FX needs different SSM behavior (e.g., no FiLM, different
 // projection), add FX-specific SSM paths here.
 
 namespace mamba {
-
-static ArenaAllocator s_fx_arena(65536);
 
 // FX-specific param IDs (subset of synth params)
 enum FxParamId : clap_id {
@@ -122,7 +121,8 @@ static bool fx_init(const clap_plugin_t* plugin) {
 static void fx_destroy(const clap_plugin_t* plugin) {
     auto* f = get_fx(plugin);
     if (f->core) { f->core->~SSMInferenceCore(); f->core = nullptr; }
-    f->~FxState();
+    delete f;
+    delete plugin;
 }
 
 static bool fx_activate(const clap_plugin_t* plugin, double sample_rate,
@@ -170,61 +170,99 @@ static void apply_param_value(FxState* f, clap_id id, double value) {
     f->params[id].target.store(value, std::memory_order_release);
 }
 
+static uint32_t fx_params_count(const clap_plugin_t*) { return FX_PARAM_COUNT; }
+static bool fx_params_get_info(const clap_plugin_t* plugin, uint32_t index, clap_param_info_t* info) {
+    if (!info || index >= FX_PARAM_COUNT) return false;
+    auto* f = get_fx(plugin); std::memset(info, 0, sizeof(*info));
+    info->id = index; info->cookie = &f->params[index];
+    info->min_value = f->params[index].min_value; info->max_value = f->params[index].max_value;
+    info->default_value = f->params[index].default_value; info->flags = CLAP_PARAM_IS_AUTOMATABLE;
+    if (index == FX_PARAM_BYPASS) info->flags |= CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_BYPASS;
+    const char* name = index == FX_PARAM_GAIN ? "Gain" : index == FX_PARAM_MIX ? "Mix" : "Bypass";
+    std::strncpy(info->name, name, CLAP_NAME_SIZE - 1); return true;
+}
+static bool fx_params_get_value(const clap_plugin_t* plugin, clap_id id, double* value) {
+    if (!value || id >= FX_PARAM_COUNT) return false;
+    *value = get_fx(plugin)->param_values[id].load(std::memory_order_acquire); return true;
+}
+static bool fx_params_value_to_text(const clap_plugin_t*, clap_id id, double value, char* out, uint32_t size) {
+    if (!out || size == 0 || id >= FX_PARAM_COUNT || !std::isfinite(value)) return false;
+    if (id == FX_PARAM_BYPASS) std::snprintf(out, size, "%s", value >= 0.5 ? "On" : "Off");
+    else std::snprintf(out, size, "%.3f", value); return true;
+}
+static bool fx_params_text_to_value(const clap_plugin_t*, clap_id id, const char* text, double* value) {
+    if (!text || !value || id >= FX_PARAM_COUNT) return false;
+    if (id == FX_PARAM_BYPASS) { *value = (!std::strcmp(text,"On") || !std::strcmp(text,"1")) ? 1.0 : 0.0; return true; }
+    char* end = nullptr; const double parsed = std::strtod(text, &end);
+    if (end == text || !std::isfinite(parsed)) return false; *value = parsed; return true;
+}
+static void fx_params_flush(const clap_plugin_t* plugin, const clap_input_events_t* in, const clap_output_events_t*) {
+    if (!in) return; auto* f = get_fx(plugin);
+    const uint32_t count = in->size(in);
+    for (uint32_t i = 0; i < count; ++i) {
+        const clap_event_header_t* hdr = in->get(in, i);
+        if (!hdr || hdr->space_id != CLAP_CORE_EVENT_SPACE_ID || hdr->type != CLAP_EVENT_PARAM_VALUE ||
+            hdr->size < sizeof(clap_event_param_value_t)) continue;
+        const auto* ev = reinterpret_cast<const clap_event_param_value_t*>(hdr);
+        if (ev->param_id < FX_PARAM_COUNT) apply_param_value(f, ev->param_id, ev->value);
+    }
+}
+static const clap_plugin_params_t s_fx_params = {fx_params_count, fx_params_get_info, fx_params_get_value,
+    fx_params_value_to_text, fx_params_text_to_value, fx_params_flush};
 // FX: process audio in -> SSM -> audio out with dry/wet mix
-static clap_process_status fx_process(const clap_plugin_t* plugin,
-                                       const clap_process_t* process) {
-    auto* f = get_fx(plugin);
-    SSMBlock::apply_ftz_daz();
-    f->thread_check.mark_audio_thread();
-
-    if (!process->audio_inputs || !process->audio_outputs)
-        return CLAP_PROCESS_CONTINUE;
-
-    const float* in_l = process->audio_inputs->data32[0];
-    float* out_l = process->audio_outputs->data32[0];
-    uint32_t channels = process->audio_outputs->channel_count;
-    if (!out_l) return CLAP_PROCESS_ERROR;
-
-    const uint32_t frames = process->frames_count;
-    const float fade = f->bypass_fade.load(std::memory_order_relaxed);
-
-    // Pre-load param targets
-    const double t_gain = f->params[FX_PARAM_GAIN].target.load(std::memory_order_relaxed);
-    const double t_mix  = f->params[FX_PARAM_MIX].target.load(std::memory_order_relaxed);
-    const double c_gain = f->params[FX_PARAM_GAIN].coeff;
-    const double c_mix  = f->params[FX_PARAM_MIX].coeff;
-    double cur_gain = f->params[FX_PARAM_GAIN].current.load(std::memory_order_relaxed);
-    double cur_mix  = f->params[FX_PARAM_MIX].current.load(std::memory_order_relaxed);
-
-    for (uint32_t n = 0; n < frames; ++n) {
-        advance_one_pole(cur_gain, t_gain, c_gain);
-        advance_one_pole(cur_mix,  t_mix,  c_mix);
-
-        const float in_sample = in_l ? in_l[n] : 0.0f;
-        alignas(64) float outbuf[MAX_D_MODEL];
-
-        // Process through SSM core
-        f->core->process_sample(in_sample, outbuf);
-        const float processed = outbuf[0];
-
-        // Dry/wet mix with gain
-        const float mixed = in_sample * static_cast<float>(1.0 - cur_mix)
-                          + processed * static_cast<float>(cur_gain * cur_mix);
-
-        // Bypass crossfade
-        out_l[n] = mixed * (1.0f - fade) + in_sample * fade;
-
-        // Copy to other channels
-        for (uint32_t ch = 1; ch < channels; ++ch) {
-            process->audio_outputs->data32[ch][n] = out_l[n];
+static clap_process_status fx_process(const clap_plugin_t* plugin, const clap_process_t* process) {
+    if (!process || !process->audio_outputs || process->audio_outputs_count == 0)
+        return CLAP_PROCESS_ERROR;
+    auto* f = get_fx(plugin); SSMBlock::apply_ftz_daz(); f->thread_check.mark_audio_thread();
+    clap_audio_buffer_t& out = process->audio_outputs[0];
+    const clap_audio_buffer_t* in = process->audio_inputs && process->audio_inputs_count ? &process->audio_inputs[0] : nullptr;
+    if ((!out.data32 && !out.data64) || out.channel_count == 0) return CLAP_PROCESS_ERROR;
+    double gain = f->params[FX_PARAM_GAIN].current.load(std::memory_order_relaxed);
+    double mix = f->params[FX_PARAM_MIX].current.load(std::memory_order_relaxed);
+    float fade = f->bypass_fade.load(std::memory_order_relaxed);
+    const uint32_t event_count = process->in_events ? process->in_events->size(process->in_events) : 0;
+    uint32_t event_index = 0;
+    for (uint32_t n = 0; n < process->frames_count; ++n) {
+        while (event_index < event_count) {
+            const clap_event_header_t* hdr = process->in_events->get(process->in_events, event_index);
+            if (!hdr) { ++event_index; continue; } if (hdr->time > n) break;
+            if (hdr->space_id == CLAP_CORE_EVENT_SPACE_ID && hdr->type == CLAP_EVENT_PARAM_VALUE &&
+                hdr->size >= sizeof(clap_event_param_value_t)) {
+                const auto* ev = reinterpret_cast<const clap_event_param_value_t*>(hdr);
+                apply_param_value(f, ev->param_id, ev->value);
+            }
+            ++event_index;
+        }
+        const bool bypass = f->params[FX_PARAM_BYPASS].target.load(std::memory_order_relaxed) > 0.5;
+        f->bypass_target.store(bypass, std::memory_order_relaxed);
+        fade = std::clamp(fade + (bypass ? FxState::BYPASS_FADE_RATE : -FxState::BYPASS_FADE_RATE), 0.0f, 1.0f);
+        advance_one_pole(gain, f->params[FX_PARAM_GAIN].target.load(std::memory_order_relaxed), f->params[FX_PARAM_GAIN].coeff);
+        advance_one_pole(mix, f->params[FX_PARAM_MIX].target.load(std::memory_order_relaxed), f->params[FX_PARAM_MIX].coeff);
+        float dry[2]{}; const uint32_t nc = in ? std::min<uint32_t>(in->channel_count, 2) : 0;
+        for (uint32_t ch=0; ch<nc; ++ch) {
+            if (in->data32 && in->data32[ch]) dry[ch]=in->data32[ch][n];
+            else if (in->data64 && in->data64[ch]) dry[ch]=static_cast<float>(in->data64[ch][n]);
+        }
+        const float mono = nc > 1 ? 0.5f*(dry[0]+dry[1]) : dry[0];
+        alignas(64) float processed[MAX_D_MODEL]; f->core->process_sample(mono, processed);
+        for (uint32_t ch=0; ch<out.channel_count; ++ch) {
+            const float d = ch < nc ? dry[ch] : mono;
+            const float wet = processed[0] * static_cast<float>(gain);
+            const float sample = (d*static_cast<float>(1.0-mix)+wet*static_cast<float>(mix))*(1.0f-fade)+d*fade;
+            if (out.data32 && out.data32[ch]) out.data32[ch][n]=sample;
+            if (out.data64 && out.data64[ch]) out.data64[ch][n]=sample;
         }
     }
-
-    f->params[FX_PARAM_GAIN].current.store(cur_gain, std::memory_order_relaxed);
-    f->params[FX_PARAM_MIX].current.store(cur_mix, std::memory_order_relaxed);
-
+    f->params[FX_PARAM_GAIN].current.store(gain,std::memory_order_relaxed);
+    f->params[FX_PARAM_MIX].current.store(mix,std::memory_order_relaxed);
+    f->bypass_fade.store(fade,std::memory_order_relaxed);
     return CLAP_PROCESS_CONTINUE;
 }
+static uint32_t fx_tail_get(const clap_plugin_t* plugin) {
+    const auto* f = get_fx(plugin);
+    return static_cast<uint32_t>(std::clamp(0.1 * f->sample_rate, 0.0, 4294967294.0));
+}
+static const clap_plugin_tail_t s_fx_tail = {fx_tail_get};
 
 static const void* fx_get_extension(const clap_plugin_t* plugin, const char* id) {
     (void)plugin;
@@ -234,22 +272,17 @@ static const void* fx_get_extension(const clap_plugin_t* plugin, const char* id)
         return &s_audio_ports;
     }
     if (std::strcmp(id, CLAP_EXT_PARAMS) == 0) {
-        // FX needs its own params. For now return nullptr (no adjustable params).
-        return nullptr;
+        return &s_fx_params;
     }
     if (std::strcmp(id, CLAP_EXT_STATE) == 0) {
         return nullptr; // state not yet implemented for FX
     }
     if (std::strcmp(id, CLAP_EXT_TAIL) == 0) {
-        extern const clap_plugin_tail_t s_tail;
-        return &s_tail;
+        return &s_fx_tail;
     }
     if (std::strcmp(id, CLAP_EXT_LATENCY) == 0) {
         extern const clap_plugin_latency_t s_latency;
         return &s_latency;
-    }
-    if (std::strcmp(id, CLAP_EXT_GUI) == 0) {
-        return &s_gui;
     }
     return nullptr;
 }
@@ -298,10 +331,8 @@ static const clap_plugin_t fx_plugin_class = {
 };
 
 const clap_plugin_t* mamba_fx_create(const clap_host_t* host) {
-    auto* f = static_cast<FxState*>(
-        s_fx_arena.allocate(sizeof(FxState), alignof(FxState)));
+    auto* f = new (std::nothrow) FxState();
     if (!f) return nullptr;
-    new (f) FxState();
     f->host = host;
     f->core = nullptr;
     f->weights_loaded.store(false, std::memory_order_relaxed);
@@ -316,10 +347,8 @@ const clap_plugin_t* mamba_fx_create(const clap_host_t* host) {
     for (uint32_t i = 0; i < FX_PARAM_COUNT; ++i)
         f->param_values[i].store(0.0, std::memory_order_relaxed);
 
-    auto* plugin = static_cast<clap_plugin_t*>(
-        s_fx_arena.allocate(sizeof(clap_plugin_t), alignof(clap_plugin_t)));
-    if (!plugin) return nullptr;
-    new (plugin) clap_plugin_t(fx_plugin_class);
+    auto* plugin = new (std::nothrow) clap_plugin_t(fx_plugin_class);
+    if (!plugin) { delete f; return nullptr; }
     plugin->plugin_data = f;
     return plugin;
 }

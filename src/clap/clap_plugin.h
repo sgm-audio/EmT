@@ -7,10 +7,10 @@
 #include <array>
 #include <cstring>
 #include <cmath>
+#include <type_traits>
 
 #include "core/ssm_inference_core.h"
 #include "core/weight_loader.h"
-#include "core/arena_allocator.h"
 #include "common/ring_buffer.h"
 #include "common/seqlock.h"
 #include "common/conditioning_frame.h"
@@ -93,8 +93,14 @@ struct alignas(64) Voice {
 struct alignas(64) VoiceSnapshot {
     MambaState ssm_state;
     float env;
-    uint8_t stage;  // VoiceState
-    uint8_t pad[3]; // padding
+    float attack_rate;
+    float release_rate;
+    float velocity;
+    int32_t key;
+    int32_t channel;
+    uint64_t note_id;
+    uint8_t stage;
+    uint8_t pad[7];
 };
 
 constexpr size_t kMaxWeightPath = 512;
@@ -178,6 +184,9 @@ struct MambaSynth {
     // Host thread-check extension cache.
     alignas(64) ThreadCheck thread_check;
 
+    // Concrete platform state is private to clap_gui.cpp.
+    void* gui_data;
+
     bool load_weights(const char* path);
 };
 
@@ -190,6 +199,7 @@ extern const clap_plugin_state_t s_state;
 extern const clap_plugin_tail_t s_tail;
 extern const clap_plugin_latency_t s_latency;
 extern const clap_plugin_gui_t s_gui;
+extern const clap_plugin_timer_support_t s_timer_support;
 
 } // namespace mamba
 

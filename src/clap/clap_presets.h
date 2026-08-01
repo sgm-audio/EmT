@@ -22,7 +22,7 @@ namespace mamba {
 //   char    preset_name[preset_name_len]
 
 static constexpr uint32_t kPresetMagic   = 0x4D425052u;
-static constexpr uint32_t kPresetVersion = 0x00010000u;
+static constexpr uint32_t kPresetVersion = 0x00020000u;
 static constexpr size_t   kMaxPresetName = 128;
 
 // Resolve preset directory path, returns true if dir exists/created.
