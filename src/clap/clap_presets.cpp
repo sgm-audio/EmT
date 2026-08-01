@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <algorithm>
+#include <cmath>
 
 namespace mamba {
 namespace {
@@ -100,9 +102,7 @@ bool save_preset(MambaSynth* m, const char* path, const char* name) {
     ok = ok && file_write_u32(f, h_present ? 1u : 0u);
     if (h_present && ok) {
         for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-            ok = file_write_all(f, &mirror.voice_snapshots[v].ssm_state,
-                                sizeof(MambaState));
-            ok = ok && file_write_f32(f, mirror.voice_snapshots[v].env);
+            ok = file_write_all(f, &mirror.voice_snapshots[v], sizeof(VoiceSnapshot));
         }
     }
 
@@ -139,10 +139,10 @@ bool load_preset(MambaSynth* m, const char* path) {
     if (!file_read_u32(f, magic) || magic != kPresetMagic) return fail();
 
     uint32_t version = 0;
-    if (!file_read_u32(f, version)) return fail();
+    if (!file_read_u32(f, version) || (version != 0x00010000u && version != kPresetVersion)) return fail();
 
     uint32_t reserved = 0;
-    if (!file_read_u32(f, reserved)) return fail();
+    if (!file_read_u32(f, reserved) || reserved != 0) return fail();
 
     uint32_t param_count = 0;
     if (!file_read_u32(f, param_count)) return fail();
@@ -150,21 +150,33 @@ bool load_preset(MambaSynth* m, const char* path) {
 
     double pv[PARAM_COUNT] = {0};
     for (uint32_t i = 0; i < param_count; ++i)
-        if (!file_read_f64(f, pv[i])) return fail();
+        if (!file_read_f64(f, pv[i]) || !std::isfinite(pv[i]) ||
+            pv[i] < m->params[i].min_value || pv[i] > m->params[i].max_value) return fail();
 
     uint32_t bypass_int = 0;
     if (!file_read_u32(f, bypass_int)) return fail();
     float fade = 0.0f;
-    if (!file_read_f32(f, fade)) return fail();
+    if (!file_read_f32(f, fade) || !std::isfinite(fade) || fade < 0.0f || fade > 1.0f) return fail();
 
     uint32_t h_present = 0;
-    if (!file_read_u32(f, h_present)) return fail();
+    if (!file_read_u32(f, h_present) || h_present > 1 || bypass_int > 1) return fail();
 
-    struct { MambaState state; float env; } vstates[MAX_VOICES]{};
+    VoiceSnapshot vstates[MAX_VOICES]{};
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+        vstates[v].key = -1;
+        vstates[v].channel = -1;
+        vstates[v].attack_rate = MambaSynth::VOICE_ATTACK_RATE;
+        vstates[v].release_rate = MambaSynth::VOICE_RELEASE_RATE;
+    }
     if (h_present) {
         for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-            if (!file_read_all(f, &vstates[v].state, sizeof(MambaState))) return fail();
-            if (!file_read_f32(f, vstates[v].env)) return fail();
+            if (version >= kPresetVersion) {
+                if (!file_read_all(f, &vstates[v], sizeof(VoiceSnapshot))) return fail();
+            } else {
+                if (!file_read_all(f, &vstates[v].ssm_state, sizeof(MambaState))) return fail();
+                if (!file_read_f32(f, vstates[v].env)) return fail();
+                vstates[v].stage = vstates[v].env > 0.0f ? VOICE_SUSTAIN : VOICE_IDLE;
+            }
         }
     }
 
@@ -179,13 +191,18 @@ bool load_preset(MambaSynth* m, const char* path) {
     // Read optional preset name (ignore it, just consume the bytes)
     uint32_t name_len = 0;
     if (!file_read_u32(f, name_len)) return fail();
-    if (name_len > 0) {
-        // Skip past the name bytes
-        std::fseek(f, name_len, SEEK_CUR);
-    }
+    if (name_len >= kMaxPresetName) return fail();
+    char preset_name[kMaxPresetName]{};
+    if (name_len > 0 && !file_read_all(f, preset_name, name_len)) return fail();
 
     std::fclose(f);
     f = nullptr;
+
+    if (path_len > 0 && path_buf[0]) {
+        char resolved[MambaSynth::MAX_WEIGHT_PATH]{};
+        if (!resolve_weight_path(path_buf, resolved, sizeof(resolved)) ||
+            (std::strcmp(resolved, m->weight_path) != 0 && !m->load_weights(resolved))) return false;
+    }
 
     // Apply: parameters
     for (uint32_t i = 0; i < param_count; ++i) {
@@ -202,22 +219,25 @@ bool load_preset(MambaSynth* m, const char* path) {
     // Apply: voice states
     if (h_present && m->weights_loaded.load(std::memory_order_acquire)) {
         for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-            m->voices[v].ssm_state = vstates[v].state;
-            m->voices[v].env = vstates[v].env;
-            m->voices[v].stage = vstates[v].env > 0.0f ? VOICE_SUSTAIN : VOICE_IDLE;
+            const VoiceSnapshot& saved = vstates[v];
+            m->voices[v].ssm_state = saved.ssm_state;
+            m->voices[v].env = saved.env;
+            m->voices[v].attack_rate = saved.attack_rate;
+            m->voices[v].release_rate = saved.release_rate;
+            m->voices[v].velocity = saved.velocity;
+            m->voices[v].key = saved.key;
+            m->voices[v].channel = saved.channel;
+            m->voices[v].note_id = saved.note_id;
+            m->voices[v].stage = saved.stage;
+            m->voice_atomics[v].stage.store(saved.stage, std::memory_order_relaxed);
+            m->voice_atomics[v].env.store(saved.env, std::memory_order_relaxed);
+            m->voice_atomics[v].key.store(saved.key, std::memory_order_relaxed);
+            m->voice_atomics[v].channel.store(saved.channel, std::memory_order_relaxed);
+            m->voice_atomics[v].velocity.store(saved.velocity, std::memory_order_relaxed);
+            m->next_note_id = std::max(m->next_note_id, saved.note_id + 1);
         }
         // Set voice 0 into core as starting state
-        m->core->set_state(vstates[0].state);
-    }
-
-    // Resolve weight path and reload if changed
-    if (path_len > 0 && path_buf[0]) {
-        char resolved[MambaSynth::MAX_WEIGHT_PATH] = {0};
-        if (resolve_weight_path(path_buf, resolved, sizeof(resolved))) {
-            if (std::strcmp(resolved, m->weight_path) != 0) {
-                m->load_weights(resolved);
-            }
-        }
+        m->core->set_state(vstates[0].ssm_state);
     }
 
     return true;

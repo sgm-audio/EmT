@@ -1,20 +1,22 @@
 #include "clap/clap_plugin.h"
 #include "clap/clap_gui.h"
 #include "config.h"
-#include "core/arena_allocator.h"
 #include <cstring>
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#include <clap/ext/timer-support.h>
 #include <new>
 
 namespace mamba {
 
-// Plugin-lifetime arena: all plugin-owned memory is bump-allocated from
-// this single mmap-backed region. No heap fragmentation, no malloc/free
-// during audio processing.
-static constexpr size_t kPluginArenaSize = 65536; // 64 KB
-static ArenaAllocator s_plugin_arena(kPluginArenaSize);
+// Plugin instances (MambaSynth is tens of MB once sized for
+// MambaConfig::max_config()) are allocated with plain new/delete.
+// Creation/destruction only ever happens on the main thread, so
+// heap-allocation RT-safety concerns don't apply here; a fixed-size
+// bump arena cannot hold even one instance and never reclaims memory
+// across create/destroy cycles, which made multi-instance hosting and
+// plugin-scan rescans impossible.
 
 static const char* s_features[] = {
     CLAP_PLUGIN_FEATURE_INSTRUMENT,
@@ -183,8 +185,8 @@ static void plugin_destroy(const clap_plugin_t* plugin) {
         m->core->~SSMInferenceCore();
         m->core = nullptr;
     }
-    m->~MambaSynth();
-    // Arena owns the memory; no delete needed.
+    delete m;
+    delete plugin;
 }
 
 static bool plugin_activate(const clap_plugin_t* plugin,
@@ -276,18 +278,6 @@ static void plugin_reset(const clap_plugin_t* plugin) {
 
 // Apply any param events drained from the SPSC queue. The audio thread
 // runs this at the start of each process() call.
-static void apply_params_from_queue(MambaSynth* m) {
-    ParamAtom atom;
-    while (m->param_queue.pop(atom)) {
-        if (atom.id >= PARAM_COUNT) continue;
-        m->param_values[atom.id].store(atom.value, std::memory_order_release);
-        m->params[atom.id].target.store(atom.value, std::memory_order_release);
-        if (atom.id == PARAM_BYPASS) {
-            const bool t = atom.value > 0.5;
-            m->bypass_target.store(t, std::memory_order_release);
-        }
-    }
-}
 
 // Apply a single param value to both the atomic and the smoother's
 // target. Used by params_flush (audio thread context) and the in-process
@@ -422,61 +412,6 @@ static void start_voice(MambaSynth* m, uint32_t v, int32_t key, int32_t channel,
 // Iterate note events in the input event list with sample-accurate
 // frame offsets. Each event's time is the offset within the current
 // process() block at which the event should take effect.
-static void process_note_events(MambaSynth* m,
-    const clap_input_events_t* in_events,
-    uint32_t frames) {
-    (void)frames;
-    const uint32_t count = in_events->size(in_events);
-    for (uint32_t i = 0; i < count; ++i) {
-        const clap_event_header_t* hdr = in_events->get(in_events, i);
-        if (hdr->space_id != CLAP_CORE_EVENT_SPACE_ID) continue;
-
-        if (hdr->type == CLAP_EVENT_NOTE_ON) {
-            const auto* ev = reinterpret_cast<const clap_event_note_t*>(hdr);
-            if (ev->velocity <= 0.0) {
-                // NOTE_ON with velocity 0 is a release (per CLAP spec).
-                // Find the voice playing this note and release it.
-                for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-                    if (m->voices[v].key == ev->key &&
-                        m->voices[v].channel == ev->channel &&
-                        (m->voices[v].stage == VOICE_ATTACK ||
-                         m->voices[v].stage == VOICE_SUSTAIN)) {
-                        m->voices[v].stage = VOICE_RELEASE;
-                        m->voice_atomics[v].stage.store(VOICE_RELEASE,
-                            std::memory_order_relaxed);
-                        break;
-                    }
-                }
-            } else {
-                // Allocate a voice and start the note.
-                int32_t v = allocate_voice(m);
-                if (v >= 0) {
-                    uint64_t nid = m->next_note_id++;
-                    start_voice(m, static_cast<uint32_t>(v),
-                                ev->key, ev->channel,
-                                static_cast<float>(ev->velocity), nid);
-                }
-            }
-        } else if (hdr->type == CLAP_EVENT_NOTE_OFF) {
-            const auto* ev = reinterpret_cast<const clap_event_note_t*>(hdr);
-            // Find the voice playing this note and release it.
-            for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-                if (m->voices[v].key == ev->key &&
-                    m->voices[v].channel == ev->channel &&
-                    (m->voices[v].stage == VOICE_ATTACK ||
-                     m->voices[v].stage == VOICE_SUSTAIN)) {
-                    m->voices[v].stage = VOICE_RELEASE;
-                    m->voice_atomics[v].stage.store(VOICE_RELEASE,
-                        std::memory_order_relaxed);
-                    break;
-                }
-            }
-        } else if (hdr->type == CLAP_EVENT_PARAM_VALUE) {
-            const auto* ev = reinterpret_cast<const clap_event_param_value_t*>(hdr);
-            apply_param_value(m, ev->param_id, ev->value);
-        }
-    }
-}
 
 // Build a conditioning frame from the most recently pressed voice
 // (highest note_id in ATTACK or SUSTAIN) and ARA context.
@@ -523,6 +458,12 @@ static void publish_state_mirror(MambaSynth* m) {
     for (uint32_t v = 0; v < MAX_VOICES; ++v) {
         slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
         slot->voice_snapshots[v].env = m->voices[v].env;
+        slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
+        slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
+        slot->voice_snapshots[v].velocity = m->voices[v].velocity;
+        slot->voice_snapshots[v].key = m->voices[v].key;
+        slot->voice_snapshots[v].channel = m->voices[v].channel;
+        slot->voice_snapshots[v].note_id = m->voices[v].note_id;
         slot->voice_snapshots[v].stage = m->voices[v].stage;
     }
     for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
@@ -536,243 +477,121 @@ static void publish_state_mirror(MambaSynth* m) {
     m->state_mirror.swap();
 }
 
+static void release_voice(MambaSynth* m, int32_t key, int32_t channel) {
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+        Voice& voice = m->voices[v];
+        if (voice.key == key && voice.channel == channel &&
+            (voice.stage == VOICE_ATTACK || voice.stage == VOICE_SUSTAIN)) {
+            voice.stage = VOICE_RELEASE;
+            m->voice_atomics[v].stage.store(VOICE_RELEASE, std::memory_order_relaxed);
+            return;
+        }
+    }
+}
+
+static void apply_process_event(MambaSynth* m, const clap_event_header_t* hdr) {
+    if (!hdr || hdr->space_id != CLAP_CORE_EVENT_SPACE_ID) return;
+    if (hdr->type == CLAP_EVENT_PARAM_VALUE && hdr->size >= sizeof(clap_event_param_value_t)) {
+        const auto* ev = reinterpret_cast<const clap_event_param_value_t*>(hdr);
+        apply_param_value(m, ev->param_id, ev->value);
+    } else if ((hdr->type == CLAP_EVENT_NOTE_ON || hdr->type == CLAP_EVENT_NOTE_OFF) &&
+               hdr->size >= sizeof(clap_event_note_t)) {
+        const auto* ev = reinterpret_cast<const clap_event_note_t*>(hdr);
+        if (hdr->type == CLAP_EVENT_NOTE_OFF || ev->velocity <= 0.0) {
+            release_voice(m, ev->key, ev->channel);
+        } else {
+            const int32_t v = allocate_voice(m);
+            if (v >= 0) start_voice(m, static_cast<uint32_t>(v), ev->key, ev->channel,
+                                    static_cast<float>(ev->velocity), m->next_note_id++);
+        }
+    }
+}
+
 static clap_process_status plugin_process(const clap_plugin_t* plugin,
     const clap_process_t* process) {
+    if (!plugin || !process || !process->audio_outputs || process->audio_outputs_count == 0)
+        return CLAP_PROCESS_ERROR;
     auto* m = get_synth(plugin);
-
     SSMBlock::apply_ftz_daz();
     m->thread_check.mark_audio_thread();
+
+    clap_audio_buffer_t& out_bus = process->audio_outputs[0];
+    const clap_audio_buffer_t* in_bus = process->audio_inputs && process->audio_inputs_count
+        ? &process->audio_inputs[0] : nullptr;
+    if ((!out_bus.data32 && !out_bus.data64) || out_bus.channel_count == 0)
+        return CLAP_PROCESS_ERROR;
 
     update_bypass_state_machine(m, process->frames_count);
     refresh_conditioning(m);
 
-    const float* input = nullptr;
-    float* output = nullptr;
-    if (process->audio_inputs_count > 0 && process->audio_inputs->data32) {
-        input = process->audio_inputs->data32[0];
-    }
-    if (process->audio_outputs_count > 0 && process->audio_outputs->data32) {
-        output = process->audio_outputs->data32[0];
-    }
-    if (!output) return CLAP_PROCESS_ERROR;
-
-    const float fade = m->bypass_fade.load(std::memory_order_relaxed);
     const uint32_t frames = process->frames_count;
-
-    // Pre-compute the per-parameter targets (load once).
-    const double t_gain = m->params[PARAM_GAIN].target.load(std::memory_order_relaxed);
-    const double t_mix  = m->params[PARAM_MIX].target.load(std::memory_order_relaxed);
+    const float fade = m->bypass_fade.load(std::memory_order_relaxed);
     const double c_gain = m->params[PARAM_GAIN].coeff;
-    const double c_mix  = m->params[PARAM_MIX].coeff;
-
+    const double c_mix = m->params[PARAM_MIX].coeff;
     double cur_gain = m->params[PARAM_GAIN].current.load(std::memory_order_relaxed);
-    double cur_mix  = m->params[PARAM_MIX].current.load(std::memory_order_relaxed);
-
-    // Pre-scan CLAP events and SPSC queue for sample-accurate scheduling.
-    // Events with frameOffset==0 apply immediately; others are stored in
-    // on-the-fly buffers indexed by frame.
-    //
-    // For SPSC queue (main thread -> audio thread params):
-    // Drain the queue at the start; apply frameOffset==0 now, buffer others.
-    // We use a simple static-size buffer: at most 8 pending param events.
-    static constexpr uint32_t MAX_PENDING_PARAMS = 8;
-    struct PendingParam { clap_id id; double value; uint32_t frame; };
-    PendingParam pending_params[MAX_PENDING_PARAMS];
-    uint32_t num_pending = 0;
-    {
-        ParamAtom atom;
-        while (m->param_queue.pop(atom)) {
-            if (atom.id >= PARAM_COUNT) continue;
-            if (atom.frame_offset == 0) {
-                apply_param_value(m, atom.id, atom.value);
-            } else if (num_pending < MAX_PENDING_PARAMS) {
-                pending_params[num_pending].id = atom.id;
-                pending_params[num_pending].value = atom.value;
-                pending_params[num_pending].frame = atom.frame_offset;
-                num_pending++;
-            }
-        }
-    }
-
-    // For CLAP events: build a compact per-frame offset list.
-    // Max CLAP events per process() is bounded (typically < 256).
-    static constexpr uint32_t MAX_CLAP_EVENTS = 256;
-    struct FrameEvent { uint32_t frame; bool is_note_on; int32_t key;
-                        int32_t channel; float velocity; };
-    FrameEvent frame_events[MAX_CLAP_EVENTS];
-    uint32_t num_frame_events = 0;
-    if (process->in_events) {
-        const uint32_t count = process->in_events->size(process->in_events);
-        for (uint32_t i = 0; i < count && num_frame_events < MAX_CLAP_EVENTS; ++i) {
-            const clap_event_header_t* hdr = process->in_events->get(process->in_events, i);
-            if (hdr->space_id != CLAP_CORE_EVENT_SPACE_ID) continue;
-            if (hdr->type == CLAP_EVENT_NOTE_ON) {
-                const auto* ev = reinterpret_cast<const clap_event_note_t*>(hdr);
-                frame_events[num_frame_events].frame = hdr->time;
-                frame_events[num_frame_events].is_note_on = ev->velocity > 0.0f;
-                frame_events[num_frame_events].key = ev->key;
-                frame_events[num_frame_events].channel = ev->channel;
-                frame_events[num_frame_events].velocity = static_cast<float>(ev->velocity);
-                num_frame_events++;
-            } else if (hdr->type == CLAP_EVENT_NOTE_OFF) {
-                const auto* ev = reinterpret_cast<const clap_event_note_t*>(hdr);
-                frame_events[num_frame_events].frame = hdr->time;
-                frame_events[num_frame_events].is_note_on = false;
-                frame_events[num_frame_events].key = ev->key;
-                frame_events[num_frame_events].channel = ev->channel;
-                frame_events[num_frame_events].velocity = 0.0f;
-                num_frame_events++;
-            } else if (hdr->type == CLAP_EVENT_PARAM_VALUE) {
-                const auto* ev = reinterpret_cast<const clap_event_param_value_t*>(hdr);
-                if (hdr->time == 0) {
-                    apply_param_value(m, ev->param_id, ev->value);
-                } else if (num_pending < MAX_PENDING_PARAMS) {
-                    pending_params[num_pending].id = ev->param_id;
-                    pending_params[num_pending].value = ev->value;
-                    pending_params[num_pending].frame = hdr->time;
-                    num_pending++;
-                }
-            }
-        }
-    }
-    // Sort pending events by frame
-    if (num_pending > 1) {
-        for (uint32_t i = 1; i < num_pending; ++i) {
-            for (uint32_t j = i; j > 0 && pending_params[j].frame < pending_params[j-1].frame; --j) {
-                PendingParam tmp = pending_params[j];
-                pending_params[j] = pending_params[j-1];
-                pending_params[j-1] = tmp;
-            }
-        }
-    }
-    // Sort frame events by frame
-    if (num_frame_events > 1) {
-        for (uint32_t i = 1; i < num_frame_events; ++i) {
-            for (uint32_t j = i; j > 0 && frame_events[j].frame < frame_events[j-1].frame; --j) {
-                FrameEvent tmp = frame_events[j];
-                frame_events[j] = frame_events[j-1];
-                frame_events[j-1] = tmp;
-            }
-        }
-    }
-    uint32_t pending_idx = 0;
-    uint32_t frame_event_idx = 0;
+    double cur_mix = m->params[PARAM_MIX].current.load(std::memory_order_relaxed);
+    const uint32_t event_count = process->in_events ? process->in_events->size(process->in_events) : 0;
+    uint32_t event_index = 0;
 
     for (uint32_t n = 0; n < frames; ++n) {
-        // Apply pending param changes at their target frame
-        while (pending_idx < num_pending && pending_params[pending_idx].frame == n) {
-            apply_param_value(m, pending_params[pending_idx].id,
-                              pending_params[pending_idx].value);
-            pending_idx++;
+        while (event_index < event_count) {
+            const clap_event_header_t* hdr = process->in_events->get(process->in_events, event_index);
+            if (!hdr) { ++event_index; continue; }
+            if (hdr->time > n) break;
+            apply_process_event(m, hdr);
+            ++event_index;
         }
+        advance_one_pole(cur_gain, m->params[PARAM_GAIN].target.load(std::memory_order_relaxed), c_gain);
+        advance_one_pole(cur_mix, m->params[PARAM_MIX].target.load(std::memory_order_relaxed), c_mix);
 
-        // Apply CLAP events at their target frame
-        while (frame_event_idx < num_frame_events && frame_events[frame_event_idx].frame == n) {
-            const auto& fe = frame_events[frame_event_idx];
-            if (fe.is_note_on) {
-                int32_t v = allocate_voice(m);
-                if (v >= 0) {
-                    uint64_t nid = m->next_note_id++;
-                    start_voice(m, static_cast<uint32_t>(v),
-                                fe.key, fe.channel, fe.velocity, nid);
-                }
-            } else {
-                for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-                    if (m->voices[v].key == fe.key &&
-                        m->voices[v].channel == fe.channel &&
-                        (m->voices[v].stage == VOICE_ATTACK ||
-                         m->voices[v].stage == VOICE_SUSTAIN)) {
-                        m->voices[v].stage = VOICE_RELEASE;
-                        m->voice_atomics[v].stage.store(VOICE_RELEASE,
-                            std::memory_order_relaxed);
-                        break;
-                    }
-                }
-            }
-            frame_event_idx++;
+        float dry[2] = {0.0f, 0.0f};
+        const uint32_t in_channels = in_bus ? std::min<uint32_t>(in_bus->channel_count, 2) : 0;
+        for (uint32_t ch = 0; ch < in_channels; ++ch) {
+            if (in_bus->data32 && in_bus->data32[ch]) dry[ch] = in_bus->data32[ch][n];
+            else if (in_bus->data64 && in_bus->data64[ch]) dry[ch] = static_cast<float>(in_bus->data64[ch][n]);
         }
-
-        advance_one_pole(cur_gain, t_gain, c_gain);
-        advance_one_pole(cur_mix,  t_mix,  c_mix);
-
-        const float in_sample = input ? input[n] : 0.0f;
+        const float mono = in_channels > 1 ? 0.5f * (dry[0] + dry[1]) : dry[0];
         float voice_sum = 0.0f;
-
-        // Process each active voice, accumulating output.
         for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-            auto& voice = m->voices[v];
-            uint8_t vs = voice.stage;
-            if (vs == VOICE_IDLE) continue;
-
-            // Envelope state machine
-            switch (vs) {
+            Voice& voice = m->voices[v];
+            switch (voice.stage) {
+            case VOICE_IDLE: continue;
             case VOICE_ATTACK:
                 voice.env += voice.attack_rate;
-                if (voice.env >= 1.0f) {
-                    voice.env = 1.0f;
-                    voice.stage = VOICE_SUSTAIN;
-                    m->voice_atomics[v].stage.store(VOICE_SUSTAIN,
-                        std::memory_order_relaxed);
-                }
+                if (voice.env >= 1.0f) { voice.env = 1.0f; voice.stage = VOICE_SUSTAIN; }
                 break;
-            case VOICE_SUSTAIN:
-                voice.env = 1.0f;
-                break;
+            case VOICE_SUSTAIN: voice.env = 1.0f; break;
             case VOICE_RELEASE:
                 voice.env -= voice.release_rate;
-                if (voice.env <= 0.0f) {
-                    voice.env = 0.0f;
-                    voice.stage = VOICE_SILENT;
-                    m->voice_atomics[v].stage.store(VOICE_SILENT,
-                        std::memory_order_relaxed);
-                }
+                if (voice.env <= 0.0f) { voice.env = 0.0f; voice.stage = VOICE_SILENT; }
                 break;
-            case VOICE_SILENT:
-                voice.env = 0.0f;
-                break;
-            default:
-                voice.env = 0.0f;
-                break;
+            case VOICE_SILENT: voice.env = 0.0f; break;
+            default: voice.env = 0.0f; break;
             }
-
+            m->voice_atomics[v].stage.store(voice.stage, std::memory_order_relaxed);
+            m->voice_atomics[v].env.store(voice.env, std::memory_order_relaxed);
             if (voice.env <= 0.0f) continue;
-
-            // Restore voice's SSM state, process, save state
             m->core->set_state(voice.ssm_state);
             alignas(64) float outbuf[MAX_D_MODEL];
-            m->core->process_sample(in_sample, outbuf);
+            m->core->process_sample(mono, outbuf);
             m->core->get_state(voice.ssm_state);
-
-            float processed = outbuf[0];
-            voice_sum += processed * voice.env * voice.velocity;
-
-            // Update atomic mirror for this voice
-            m->voice_atomics[v].env.store(voice.env, std::memory_order_relaxed);
+            voice_sum += outbuf[0] * voice.env * voice.velocity;
         }
-
-        // Mix dry/wet with gain
-        const float dry = in_sample;
         const float wet = voice_sum * static_cast<float>(cur_gain);
-        const float mixed = dry * static_cast<float>(1.0 - cur_mix)
-                          + wet  * static_cast<float>(cur_mix);
-
-        // Crossfade between processed (fade=0) and dry bypass (fade=1).
-        output[n] = mixed * (1.0f - fade) + dry * fade;
-
-        const uint32_t ch_count = process->audio_outputs->channel_count;
-        for (uint32_t ch = 1; ch < ch_count; ++ch) {
-            process->audio_outputs->data32[ch][n] = output[n];
+        for (uint32_t ch = 0; ch < out_bus.channel_count; ++ch) {
+            const float channel_dry = ch < in_channels ? dry[ch] : mono;
+            const float mixed = channel_dry * static_cast<float>(1.0 - cur_mix)
+                              + wet * static_cast<float>(cur_mix);
+            const float sample = mixed * (1.0f - fade) + channel_dry * fade;
+            if (out_bus.data32 && out_bus.data32[ch]) out_bus.data32[ch][n] = sample;
+            if (out_bus.data64 && out_bus.data64[ch]) out_bus.data64[ch][n] = sample;
         }
     }
-
     m->params[PARAM_GAIN].current.store(cur_gain, std::memory_order_relaxed);
     m->params[PARAM_MIX].current.store(cur_mix, std::memory_order_relaxed);
-
     publish_state_mirror(m);
-
     return CLAP_PROCESS_CONTINUE;
 }
-
 // Default behaviour: thread-check is queried from the host, not provided
 // by the plugin. The plugin's get_extension returns nullptr for
 // CLAP_EXT_THREAD_CHECK, and helpers in clap_thread_check.h use the
@@ -801,6 +620,9 @@ static const void* plugin_get_extension(const clap_plugin_t* plugin, const char*
     }
     if (strcmp(id, CLAP_EXT_GUI) == 0) {
         return &s_gui;
+    }
+    if (strcmp(id, CLAP_EXT_TIMER_SUPPORT) == 0) {
+        return &s_timer_support;
     }
     return nullptr;
 }
@@ -890,10 +712,8 @@ bool MambaSynth::load_weights(const char* path) {
 }
 
 const clap_plugin_t* mamba_synth_create(const clap_host_t* host) {
-    auto* m = static_cast<MambaSynth*>(
-        s_plugin_arena.allocate(sizeof(MambaSynth), alignof(MambaSynth)));
+    auto* m = new (std::nothrow) MambaSynth();
     if (!m) return nullptr;
-    new (m) MambaSynth();
     m->host = host;
     m->core = nullptr;
     m->weights_loaded.store(false, std::memory_order_relaxed);
@@ -905,6 +725,7 @@ const clap_plugin_t* mamba_synth_create(const clap_host_t* host) {
     m->bypass_state.store(BYPASS_PROCESSING, std::memory_order_relaxed);
     m->bypass_fade.store(0.0f, std::memory_order_relaxed);
     m->next_note_id = 1;
+    m->gui_data = nullptr;
     for (uint32_t v = 0; v < MAX_VOICES; ++v) {
         auto& voice = m->voices[v];
         std::memset(&voice, 0, sizeof(voice));
@@ -927,10 +748,8 @@ const clap_plugin_t* mamba_synth_create(const clap_host_t* host) {
     m->weight_path[0] = '\0';
     m->thread_check.set_host(host);
 
-    auto* plugin = static_cast<clap_plugin_t*>(
-        s_plugin_arena.allocate(sizeof(clap_plugin_t), alignof(clap_plugin_t)));
-    if (!plugin) return nullptr;
-    new (plugin) clap_plugin_t(s_plugin_class);
+    auto* plugin = new (std::nothrow) clap_plugin_t(s_plugin_class);
+    if (!plugin) { delete m; return nullptr; }
     plugin->plugin_data = m;
     return plugin;
 }

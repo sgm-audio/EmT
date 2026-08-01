@@ -262,16 +262,7 @@ static void params_flush(const clap_plugin_t* plugin, const clap_input_events_t*
             const auto* ev = reinterpret_cast<const clap_event_param_value_t*>(header);
             if (ev->param_id >= PARAM_COUNT) continue;
 
-            // Build an atom and apply it. When the plugin is active the
-            // process() loop drains the queue; here we also write
-            // directly to the atomics so a flush-only cycle (no
-            // process() in between) still updates the host's
-            // get_value() readings.
-            ParamAtom atom;
-            atom.id = ev->param_id;
-            atom.value = ev->value;
-            atom.frame_offset = header->time;
-            m->param_queue.push(atom);
+            ParamAtom atom{ev->param_id, ev->value, 0};
             apply_atom_to_state(m, atom);
         } else if (header->type == CLAP_EVENT_PARAM_MOD) {
             // Modulation is not supported in Phase 4; we still must
