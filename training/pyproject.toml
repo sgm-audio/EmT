@@ -1,0 +1,22 @@
+[project]
+name = "mamba-ssm-plugin-suite-training"
+version = "0.1.0"
+description = "Training scripts for the Mamba-3 CLAP plugin"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "PyYAML>=6.0",
+    "tqdm>=4.66",
+    "torch>=2.2.0",
+    "torchaudio>=2.2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["training"]

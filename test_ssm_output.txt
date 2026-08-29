@@ -1,0 +1,5 @@
+Running main() from C:\Users\scott\OneDrive\Desktop\Dev\mamba-ssm-plugin-suite-70317161\build\_deps\googletest-src\googletest\src\gtest_main.cc
+[==========] Running 9 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 6 tests from SSMBlock
+[ RUN      ] SSMBlock.ResetClearsState

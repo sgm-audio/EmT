@@ -15,31 +15,32 @@ static std::unique_ptr<SSMBlock> make_test_block() {
         MAX_NUM_BC_HEADS, COND_DIM);
 }
 
-static SSMWeights make_test_weights() {
-    SSMWeights w{};
-    std::memset(&w, 0, sizeof(w));
+// SSMWeights is ~4 MB — heap-allocate to avoid Debug stack overflow.
+static std::unique_ptr<SSMWeights> make_test_weights() {
+    auto w = std::make_unique<SSMWeights>();
+    std::memset(w.get(), 0, sizeof(*w));
     for (size_t j = 0; j < MAX_D_MODEL && j < MAX_D_INNER; ++j) {
-        w.in_proj_w[j][j] = 0.1f;
+        w->in_proj_w[j][j] = 0.1f;
     }
     for (size_t j = 0; j < MAX_D_MODEL; ++j) {
-        w.in_proj_w[MAX_D_INNER + j % MAX_D_INNER][j] = 0.1f;
+        w->in_proj_w[MAX_D_INNER + j % MAX_D_INNER][j] = 0.1f;
     }
     for (size_t h = 0; h < MAX_NHEADS; ++h) {
-        w.dt_bias[h] = 0.5f;
+        w->dt_bias[h] = 0.5f;
     }
     for (size_t s = 0; s < MAX_D_STATE; ++s) {
-        w.B_norm_weight[s] = 1.0f;
-        w.C_norm_weight[s] = 1.0f;
+        w->B_norm_weight[s] = 1.0f;
+        w->C_norm_weight[s] = 1.0f;
     }
     for (size_t j = 0; j < MAX_D_MODEL && j < MAX_D_INNER; ++j) {
-        w.out_proj_w[j][j] = 1.0f;
+        w->out_proj_w[j][j] = 1.0f;
     }
     return w;
 }
 
 TEST(SSMBlock, ResetClearsState) {
     auto block = make_test_block();
-    block->set_weights(make_test_weights());
+    block->set_weights(*make_test_weights());
     alignas(64) float buf[MAX_D_MODEL];
     for (int i = 0; i < 10; ++i) block->process_sample(1.0f, buf);
     block->reset();
@@ -49,7 +50,7 @@ TEST(SSMBlock, ResetClearsState) {
 
 TEST(SSMBlock, ProcessBlockProducesOutput) {
     auto block = make_test_block();
-    block->set_weights(make_test_weights());
+    block->set_weights(*make_test_weights());
     constexpr size_t N = 16;
     float input[N] = {1.0f, 0.5f};
     float output[N * MAX_D_MODEL] = {0.0f};
@@ -68,7 +69,7 @@ TEST(SSMBlock, StateDimensions) {
 
 TEST(SSMBlock, NoLeakAfterMultipleRuns) {
     auto block = make_test_block();
-    block->set_weights(make_test_weights());
+    block->set_weights(*make_test_weights());
     alignas(64) float buf[MAX_D_MODEL];
     for (int iter = 0; iter < 100; ++iter) block->process_sample(0.1f, buf);
     block->reset();
@@ -79,11 +80,11 @@ TEST(SSMBlock, NoLeakAfterMultipleRuns) {
 TEST(SSMBlock, DifferentWeightsProduceDifferentOutputs) {
     auto block1 = make_test_block();
     auto block2 = make_test_block();
-    SSMWeights w1 = make_test_weights();
-    SSMWeights w2 = make_test_weights();
-    w2.dt_bias[0] = 10.0f;  // dramatically different dt
-    block1->set_weights(w1);
-    block2->set_weights(w2);
+    auto w1 = make_test_weights();
+    auto w2 = make_test_weights();
+    w2->dt_bias[0] = 10.0f;  // dramatically different dt
+    block1->set_weights(*w1);
+    block2->set_weights(*w2);
     alignas(64) float buf1[MAX_D_MODEL];
     alignas(64) float buf2[MAX_D_MODEL];
     block1->process_sample(1.0f, buf1);
@@ -95,7 +96,7 @@ TEST(SSMBlock, DifferentWeightsProduceDifferentOutputs) {
 
 TEST(SSMBlock, SetConditioningDoesNotCrash) {
     auto block = make_test_block();
-    block->set_weights(make_test_weights());
+    block->set_weights(*make_test_weights());
     float cond[COND_DIM] = {0.0f};
     cond[0] = 120.0f; cond[1] = 0.5f;
     block->set_conditioning(cond);
@@ -112,7 +113,7 @@ TEST(SSMInferenceCore, MultiLayerProcessing) {
     cfg.num_layers = MAX_LAYERS;
     core->init(cfg);
     for (uint32_t layer = 0; layer < MAX_LAYERS; ++layer)
-        core->set_layer_weights(layer, make_test_weights());
+        core->set_layer_weights(layer, *make_test_weights());
     alignas(64) float outbuf[MAX_D_MODEL];
     core->process_sample(1.0f, outbuf);
     EXPECT_FALSE(std::isnan(outbuf[0]));
@@ -125,7 +126,7 @@ TEST(SSMInferenceCore, ResetClearsState) {
     cfg.num_layers = 2;
     core->init(cfg);
     for (uint32_t layer = 0; layer < 2; ++layer)
-        core->set_layer_weights(layer, make_test_weights());
+        core->set_layer_weights(layer, *make_test_weights());
     alignas(64) float rbuf[MAX_D_MODEL];
     for (int i = 0; i < 100; ++i) core->process_sample(0.5f, rbuf);
     core->reset();
@@ -141,8 +142,8 @@ TEST(SSMInferenceCore, GetSetStateRoundTrip) {
     core1->init(cfg);
     core2->init(cfg);
     for (uint32_t layer = 0; layer < 2; ++layer) {
-        core1->set_layer_weights(layer, make_test_weights());
-        core2->set_layer_weights(layer, make_test_weights());
+        core1->set_layer_weights(layer, *make_test_weights());
+        core2->set_layer_weights(layer, *make_test_weights());
     }
     alignas(64) float rbuf[MAX_D_MODEL];
     for (int i = 0; i < 50; ++i) core1->process_sample(0.5f, rbuf);
