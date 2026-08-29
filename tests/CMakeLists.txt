@@ -61,6 +61,8 @@ gtest_discover_tests(test_realtime_safety)
 
 add_executable(test_cpp_parity test_cpp_parity.cpp)
 target_link_libraries(test_cpp_parity PRIVATE core common GTest::gtest GTest::gtest_main)
+target_compile_definitions(test_cpp_parity PRIVATE
+    MAMBA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 if(MSVC)
     target_link_options(test_cpp_parity PRIVATE "/STACK:16777216")
 endif()

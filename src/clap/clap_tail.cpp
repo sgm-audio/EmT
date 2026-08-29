@@ -6,8 +6,7 @@ namespace mamba {
 // Tail is the time the plugin keeps producing audio after the host has
 // stopped sending new events (e.g. a held note still ringing out).
 // clap.tail::get() returns samples. We return a small constant
-// corresponding to the conv1d ringdown plus a few hundred ms of
-// implicit envelope decay.
+// corresponding to a conservative portion of the envelope/SSM decay.
 //
 // INT32_MAX is reserved for "infinite tail" per the CLAP spec.
 static uint32_t tail_get(const clap_plugin_t* plugin) {

@@ -206,6 +206,51 @@ TEST_F(WeightLoaderTest, BadVersion) {
     EXPECT_EQ(loader.load(tmp_path_), -12);
 }
 
+TEST_F(WeightLoaderTest, RejectsLegacyVersionOneLayout) {
+    ASSERT_TRUE(create_valid_weight_file());
+    FILE* f = fopen(tmp_path_, "r+b");
+    ASSERT_NE(f, nullptr);
+    WeightFileHeader hdr{};
+    ASSERT_EQ(fread(&hdr, sizeof(hdr), 1, f), 1u);
+    hdr.version = 1;
+    rewind(f);
+    ASSERT_EQ(fwrite(&hdr, sizeof(hdr), 1, f), 1u);
+    fclose(f);
+
+    WeightLoader loader;
+    EXPECT_EQ(loader.load(tmp_path_), -12);
+}
+
+TEST_F(WeightLoaderTest, RejectsReservedHeaderFields) {
+    ASSERT_TRUE(create_valid_weight_file());
+    FILE* f = fopen(tmp_path_, "r+b");
+    ASSERT_NE(f, nullptr);
+    WeightFileHeader hdr{};
+    ASSERT_EQ(fread(&hdr, sizeof(hdr), 1, f), 1u);
+    hdr.flags = 1;
+    rewind(f);
+    ASSERT_EQ(fwrite(&hdr, sizeof(hdr), 1, f), 1u);
+    fclose(f);
+
+    WeightLoader loader;
+    EXPECT_EQ(loader.load(tmp_path_), -16);
+}
+
+TEST_F(WeightLoaderTest, RejectsUnexpectedQuantizationMetadata) {
+    ASSERT_TRUE(create_valid_weight_file());
+    FILE* f = fopen(tmp_path_, "r+b");
+    ASSERT_NE(f, nullptr);
+    WeightFileHeader hdr{};
+    ASSERT_EQ(fread(&hdr, sizeof(hdr), 1, f), 1u);
+    hdr.q_metadata_size = 16;
+    rewind(f);
+    ASSERT_EQ(fwrite(&hdr, sizeof(hdr), 1, f), 1u);
+    fclose(f);
+
+    WeightLoader loader;
+    EXPECT_EQ(loader.load(tmp_path_), -17);
+}
+
 TEST_F(WeightLoaderTest, FileTooSmall) {
     FILE* f = fopen(tmp_path_, "wb");
     ASSERT_NE(f, nullptr);

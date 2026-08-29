@@ -28,9 +28,9 @@ static const char* s_features[] = {
 static const clap_plugin_descriptor_t s_descriptor = {
     CLAP_VERSION_INIT,
     "com.mamba-ssm.synth",
-    "Mamba Synth",
-    "Mamba Audio",
-    "https://mamba-audio.com",
+    "EmT Synth",
+    "EmT Audio",
+    "",
     "",
     "",
     "0.3.0",
@@ -651,55 +651,30 @@ bool MambaSynth::load_weights(const char* path) {
     if (!path || path[0] == '\0') return false;
     if (weight_loader.load(path) != 0) return false;
 
-    // Validate dimensions against the loaded header
+    // WeightLoader has already validated all header dimensions against the
+    // compile-time maxima. Adopt the file's runtime dimensions before the
+    // core is reinitialized; do not require the file to match the one-layer
+    // placeholder configuration created during plugin init.
     const auto& hdr = weight_loader.header();
-    if (!weight_loader.validate_dimensions(
-            hdr.d_state, hdr.d_model, hdr.d_inner,
-            hdr.nheads, hdr.headdim,
-            static_cast<uint32_t>(core_cfg.num_layers))) {
-        weight_loader.unload();
-        return false;
-    }
-
-    // Update core config from header
     core_cfg.d_state = hdr.d_state;
     core_cfg.d_model = hdr.d_model;
     core_cfg.d_inner = hdr.d_inner;
     core_cfg.nheads = hdr.nheads;
     core_cfg.headdim = hdr.headdim;
     core_cfg.cond_dim = hdr.cond_dim;
-    if (hdr.version == 2) {
-        core_cfg.num_layers = hdr.num_layers;
-    }
+    core_cfg.num_rope_angles = hdr.d_state / 2;
+    core_cfg.num_layers = hdr.num_layers;
     core->init(core_cfg);
 
-    // Load weights: 13 arrays per layer (Mamba-3 layout)
+    // Use the stride-aware materialization path for every format, including
+    // Float32. A flat memcpy from packed file rows into MAX_*-strided arrays
+    // corrupts every row after the first when runtime dimensions are smaller.
     for (uint32_t layer = 0; layer < core_cfg.num_layers; ++layer) {
-        WeightLayerPointers ptrs;
-        if (weight_loader.get_layer_pointers(layer, ptrs) != 0) {
+        SSMWeights w{};
+        if (weight_loader.dequantize_layer_to(layer, w) != 0) {
             weight_loader.unload();
             return false;
         }
-
-        SSMWeights w{};
-        size_t in_proj_out = core_cfg.d_inner * 2
-                           + core_cfg.nheads * MAX_MIMO_RANK * core_cfg.d_state * 2
-                           + core_cfg.nheads * 3
-                           + MAX_NUM_ROPE_ANGLES;
-        std::memcpy(w.in_proj_w,      ptrs.in_proj_w,      in_proj_out * core_cfg.d_model * sizeof(float));
-        std::memcpy(w.dt_bias,        ptrs.dt_bias,        core_cfg.nheads * sizeof(float));
-        std::memcpy(w.B_bias,         ptrs.B_bias,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.d_state * sizeof(float));
-        std::memcpy(w.C_bias,         ptrs.C_bias,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.d_state * sizeof(float));
-        std::memcpy(w.B_norm_weight,  ptrs.B_norm_weight,  core_cfg.d_state * sizeof(float));
-        std::memcpy(w.C_norm_weight,  ptrs.C_norm_weight,  core_cfg.d_state * sizeof(float));
-        std::memcpy(w.mimo_x,         ptrs.mimo_x,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.headdim * sizeof(float));
-        std::memcpy(w.mimo_z,         ptrs.mimo_z,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.headdim * sizeof(float));
-        std::memcpy(w.mimo_o,         ptrs.mimo_o,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.headdim * sizeof(float));
-        std::memcpy(w.D_proj,         ptrs.D_proj,         core_cfg.nheads * sizeof(float));
-        std::memcpy(w.out_proj_w,     ptrs.out_proj_w,     core_cfg.d_model * core_cfg.d_inner * sizeof(float));
-        std::memcpy(w.film_proj_w,    ptrs.film_proj_w,    2 * core_cfg.d_model * core_cfg.cond_dim * sizeof(float));
-        std::memcpy(w.dt_film_proj_w, ptrs.dt_film_proj_w, 2 * core_cfg.nheads * core_cfg.cond_dim * sizeof(float));
-
         core->set_layer_weights(layer, w);
     }
     weights_loaded.store(true, std::memory_order_release);

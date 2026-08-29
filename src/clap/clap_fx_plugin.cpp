@@ -303,12 +303,12 @@ static const char* fx_features[] = {
 static const clap_plugin_descriptor_t fx_descriptor = {
     CLAP_VERSION_INIT,
     "com.mamba-ssm.fx",
-    "Mamba FX",
-    "Mamba Audio",
-    "https://mamba-audio.com",
+    "EmT FX",
+    "EmT Audio",
     "",
     "",
-    "0.1.0",
+    "",
+    "0.3.0",
     "Mamba-3 SSM neural audio effect with FiLM conditioning",
     reinterpret_cast<const char* const*>(fx_features)
 };
