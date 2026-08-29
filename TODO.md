@@ -1,159 +1,128 @@
-# Mamba-SSM CLAP/ARA Plugin Suite — TODO
+# EmT Plugin Suite — Corrected Project Plan
 
-**Last updated: 2026-06-16**
-**Completion: ~95%** (Mamba-3 migration complete, C++↔Python at 1e-5, 40/40 tests passing)
+**Audit date:** 2026-08-29  
+**Authority:** source/tests in this checkout; refresh status after each verified build.
 
----
+Status: `[x]` implemented with source/test support, `[ ]` open, `[~]` partial, `[B]` externally blocked. Implemented does not mean packaged, host-validated, or released.
 
-## Critical Bugs — FIXED
+## Corrections made in this audit
 
-| # | Bug | Status | Files Changed |
-|---|-----|--------|--------------|
-| C1 | ~~selective scan input aliasing~~ | **FIXED** — was already correct (`conv_out_[i]` uses first `d_state` elements, matching PyTorch `u[:, :d_state]`) | — |
-| C2 | `process_block()` summed `d_model` channels to scalar | **FIXED** — now writes `d_model` floats per sample | `ssm_block.cpp`, `ssm_inference_core.cpp`, `test_ssm_block.cpp`, `benchmark_ssm_block.cpp` |
-| C3a | `export_mamba_weights.py` didn't pass `cond_dim` to `floats_per_layer()` | **FIXED** | `export_mamba_weights.py:188` |
-| C3b | `validate_export.py` missing reads for `cond_dt_bias` / `cond_B_bias` | **FIXED** | `validate_export.py:113-118` |
+- [x] Reject format v1 rather than parse its Mamba-1 layout as Mamba-3.
+- [x] Validate reserved header fields, exact quantization metadata size, and exact weight-data size.
+- [x] Route Float32 synth loading through stride-aware materialization; flat packed-to-`MAX_*` copies corrupted non-maximal layouts.
+- [x] Adopt `num_layers` from a valid file instead of comparing it to the one-layer placeholder core.
+- [x] Change compatible display names to EmT Synth/EmT FX while retaining stable IDs/formats.
+- [x] Enable top-level CTest registration; previously all test executables built but `ctest` reported no tests.
+- [x] Make the parity test locate its source fixture under CTest and reuse canonical stride-aware materialization.
+- [x] Correct documentation that claimed convolution, monophony, arena allocation, zero-copy inference, obsolete ports/extensions, and complete FX/ARA behavior.
 
-### Bug also fixed (Jun 13 + Jun 15)
+## Phase 0 — trustworthy baseline and correctness
 
-| # | Bug | Date | Files Changed |
-|---|-----|------|---------------|
-| B1 | `process_block()` conditioning applied `softplus(dt_raw)` before adding conditioning, not after | Jun 13 | `ssm_block.cpp` |
-| B2 | `SSMInferenceCore::process_block()` ping-pong buffer aliasing | Jun 13 | `ssm_inference_core.cpp:74-100` |
-| B3 | Tests + benchmark: stack buffer overflow in `process_block` output | Jun 13 | `test_ssm_block.cpp`, `benchmark_ssm_block.cpp` |
-| B4 | **Flat `memcpy` corrupts multi-D weight arrays** — `SSMWeights` MAX_* strides differ from runtime dims; only first ~21 rows of `in_proj_w` and only head 0 of B/C/mimo arrays received real data | Jun 15 | `ssm_block.cpp`, `weight_loader.cpp`, `test_cpp_parity.cpp`, `reference_mamba3.py`, `reference_forward.py` |
+- [x] MSVC 19.51 Release build succeeded on 2026-08-29; CTest passed 43/43 after discovery/parity fixes.
+- [ ] Reduce or explicitly classify current MSVC warnings (alignment padding, CRT portability, allocator declaration mismatch); the build is not zero-warning.
+- [x] `validate_export.py models/test_model.bin` passed and CTest parity passed on 2026-08-29; fixture regeneration remains part of future format changes.
+- [ ] Add a plugin-level test proving small Float32 and multi-layer files load without stride corruption.
+- [ ] Test truncated metadata, trailing bytes, invalid structural relationships, non-finite quant scales, and invalid zero points.
+- [ ] Enforce `d_inner == nheads * headdim`, even `d_state`, `d_state/2 <= MAX_NUM_ROPE_ANGLES`, and supported fixed MIMO/BC layout.
+- [ ] Make failed reload transactional. A mid-load failure can currently destroy the previous core/config while leaving stale load state.
+- [ ] Replace integer loader errors with a documented enum/error-string API.
+- [ ] Reconcile `README.md`, `GAP_ANALYSIS.md`, `agent.md`, old prompts, ADRs, and parameter docs.
 
----
+Exit: clean Release build, tests/export/parity pass, and every remaining correctness gap is explicit.
 
-## Remaining Work — By Priority
+## Phase 1 — CLAP host correctness
 
-### P0 — Correctness (ALL DONE)
+- [ ] Test both descriptors, creation by stable ID, and repeated lifecycle sequences.
+- [ ] Validate frame/port/channel counts against activation limits.
+- [ ] Test Float32, Float64, mixed representations, in-place buffers, missing inputs, and stereo independence.
+- [ ] Test event order/timestamps, invalid sizes/IDs, queue overflow, and parameter clamping.
+- [ ] Decide whether EmT Synth should expose a stereo audio input.
+- [ ] Replace the non-portable validator target; missing validation must fail visibly.
+- [ ] Run official `clap-validator` and at least two hosts per supported platform.
+- [ ] Verify thread-check fallback behavior without advertising a nonexistent plugin extension.
 
-| # | Task | Status | Notes |
-|---|------|--------|-------|
-| P0-1 | Write NumPy reference Mamba forward pass for C++ parity test | `[x]` | `scripts/reference_mamba3.py` |
-| P0-2 | Unit test: C++ output vs NumPy reference at 1e-5 tolerance | `[x]` | `test_cpp_parity` passes |
-| P0-3 | Long-run stability test (10+ minutes, verify no NaN/inf/state explosion) | `[x]` | 3/3 tests, 522ms on small config |
-| P0-4 | C++ round-trip test: load binary weights, run inference, compare vs PyTorch | `[x]` | Export→validate→run pipeline verified |
+Exit: automated lifecycle/port/event coverage and current official validation for both plugins.
 
-### P1 — Features
+## Phase 2 — complete EmT Synth
 
-| # | Task | Status | Blocked By |
-|---|------|--------|------------|
-| P1-1 | Voice polyphony (N-voice round-robin, currently monophonic only) | `[ ]` | — |
-| P1-2 | Preset management beyond state serialization | `[ ]` | — |
-| P1-3 | Mamba FX plugin (long-context neural audio effect) | `[ ]` | — |
-| P1-4 | ARA Generative Companion plugin | `[ ]` | P1-3, ARA SDK |
+- [~] Eight shared-core voice slots exist; musical behavior and cost are unvalidated.
+- [ ] Define allocation/stealing for note IDs, channels, keys, overlaps, choke/end, and expression.
+- [ ] Review signed CLAP note IDs versus stored `uint64_t` and wildcard matching.
+- [ ] Test state/preset restore, corruption, partial streams, voice identity, and model-path restore.
+- [ ] Decide whether state embeds a model hash/identity rather than only a path.
+- [ ] Reconcile fixed per-voice rates with Attack/Release parameters.
+- [ ] Define `d_model`-to-stereo mapping; current synth uses only `outbuf[0]`.
+- [ ] Add finite-output, level-bound, rapid-note, and long-session tests through CLAP process.
 
-### P2 — Performance
+Exit: documented musical semantics, deterministic restore, bounded voice cost, host-tested audio.
 
-| # | Task | Status | Blocked By |
-|---|------|--------|------------|
-| P2-1 | SIMD in B_proj / C_proj dot-products (strided `[d_inner][d_state]` layout) | `[ ]` | **Layout refactor**: needs transposed `[d_state][d_inner]` in `SSMWeights`, weight loader, export script |
-| P2-2 | SIMD in selective scan recurrence (inherently sequential, may not vectorize) | `[ ]` | P2-1 |
-| P2-3 | Profile with `perf` — identify top hot spots | `[ ]` | — |
-| P2-4 | Benchmark at 44.1kHz and 48kHz sample rates | `[ ]` | — |
-| P2-5 | `apply_ftz_daz()` ARM path (currently x86 `ldmxcsr` only) | `[ ]` | ARM hardware or cross-compile |
+## Phase 3 — make EmT FX real
 
-### P3 — Integration / Tooling
+- [ ] Implement main-thread weight loading with transactional publication.
+- [ ] Add FX state save/load for parameters and model identity/path.
+- [ ] Define a dedicated effect model/input-output contract if scalar mono inference is insufficient.
+- [ ] Preserve stereo; current FX sums to mono and duplicates `processed[0]`.
+- [ ] Define no-weight/invalid-weight behavior. Current wet output is silence; safe passthrough needs an explicit decision.
+- [ ] Add FX-specific lifecycle, ports, params, state, bypass, Float64, and validator tests.
 
-| # | Task | Status | Blocked By |
-|---|------|--------|------------|
-| P3-1 | Run `clap-validator` against `.clap` bundle | **BLOCKED** | `clap-validator` tool not installed |
-| P3-2 | Real-time safety: Valgrind/ASan on `process()` path | `[ ]` | — |
-| P3-3 | Real-time safety: Helgrind/TSan on audio thread | `[ ]` | — |
-| P3-4 | Cross-platform build (macOS arm64/x86_64, Windows) | `[ ]` | macOS/Windows hardware |
-| P3-5 | CI script or Makefile packaging target | `[ ]` | — |
+Exit: non-silent model-backed stereo processing, persisted state, safe failure, independent validation.
 
-### P4 — ARA SDK (Full Phase 5)
+## Phase 4 — weight and training pipeline
 
-| # | Task | Status | Blocked By |
-|---|------|--------|------------|
-| P4-1 | Obtain ARA SDK from Celemony | **BLOCKED** | **Celemony license / download** |
-| P4-2 | Replace ARA stubs with real SDK (`ARA::PlugIn::PlugIn`, `DocumentController`, `PlaybackRenderer`, `EditorRenderer`) | **BLOCKED** | P4-1 |
-| P4-3 | DocumentController: create/archive/restore, persist state | **BLOCKED** | P4-2 |
-| P4-4 | PlaybackRenderer: offline bounce with ARA musical context | **BLOCKED** | P4-2 |
-| P4-5 | EditorRenderer: waveform visualization, playback sync | **BLOCKED** | P4-2 |
-| P4-6 | Wire ARA conditioning to SSM parameter modulation | **BLOCKED** | P4-2 |
+- [ ] Centralize/generate C++ and Python layout arithmetic from one schema.
+- [ ] Encode implicit `mimo_rank`, BC grouping, and RoPE layout in a future header, or freeze them for v2.
+- [ ] Decide whether `MAX_*`-padded disk strides are intentional; they couple files to builds and inflate small models.
+- [ ] Add checksums/integrity metadata and separate model-semantic versioning.
+- [ ] Test export-to-C++ parity for Float32, both Int8 modes, and FP16.
+- [ ] Correct FP16 subnormal conversion or freeze flush-to-zero behavior in the contract.
+- [ ] Add golden files/migration tooling for every supported version.
 
-### P5 — GUI
+Exit: reproducible export, all formats parity-tested, integrity checked, compatibility policy documented.
 
-| # | Task | Status | Blocked By |
-|---|------|--------|------------|
-| P5-1 | Plugin GUI (parameter knobs, waveform, conditioning display) | `[ ]` | — |
+## Phase 5 — real-time safety and performance
 
-### P6 — Documentation & Packaging
+- [ ] Intercept allocations on actual synth/FX process call graphs.
+- [ ] Run ASan/UBSan and concurrency tooling where supported.
+- [ ] Prove bounded behavior and expose diagnostics when the 256-event queue fills.
+- [ ] Review seqlock spinning under a stalled writer; lock-free is not wait-free.
+- [ ] Measure p50/p95/p99/max callbacks, xruns, CPU, and memory at 44.1/48/96/192 kHz across model/block sizes.
+- [ ] Profile before changing fixed-stride B/C/MIMO layout or adding SIMD.
+- [ ] Optimize `process_block()` only with parity and regression benchmarks.
+- [ ] Measure shared-core per-voice state-copy cost.
+- [ ] Measure end-to-end latency separately from zero-sample algorithmic latency.
 
-| # | Task | Status | Blocked By |
-|---|------|--------|------------|
-| P6-1 | README: build instructions, deps, installation | `[ ]` | — |
-| P6-2 | Bundle packaging: Linux `.clap`, macOS bundle, `Info.plist` | `[ ]` | — |
-| P6-3 | LICENSE file | `[ ]` | — |
-| P6-4 | Parameter reference docs | `[ ]` | — |
-| P6-5 | Architecture overview docs | `[ ]` | — |
+Exit: no tested real-time violations and hardware-qualified performance budgets.
 
----
+## Phase 6 — GUI and user experience
 
-## Blocked Items Summary
+- [~] Linux/X11 synth GUI exists; Windows/macOS and FX GUI do not.
+- [ ] Choose/document a cross-platform GUI and ownership/thread model.
+- [ ] Add accessible labels, model status/errors, metering, and conditioning state.
+- [ ] Implement parameter gestures and correct host rescan/flush interactions.
+- [ ] Test scale/resize/lifecycle and timer-registration failures.
+- [ ] Rename preset/bundle identifiers only through an approved migration.
 
-| Blocked Item | Blocker | Resolution Path |
-|-------------|---------|-----------------|
-| P3-1 (clap-validator) | Tool not installed | Install from [github.com/free-audio/clap](https://github.com/free-audio/clap) |
-| P4-1–P4-6 (ARA SDK) | Celemony proprietary SDK | Request ARA SDK license from [celemony.com](https://celemony.com) |
-| P2-1 (SIMD B/C projections) | Strided `[d_inner][d_state]` weight layout | Refactor to `[d_state][d_inner]` across `SSMWeights`, `WeightLoader`, `export_mamba_weights.py` |
-| P2-5 (ARM FTZ/DAZ) | No ARM build target | Cross-compile or test on ARM hardware |
-| P3-4 (cross-platform) | No macOS/Windows hardware | CI or VM |
+Exit: usable on supported platforms without affecting headless/audio operation.
 
----
+## Phase 7 — ARA integration
 
-## Completed Artifacts
+- [B] Obtain/license the Celemony ARA SDK.
+- [ ] Treat current classes as internal stubs, not compliance scaffolding.
+- [ ] Design real CLAP/ARA factory/bindings and lifecycle from licensed SDK material.
+- [ ] Implement controller, renderers, persistence, offline render, and conditioning bridge.
+- [ ] Remove global singleton context where instance/document isolation requires it.
+- [ ] Add SDK conformance and compatible-host tests.
 
-```
-src/core/arena_allocator.h/cpp       [done] — mmap-backed bump allocator
-src/core/ring_buffer.h               [done] — SPSC lock-free ring buffer
-src/core/seqlock.h                   [done] — Seqlock with acquire/release
-src/core/ssm_block.h/cpp             [done] — SSM math, ZOH discretization, selective scan, d_model output
-src/core/ssm_inference_core.h/cpp    [done] — Multi-layer wrapper, process_block with d_model buffers
-src/core/simd_helpers.h              [done] — SSE2/NEON dot_product, fmadd, scale
-src/core/weight_loader.h/cpp         [done] — mmap weight loader with FP16/INT8 dequant
-src/clap/clap_plugin.h/cpp           [done] — CLAP plugin with audio/note/params/state/tail/thread-check
-src/clap/clap_entry.cpp              [done] — clap_entry factory
-src/ara/                             [stub] — Custom stubs (needs real ARA SDK)
-scripts/export_mamba_weights.py      [done] — PyTorch → flat binary export
-scripts/validate_export.py           [done] — Binary → PyTorch round-trip validation
-models/test_model.bin                [done] — Generated test model
-tests/test_ssm_block.cpp             [done] — 9 tests
-tests/test_weight_loader.cpp         [done] — 21 tests
-tests/test_conditioning.cpp          [done] — 3 tests
-tests/benchmark_ssm_block.cpp        [done] — 0.65 us/sample (15x below 10us target)
-```
+Exit: SDK-linked ARA integration validated in hosts; blocked until then.
 
----
+## Phase 8 — CI, packaging, and release
 
-## Test Status
+- [ ] Add Windows/macOS/Linux Release CI, tests, validation, and appropriate warnings gates.
+- [ ] Produce correct CLAP bundles; current macOS rules are not verified bundle packaging.
+- [ ] Add checksums, provenance, SBOM/license checks, signing/notarization, and installers.
+- [ ] Add hardware-aware benchmark reporting.
+- [ ] Complete LICENSE and third-party notices.
+- [ ] Create an EmT compatibility migration matrix and release notes.
+- [ ] Do not publish, sign, deploy, or upload without explicit approval.
 
-```
-40/40 passing
-Benchmark: 1.787 us/sample single-layer (d_model=16), 3.725 us/sample 2-layer (target: <10 us/sample)
-Export round-trip: PASSED (2 layers, ds=16 dm=16 di=32 nh=2 hd=16 cd=128)
-Parity test: C++ vs Python at 1e-5 tolerance — PASSED
-```
-
-## Quick Reference
-
-```bash
-# Build
-cmake -B build && cmake --build build --parallel 4
-
-# Test
-./build/tests/test_ssm_block && ./build/tests/test_weight_loader && ./build/tests/test_conditioning
-
-# Benchmark
-./build/tests/benchmark_ssm_block
-
-# Export weights
-python3 scripts/export_mamba_weights.py --random-init --layers 2 --output models/test_model.bin --config-h src/config.h
-
-# Validate export
-python3 scripts/validate_export.py models/test_model.bin
-```
+Exit: green platform CI, validator/host evidence, recoverable signed packages, approved release.

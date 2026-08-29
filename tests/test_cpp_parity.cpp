@@ -19,10 +19,7 @@
 using namespace mamba;
 
 // Test helper: load SSMWeights from file into a single-layer SSMBlock
-static std::unique_ptr<SSMBlock> load_parity_block(const char* weight_path,
-                                                    size_t d_state, size_t d_model,
-                                                    size_t d_inner, size_t nheads,
-                                                    size_t headdim, size_t d_cond) {
+static std::unique_ptr<SSMBlock> load_parity_block(const char* weight_path) {
     WeightLoader loader;
     int rc = loader.load(weight_path);
     if (rc != 0) {
@@ -30,17 +27,7 @@ static std::unique_ptr<SSMBlock> load_parity_block(const char* weight_path,
         return nullptr;
     }
 
-    WeightLayerPointers ptrs;
-    if (loader.get_layer_pointers(0, ptrs) != 0) {
-        fprintf(stderr, "Failed to get layer 0 pointers\n");
-        return nullptr;
-    }
-
     const auto& hdr = loader.header();
-    size_t in_proj_out = hdr.d_inner * 2
-                       + hdr.nheads * MAX_MIMO_RANK * hdr.d_state * 2
-                       + hdr.nheads * 3
-                       + MAX_NUM_ROPE_ANGLES;
 
     auto block = std::make_unique<SSMBlock>(
         hdr.d_state, hdr.d_model, hdr.d_inner,
@@ -48,40 +35,10 @@ static std::unique_ptr<SSMBlock> load_parity_block(const char* weight_path,
         MAX_NUM_BC_HEADS, hdr.cond_dim);
 
     SSMWeights w{};
-    std::memset(&w, 0, sizeof(w));
-
-    size_t ds = hdr.d_state, dm = hdr.d_model, di = hdr.d_inner;
-    size_t nh = hdr.nheads, hd = hdr.headdim, cd = hdr.cond_dim;
-
-    // Row-by-row copy for in_proj_w: destination stride is MAX_D_MODEL, source is dm
-    for (size_t r = 0; r < in_proj_out; ++r) {
-        std::memcpy(w.in_proj_w[r], ptrs.in_proj_w + r * dm, dm * sizeof(float));
+    if (loader.dequantize_layer_to(0, w) != 0) {
+        fprintf(stderr, "Failed to materialize layer 0 weights\n");
+        return nullptr;
     }
-    std::memcpy(w.dt_bias,        ptrs.dt_bias,        nh * sizeof(float));
-    // Multi-D arrays: file has runtime dims, SSMWeights has MAX_* strides
-    for (size_t h = 0; h < nh; ++h) {
-        for (size_t r = 0; r < MAX_MIMO_RANK; ++r) {
-            size_t file_off = (h * MAX_MIMO_RANK + r) * ds;
-            std::memcpy(w.B_bias[h][r], ptrs.B_bias + file_off, ds * sizeof(float));
-            std::memcpy(w.C_bias[h][r], ptrs.C_bias + file_off, ds * sizeof(float));
-            std::memcpy(w.mimo_x[h][r], ptrs.mimo_x + file_off, ds * sizeof(float));
-            std::memcpy(w.mimo_z[h][r], ptrs.mimo_z + file_off, ds * sizeof(float));
-            std::memcpy(w.mimo_o[h][r], ptrs.mimo_o + file_off, ds * sizeof(float));
-        }
-    }
-    std::memcpy(w.B_norm_weight,  ptrs.B_norm_weight,  ds * sizeof(float));
-    std::memcpy(w.C_norm_weight,  ptrs.C_norm_weight,  ds * sizeof(float));
-    std::memcpy(w.D_proj,         ptrs.D_proj,         nh * sizeof(float));
-    // out_proj_w: [dm, di] in file, [MAX_D_MODEL, MAX_D_INNER] in struct
-    for (size_t r = 0; r < dm; ++r) {
-        std::memcpy(w.out_proj_w[r], ptrs.out_proj_w + r * di, di * sizeof(float));
-    }
-    // film_proj_w: [2*dm, cd] in file, [2*MAX_D_MODEL, COND_DIM] in struct
-    for (size_t r = 0; r < 2 * dm; ++r) {
-        std::memcpy(w.film_proj_w[r], ptrs.film_proj_w + r * cd, cd * sizeof(float));
-    }
-    // dt_film_proj_w: [2*nh, cd]
-    std::memcpy(w.dt_film_proj_w, ptrs.dt_film_proj_w, 2 * nh * cd * sizeof(float));
 
     block->set_weights(w);
     loader.unload();
@@ -96,8 +53,8 @@ static std::unique_ptr<SSMBlock> load_parity_block(const char* weight_path,
 }
 
 TEST(CppParity, OutputMatchesPythonReference) {
-    const char* weight_path = "build/parity_test_weights.bin";
-    const char* expect_path = "build/parity_expected.bin";
+    const char* weight_path = MAMBA_SOURCE_DIR "/build/parity_test_weights.bin";
+    const char* expect_path = MAMBA_SOURCE_DIR "/build/parity_expected.bin";
 
     // Check files exist
     FILE* check = fopen(weight_path, "rb");
@@ -131,7 +88,7 @@ TEST(CppParity, OutputMatchesPythonReference) {
     ASSERT_GE(num_samples, 1u);
 
     // Load C++ block
-    auto block = load_parity_block(weight_path, 16, 16, 32, 2, 16, 128);
+    auto block = load_parity_block(weight_path);
     ASSERT_NE(block, nullptr);
 
     // Test inputs matching Python: [0.0, 1.0, -1.0, 0.5, -0.5, ...]

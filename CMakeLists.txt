@@ -5,6 +5,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Register tests declared by gtest_discover_tests() with the top-level CTest
+# project. Without this, test executables build but `ctest` reports no tests.
+include(CTest)
+
 if(MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG")
     set(CMAKE_CXX_FLAGS_DEBUG "/Od /Zi")

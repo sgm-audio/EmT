@@ -37,7 +37,7 @@ struct SSMWeights {
     // Layout: [in_proj_out, d_model]
     // in_proj_out = z(d_inner) + x(d_inner) + B(d_state*mimo_rank*nheads)
     //               + C(same) + dd_dt(nheads) + dd_A(nheads)
-    //               + trap(nheads) + angles(nheads * num_rope_angles)
+    //               + trap(nheads) + shared angles(num_rope_angles)
     static constexpr size_t IN_PROJ_OUT =
         MAX_D_INNER * 2
         + MAX_NHEADS * MAX_MIMO_RANK * MAX_D_STATE * 2

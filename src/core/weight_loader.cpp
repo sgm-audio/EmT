@@ -105,13 +105,14 @@ int WeightLoader::load(const char* path) {
 
     header_ = static_cast<const WeightFileHeader*>(mapped_data_);
 
-    // Accept both version 1 (Mamba-1) and version 2 (Mamba-3)
     if (header_->magic != WEIGHT_MAGIC) {
         unload();
         return -11;
     }
 
-    if (header_->version != 1 && header_->version != 2) {
+    // Version 1 has a different Mamba-1 tensor layout. This loader only
+    // implements the version-2 Mamba-3 layout and must not reinterpret v1.
+    if (header_->version != WEIGHT_VERSION) {
         unload();
         return -12;
     }
@@ -131,6 +132,28 @@ int WeightLoader::load(const char* path) {
         return -15;
     }
 
+    if (header_->flags != 0 || header_->reserved != 0) {
+        unload();
+        return -16;
+    }
+
+    size_t expected_q_meta_size = 0;
+    switch (quant_format()) {
+        case QuantFormat::Float32:
+        case QuantFormat::FP16:
+            break;
+        case QuantFormat::Int8Tensor:
+            expected_q_meta_size = sizeof(TensorQMetaRaw);
+            break;
+        case QuantFormat::Int8PerLayer:
+            expected_q_meta_size = sizeof(LayerQMetaRaw) * header_->num_layers;
+            break;
+    }
+    if (header_->q_metadata_size != expected_q_meta_size) {
+        unload();
+        return -17;
+    }
+
     // Compute offset of weight data (header + q-metadata)
     const uint8_t* base = static_cast<const uint8_t*>(mapped_data_);
     size_t q_meta_size = header_->q_metadata_size;
@@ -147,7 +170,7 @@ int WeightLoader::load(const char* path) {
     // Per-layer size validation
     size_t expected_bpl = bytes_per_layer();
     size_t expected_total = expected_bpl * header_->num_layers;
-    if (weight_data_bytes_ < expected_total) {
+    if (weight_data_bytes_ != expected_total) {
         unload();
         return -13;
     }

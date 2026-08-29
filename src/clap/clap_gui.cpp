@@ -57,7 +57,7 @@ static void draw(GuiInstance* g) {
     XSetForeground(g->display, g->gc, 0x2D2D2D);
     XFillRectangle(g->display, g->window, g->gc, 0, 0, g->width, g->height);
     XSetForeground(g->display, g->gc, 0xFFFFFF);
-    const char* title = "Mamba Synth";
+    const char* title = "EmT Synth";
     XDrawString(g->display, g->window, g->gc, 10, 20, title, 11);
     const int spacing = g->width / (PARAM_COUNT + 1);
     for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
