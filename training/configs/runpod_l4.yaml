@@ -1,0 +1,40 @@
+# Runpod L4 cloud instance (24 GB VRAM) — larger Mamba-3 config.
+#
+# Target: train a richer model that still fits the C++ MAX_* limits in src/config.h.
+# Estimated VRAM ~18 GB at batch_size=8; leaves headroom for mixed-precision and
+# gradient accumulation.
+
+# Architecture
+# ------------
+d_state: 32
+d_model: 1          # scalar raw audio; increase to 4/8 for frame-based tokens
+d_inner: 256
+nheads: 4
+headdim: 64
+num_layers: 6
+mimo_rank: 1
+cond_dim: 128      # full FiLM conditioning vector
+
+# Training
+# --------
+# Reference trainer is a pure-Python loop; 4096 samples/step is a practical
+# ceiling before you would switch to optimized CUDA kernels.  Effective batch
+# is still 16 (4 * 4 grad_accum).
+batch_size: 4
+seq_len: 4096
+sample_rate: 44100
+epochs: 50
+lr: 5.0e-4
+weight_decay: 0.01
+betas: [0.9, 0.999]
+grad_accum: 4       # effective batch = 16
+optimizer: adamw
+scheduler: cosine
+warmup_steps: 1000
+save_every: 2000
+seed: 42
+
+# Performance
+# -----------
+amp: true
+num_workers: 4

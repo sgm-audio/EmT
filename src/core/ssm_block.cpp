@@ -11,6 +11,8 @@
 
 namespace {
 
+static constexpr float PI_f = 3.14159265358979323846f;
+
 void set_mxcsr_ftz_daz_impl() {
 #if defined(_MSC_VER) && (defined(__x86_64__) || defined(_M_X64) || defined(__i386__))
     unsigned int mxcsr = _mm_getcsr();
@@ -228,7 +230,7 @@ void SSMBlock::process_sample(float input, float* output) {
         for (size_t a = 0; a < num_rope_angles_; ++a) {
             // Update angle state
             float angle = state_.angle_state[h][a] + angle_ptr[a];
-            angle = std::fmod(angle, 2.0f * static_cast<float>(M_PI));
+            angle = std::fmod(angle, 2.0f * PI_f);
             state_.angle_state[h][a] = angle;
 
             float cos_a = std::cos(angle);
