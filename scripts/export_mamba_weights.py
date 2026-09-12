@@ -124,9 +124,11 @@ class Mamba3Block(nn.Module):
         trap = proj[..., idx:idx + self.nheads]; idx += self.nheads
         angles = proj[..., idx:idx + self.num_rope_angles]
 
-        # Reshape B, C
-        B = B_raw.view(batch, seq_len, self.nheads, self.mimo_rank, self.d_state)
-        C = C_raw.view(batch, seq_len, self.nheads, self.mimo_rank, self.d_state)
+        # Reshape B, C and clone so that in-place RoPE updates are safe
+        # during PyTorch training (backward through in-place views of in_proj
+        # would otherwise raise an error).
+        B = B_raw.view(batch, seq_len, self.nheads, self.mimo_rank, self.d_state).clone()
+        C = C_raw.view(batch, seq_len, self.nheads, self.mimo_rank, self.d_state).clone()
 
         # Step 2: Preprocess A and dt (with A clamping)
         A_floor = 1.0
@@ -140,34 +142,38 @@ class Mamba3Block(nn.Module):
         C_rms = C.pow(2).mean(dim=-1, keepdim=True).add(1e-5).rsqrt()
         C = C * C_rms * self.C_norm_weight.view(1, 1, 1, 1, -1) + self.C_bias
 
-        # Step 4: RoPE on B and C
-        # angles: (B, S, num_rope_angles)
-        angle_state = torch.zeros(batch, self.nheads, self.num_rope_angles, device=device)
-        for t in range(seq_len):
-            for a_idx in range(self.num_rope_angles):
-                angle = angle_state[:, :, a_idx] + angles[:, t, a_idx].unsqueeze(1)
-                angle = torch.fmod(angle, 2.0 * math.pi)
-                angle_state[:, :, a_idx] = angle
+        # Step 4: RoPE on B and C (vectorized, no in-place ops for training)
+        # angles: (B, S, num_rope_angles); cumulative angle per head.
+        angle_state = torch.cumsum(angles, dim=1)                 # (B, S, nra)
+        angle_state = torch.fmod(angle_state, 2.0 * math.pi)
 
-                cos_a = torch.cos(angle)
-                sin_a = torch.sin(angle)
+        # Reshape so the last dim is (real, imag) pairs.
+        # B/C: (B, S, nheads, mimo_rank, d_state)
+        B_pairs = B.view(batch, seq_len, self.nheads, self.mimo_rank,
+                         self.num_rope_angles, 2)
+        C_pairs = C.view(batch, seq_len, self.nheads, self.mimo_rank,
+                         self.num_rope_angles, 2)
 
-                s0 = a_idx
-                s1 = a_idx + self.num_rope_angles
-                if s1 >= self.d_state:
-                    continue
+        # Broadcast angles across the mimo_rank and pair dimensions.
+        # angle_state: (B, S, nra)  ->  (B, S, 1, 1, nra, 1) to broadcast over head/mimo/pair
+        cos_a = torch.cos(angle_state).unsqueeze(2).unsqueeze(3).unsqueeze(5)
+        sin_a = torch.sin(angle_state).unsqueeze(2).unsqueeze(3).unsqueeze(5)
 
-                # Rotate B
-                B0 = B[:, t, :, :, s0]
-                B1 = B[:, t, :, :, s1]
-                B[:, t, :, :, s0] = B0 * cos_a.unsqueeze(2) - B1 * sin_a.unsqueeze(2)
-                B[:, t, :, :, s1] = B0 * sin_a.unsqueeze(2) + B1 * cos_a.unsqueeze(2)
+        # Keep the pair dim explicit for broadcasting: (B,S,nh,mr,nra,1)
+        B0, B1 = B_pairs[..., :1], B_pairs[..., 1:]
+        C0, C1 = C_pairs[..., :1], C_pairs[..., 1:]
 
-                # Rotate C (conjugate)
-                C0 = C[:, t, :, :, s0]
-                C1 = C[:, t, :, :, s1]
-                C[:, t, :, :, s0] = C0 * cos_a.unsqueeze(2) + C1 * sin_a.unsqueeze(2)
-                C[:, t, :, :, s1] = -C0 * sin_a.unsqueeze(2) + C1 * cos_a.unsqueeze(2)
+        B_rot = torch.cat([
+            B0 * cos_a - B1 * sin_a,
+            B0 * sin_a + B1 * cos_a,
+        ], dim=-1)
+        C_rot = torch.cat([
+            C0 * cos_a + C1 * sin_a,
+           -C0 * sin_a + C1 * cos_a,
+        ], dim=-1)
+
+        B = B_rot.view(batch, seq_len, self.nheads, self.mimo_rank, self.d_state)
+        C = C_rot.view(batch, seq_len, self.nheads, self.mimo_rank, self.d_state)
 
         # State: (B, nheads, headdim, d_state)
         h = torch.zeros(batch, self.nheads, self.headdim, self.d_state,
@@ -246,24 +252,29 @@ class Mamba3Model(nn.Module):
 
 WEIGHT_MAGIC = 0x4D424D41
 WEIGHT_VERSION = 2  # Mamba-3 format
-HEADER_FMT = '<9I4I4xQ'
+HEADER_FMT = '<12IQQ'
 HEADER_SIZE = 64
+
+# Compile-time layout constants (must match C++ config.h).
+# The weight file uses these fixed-size slots regardless of actual model dims.
+MAX_MIMO_RANK = 4
+MAX_NUM_ROPE_ANGLES = 16
 
 
 def floats_per_layer(ds: int, dm: int, di: int, nh: int, mr: int,
                      hd: int, cd: int) -> int:
-    """Compute number of float32 elements per layer."""
-    nra = ds // 2  # num_rope_angles
-    in_proj_out = di * 2 + nh * mr * ds * 2 + nh * 3 + nra
+    """Compute number of float32 elements per layer (MAX_*-padded layout)."""
+    nra = MAX_NUM_ROPE_ANGLES  # padded to MAX for file layout
+    in_proj_out = di * 2 + nh * MAX_MIMO_RANK * ds * 2 + nh * 3 + nra
     return (in_proj_out * dm +       # in_proj_w
             nh +                      # dt_bias
-            nh * mr * ds +            # B_bias
-            nh * mr * ds +            # C_bias
+            nh * MAX_MIMO_RANK * ds + # B_bias
+            nh * MAX_MIMO_RANK * ds + # C_bias
             ds +                      # B_norm_weight
             ds +                      # C_norm_weight
-            nh * mr * hd +            # mimo_x
-            nh * mr * hd +            # mimo_z
-            nh * mr * hd +            # mimo_o
+            nh * MAX_MIMO_RANK * hd + # mimo_x
+            nh * MAX_MIMO_RANK * hd + # mimo_z
+            nh * MAX_MIMO_RANK * hd + # mimo_o
             nh +                      # D_proj
             dm * di +                 # out_proj_w
             2 * dm * cd +             # film_proj_w
@@ -272,44 +283,96 @@ def floats_per_layer(ds: int, dm: int, di: int, nh: int, mr: int,
 
 def make_header(ds: int, dm: int, di: int, nh: int, hd: int,
                 nl: int, cd: int, wds: int) -> bytes:
-    """Build 64-byte WeightFileHeader (version 2)."""
+    """Build 64-byte WeightFileHeader (version 2, 12IQQ layout)."""
     data = struct.pack(HEADER_FMT,
                        WEIGHT_MAGIC, WEIGHT_VERSION,
                        ds, dm, di, nh, nl, hd, cd,
-                       0, 0, 0, 0, wds)
+                       0, 0, 0,  # quantization, q_metadata_size, flags
+                       wds, 0)   # weight_data_size, reserved
     assert len(data) == HEADER_SIZE
     return data
 
 
 def extract_layer_weights(block: Mamba3Block) -> bytes:
-    """Extract per-layer weights in C++ WeightLoader order (13 arrays)."""
-    parts = []
-    # 1. in_proj_w: (in_proj_out, d_model)
-    parts.append(block.in_proj.weight.detach().cpu().numpy().tobytes())
+    """Extract per-layer weights in MAX_*-padded C++ WeightLoader order (13 arrays)."""
+    ds, dm, di = block.d_state, block.d_model, block.d_inner
+    nh, mr, hd = block.nheads, block.mimo_rank, block.headdim
+    cd = block.cond_dim
+    nra = MAX_NUM_ROPE_ANGLES  # file-layout stride
+
+    # Pad model arrays to MAX_* layout (insert zero-filled slots)
+    import numpy as np
+
+    # 1. in_proj_w: pad to MAX_MIMO_RANK and MAX_NUM_ROPE_ANGLES layout
+    in_proj_model = block.in_proj.weight.detach().cpu().numpy().astype(np.float32)
+    in_proj_out_file = di * 2 + nh * MAX_MIMO_RANK * ds * 2 + nh * 3 + nra
+    in_proj_file = np.zeros((in_proj_out_file, dm), dtype=np.float32)
+
+    # z and x portions (same sizes)
+    in_proj_file[:di * 2, :] = in_proj_model[:di * 2, :]
+
+    # B portion: expand from mimo_rank to MAX_MIMO_RANK stride
+    b_start_model = di * 2
+    b_start_file = di * 2
+    for h_idx in range(nh):
+        src = b_start_model + h_idx * mr * ds
+        dst = b_start_file + h_idx * MAX_MIMO_RANK * ds
+        in_proj_file[dst:dst + mr * ds, :] = in_proj_model[src:src + mr * ds, :]
+
+    # C portion: expand from mimo_rank to MAX_MIMO_RANK stride
+    c_start_model = b_start_model + nh * mr * ds
+    c_start_file = b_start_file + nh * MAX_MIMO_RANK * ds
+    for h_idx in range(nh):
+        src = c_start_model + h_idx * mr * ds
+        dst = c_start_file + h_idx * MAX_MIMO_RANK * ds
+        in_proj_file[dst:dst + mr * ds, :] = in_proj_model[src:src + mr * ds, :]
+
+    # dd_dt, dd_A, trap (same sizes, contiguous after padded B/C)
+    rest_src = c_start_model + nh * mr * ds
+    rest_dst = c_start_file + nh * MAX_MIMO_RANK * ds
+    rest_size = nh * 3  # dd_dt + dd_A + trap
+    in_proj_file[rest_dst:rest_dst + rest_size, :] = in_proj_model[rest_src:rest_src + rest_size, :]
+
+    # angles portion: pad to MAX_NUM_ROPE_ANGLES
+    angles_src = rest_src + rest_size
+    angles_dst = rest_dst + rest_size
+    model_angles = ds // 2
+    in_proj_file[angles_dst:angles_dst + model_angles, :] = in_proj_model[angles_src:angles_src + model_angles, :]
+
+    parts = [in_proj_file.tobytes()]
+
     # 2. dt_bias: (nheads,)
-    parts.append(block.dt_bias.detach().cpu().numpy().tobytes())
-    # 3. B_bias: (nheads, mimo_rank, d_state)
-    parts.append(block.B_bias.detach().cpu().numpy().tobytes())
-    # 4. C_bias: (nheads, mimo_rank, d_state)
-    parts.append(block.C_bias.detach().cpu().numpy().tobytes())
+    parts.append(block.dt_bias.detach().cpu().numpy().astype(np.float32).tobytes())
+
+    # 3-4. B_bias, C_bias: pad to MAX_MIMO_RANK
+    for arr_name in ['B_bias', 'C_bias']:
+        model_arr = getattr(block, arr_name).detach().cpu().numpy().astype(np.float32)
+        padded = np.zeros((nh, MAX_MIMO_RANK, ds), dtype=np.float32)
+        padded[:, :mr, :] = model_arr
+        parts.append(padded.tobytes())
+
     # 5. B_norm_weight: (d_state,)
-    parts.append(block.B_norm_weight.detach().cpu().numpy().tobytes())
+    parts.append(block.B_norm_weight.detach().cpu().numpy().astype(np.float32).tobytes())
     # 6. C_norm_weight: (d_state,)
-    parts.append(block.C_norm_weight.detach().cpu().numpy().tobytes())
-    # 7. mimo_x: (nheads, mimo_rank, headdim)
-    parts.append(block.mimo_x.detach().cpu().numpy().tobytes())
-    # 8. mimo_z: (nheads, mimo_rank, headdim)
-    parts.append(block.mimo_z.detach().cpu().numpy().tobytes())
-    # 9. mimo_o: (nheads, mimo_rank, headdim)
-    parts.append(block.mimo_o.detach().cpu().numpy().tobytes())
+    parts.append(block.C_norm_weight.detach().cpu().numpy().astype(np.float32).tobytes())
+
+    # 7-9. mimo_x, mimo_z, mimo_o: pad to MAX_MIMO_RANK
+    for arr_name in ['mimo_x', 'mimo_z', 'mimo_o']:
+        model_arr = getattr(block, arr_name).detach().cpu().numpy().astype(np.float32)
+        padded = np.zeros((nh, MAX_MIMO_RANK, hd), dtype=np.float32)
+        padded[:, :mr, :] = model_arr
+        parts.append(padded.tobytes())
+
     # 10. D_proj: (nheads,)
-    parts.append(block.D_proj.detach().cpu().numpy().tobytes())
+    parts.append(block.D_proj.detach().cpu().numpy().astype(np.float32).tobytes())
+
     # 11. out_proj_w: (d_model, d_inner)
-    parts.append(block.out_proj.weight.detach().cpu().numpy().tobytes())
+    parts.append(block.out_proj.weight.detach().cpu().numpy().astype(np.float32).tobytes())
     # 12. film_proj_w: (2*d_model, d_cond)
-    parts.append(block.film_proj.weight.detach().cpu().numpy().tobytes())
+    parts.append(block.film_proj.weight.detach().cpu().numpy().astype(np.float32).tobytes())
     # 13. dt_film_proj_w: (2*nheads, d_cond)
-    parts.append(block.dt_film_proj.weight.detach().cpu().numpy().tobytes())
+    parts.append(block.dt_film_proj.weight.detach().cpu().numpy().astype(np.float32).tobytes())
+
     return b''.join(parts)
 
 
@@ -355,7 +418,7 @@ def _random_init(model: Mamba3Model, std: float = 0.02):
 
 
 def generate_config_h(ds: int, dm: int, di: int, nh: int, hd: int,
-                      nl: int, cd: int, path: Optional[str] = None) -> str:
+                      nl: int, cd: int, mr: int, path: Optional[str] = None) -> str:
     nra = ds // 2
     content = f'''#ifndef CONFIG_H
 #define CONFIG_H
@@ -366,7 +429,7 @@ def generate_config_h(ds: int, dm: int, di: int, nh: int, hd: int,
 #define MAX_D_INNER {di}
 #define MAX_HEADDIM {hd}
 #define MAX_NHEADS {nh}
-#define MAX_MIMO_RANK 1
+#define MAX_MIMO_RANK {mr}
 #define MAX_NUM_BC_HEADS 1
 #define MAX_NUM_ROPE_ANGLES {nra}
 #define MAX_CHUNK_SIZE 128
@@ -430,7 +493,8 @@ def main():
     if args.config_h:
         generate_config_h(args.state_dim, args.model_dim,
                           args.inner_dim, args.nheads, headdim,
-                          args.layers, args.cond_dim, args.config_h)
+                          args.layers, args.cond_dim, MAX_MIMO_RANK,
+                          args.config_h)
 
 
 if __name__ == '__main__':

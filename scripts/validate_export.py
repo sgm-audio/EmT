@@ -23,6 +23,7 @@ import torch
 sys.path.insert(0, os.path.dirname(__file__))
 from export_mamba_weights import (
     WEIGHT_MAGIC, WEIGHT_VERSION, HEADER_SIZE,
+    MAX_MIMO_RANK, MAX_NUM_ROPE_ANGLES,
     floats_per_layer, Mamba3Block, Mamba3Model
 )
 
@@ -33,7 +34,7 @@ RTOL = 1e-5
 def load_header(path: str) -> dict:
     with open(path, 'rb') as f:
         raw = f.read(HEADER_SIZE)
-    fields = struct.unpack('<9I4I4x Q', raw)
+    fields = struct.unpack('<12IQQ', raw)
     return {
         'magic': fields[0],
         'version': fields[1],
@@ -44,13 +45,16 @@ def load_header(path: str) -> dict:
         'num_layers': fields[6],
         'headdim': fields[7],
         'cond_dim': fields[8],
-        'reserved': list(fields[9:13]),
-        'weight_data_size': fields[13],
+        'quantization': fields[9],
+        'q_metadata_size': fields[10],
+        'flags': fields[11],
+        'weight_data_size': fields[12],
+        'reserved': fields[13],
     }
 
 
 def load_weights_into_model(model: Mamba3Model, path: str) -> Mamba3Model:
-    """Load flat-binary weights into a PyTorch Mamba-3 model."""
+    """Load MAX_*-padded flat-binary weights into a PyTorch Mamba-3 model."""
     hdr = load_header(path)
     ds = hdr['d_state']
     dm = hdr['d_model']
@@ -59,10 +63,10 @@ def load_weights_into_model(model: Mamba3Model, path: str) -> Mamba3Model:
     hd = hdr['headdim']
     nl = hdr['num_layers']
     cd = hdr['cond_dim']
-    mr = 1  # mimo_rank (fixed at 1 for now)
-    nra = ds // 2
+    mr = model.layers[0].mimo_rank  # model's actual mimo_rank (not MAX_)
 
-    in_proj_out = di * 2 + nh * mr * ds * 2 + nh * 3 + nra
+    in_proj_out_file = di * 2 + nh * MAX_MIMO_RANK * ds * 2 + nh * 3 + MAX_NUM_ROPE_ANGLES
+    in_proj_out_model = di * 2 + nh * mr * ds * 2 + nh * 3 + (ds // 2)
 
     fpl = floats_per_layer(ds, dm, di, nh, mr, hd, cd)
     file_size = os.path.getsize(path)
@@ -80,39 +84,71 @@ def load_weights_into_model(model: Mamba3Model, path: str) -> Mamba3Model:
     for li in range(nl):
         block = model.layers[li]
 
-        def read(shape):
+        def read(n):
             nonlocal offset
-            n = int(np.prod(shape))
-            data = torch.from_numpy(arr[offset:offset + n].copy()).reshape(shape)
+            data = arr[offset:offset + n].copy()
             offset += n
             return data
 
-        # 1. in_proj_w: (in_proj_out, d_model)
-        block.in_proj.weight.data = read((in_proj_out, dm))
+        # 1. in_proj_w: read from MAX_*-padded file layout, extract model-sized portion
+        in_proj_file = read(in_proj_out_file * dm).reshape(in_proj_out_file, dm)
+        in_proj_model_arr = np.zeros((in_proj_out_model, dm), dtype=np.float32)
+        # z and x portions (same size)
+        in_proj_model_arr[:di * 2, :] = in_proj_file[:di * 2, :]
+        # B: extract mr*ds per head from MAX_MIMO_RANK stride
+        b_src = di * 2
+        b_dst = di * 2
+        for h_idx in range(nh):
+            src = b_src + h_idx * MAX_MIMO_RANK * ds
+            dst = b_dst + h_idx * mr * ds
+            in_proj_model_arr[dst:dst + mr * ds, :] = in_proj_file[src:src + mr * ds, :]
+        # C: extract mr*ds per head from MAX_MIMO_RANK stride
+        c_src = b_src + nh * MAX_MIMO_RANK * ds
+        c_dst = b_dst + nh * mr * ds
+        for h_idx in range(nh):
+            src = c_src + h_idx * MAX_MIMO_RANK * ds
+            dst = c_dst + h_idx * mr * ds
+            in_proj_model_arr[dst:dst + mr * ds, :] = in_proj_file[src:src + mr * ds, :]
+        # dd_dt, dd_A, trap (same size)
+        rest_src = c_src + nh * MAX_MIMO_RANK * ds
+        rest_dst = c_dst + nh * mr * ds
+        rest_size = nh * 3
+        in_proj_model_arr[rest_dst:rest_dst + rest_size, :] = in_proj_file[rest_src:rest_src + rest_size, :]
+        # angles portion
+        angles_src = rest_src + rest_size
+        angles_dst = rest_dst + rest_size
+        in_proj_model_arr[angles_dst:angles_dst + (ds // 2), :] = in_proj_file[angles_src:angles_src + (ds // 2), :]
+        block.in_proj.weight.data = torch.from_numpy(in_proj_model_arr)
+
         # 2. dt_bias: (nheads,)
-        block.dt_bias.data = read((nh,))
-        # 3. B_bias: (nheads, mimo_rank, d_state)
-        block.B_bias.data = read((nh, mr, ds))
-        # 4. C_bias: (nheads, mimo_rank, d_state)
-        block.C_bias.data = read((nh, mr, ds))
+        block.dt_bias.data = torch.from_numpy(read(nh))
+
+        # 3. B_bias: padded to MAX_MIMO_RANK — extract mr portion
+        B_bias_file = read(nh * MAX_MIMO_RANK * ds).reshape(nh, MAX_MIMO_RANK, ds)
+        block.B_bias.data = torch.from_numpy(B_bias_file[:, :mr, :].copy())
+
+        # 4. C_bias: padded to MAX_MIMO_RANK — extract mr portion
+        C_bias_file = read(nh * MAX_MIMO_RANK * ds).reshape(nh, MAX_MIMO_RANK, ds)
+        block.C_bias.data = torch.from_numpy(C_bias_file[:, :mr, :].copy())
+
         # 5. B_norm_weight: (d_state,)
-        block.B_norm_weight.data = read((ds,))
+        block.B_norm_weight.data = torch.from_numpy(read(ds))
         # 6. C_norm_weight: (d_state,)
-        block.C_norm_weight.data = read((ds,))
-        # 7. mimo_x: (nheads, mimo_rank, headdim)
-        block.mimo_x.data = read((nh, mr, hd))
-        # 8. mimo_z: (nheads, mimo_rank, headdim)
-        block.mimo_z.data = read((nh, mr, hd))
-        # 9. mimo_o: (nheads, mimo_rank, headdim)
-        block.mimo_o.data = read((nh, mr, hd))
+        block.C_norm_weight.data = torch.from_numpy(read(ds))
+
+        # 7-9. mimo_x, mimo_z, mimo_o: padded to MAX_MIMO_RANK
+        for attr in ['mimo_x', 'mimo_z', 'mimo_o']:
+            arr_file = read(nh * MAX_MIMO_RANK * hd).reshape(nh, MAX_MIMO_RANK, hd)
+            getattr(block, attr).data = torch.from_numpy(arr_file[:, :mr, :].copy())
+
         # 10. D_proj: (nheads,)
-        block.D_proj.data = read((nh,))
+        block.D_proj.data = torch.from_numpy(read(nh))
         # 11. out_proj_w: (d_model, d_inner)
-        block.out_proj.weight.data = read((dm, di))
+        block.out_proj.weight.data = torch.from_numpy(read(dm * di).reshape(dm, di))
         # 12. film_proj_w: (2*d_model, d_cond)
-        block.film_proj.weight.data = read((2 * dm, cd))
+        block.film_proj.weight.data = torch.from_numpy(read(2 * dm * cd).reshape(2 * dm, cd))
         # 13. dt_film_proj_w: (2*nheads, d_cond)
-        block.dt_film_proj.weight.data = read((2 * nh, cd))
+        block.dt_film_proj.weight.data = torch.from_numpy(read(2 * nh * cd).reshape(2 * nh, cd))
 
     assert offset == fpl * nl, (
         f"Read {offset} floats, expected {fpl * nl}")
