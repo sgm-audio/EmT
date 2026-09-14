@@ -16,7 +16,7 @@
 #include <vector>
 #include <memory>
 
-using namespace mamba;
+using namespace emt;
 
 // Test helper: load SSMWeights from file into a single-layer SSMBlock
 static std::unique_ptr<SSMBlock> load_parity_block(const char* weight_path,

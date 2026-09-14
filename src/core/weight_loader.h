@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace mamba {
+namespace emt {
 
 // ---------------------------------------------------------------------------
 // On-disk weight file format (Mamba-3)
@@ -202,6 +202,6 @@ inline float fp16_to_fp32(uint16_t h) {
     return result;
 }
 
-} // namespace mamba
+} // namespace emt
 
 #endif

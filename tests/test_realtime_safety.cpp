@@ -7,7 +7,7 @@
 #include <cmath>
 #include <memory>
 
-using namespace mamba;
+using namespace emt;
 
 TEST(RealtimeSafety, ProcessCallGraphAudit) {
     auto core = std::make_unique<SSMInferenceCore>();

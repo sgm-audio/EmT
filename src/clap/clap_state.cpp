@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace mamba {
+namespace emt {
 
 static MambaSynth* get_synth(const clap_plugin_t* plugin) {
     return static_cast<MambaSynth*>(plugin->plugin_data);

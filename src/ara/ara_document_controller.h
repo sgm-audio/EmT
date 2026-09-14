@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace mamba {
+namespace emt {
 
 // ---------------------------------------------------------------------------
 // ARADocumentControllerStub — stub document controller.
@@ -73,6 +73,6 @@ void ARA_write_conditioning_to(Seqlocked<ARAConditioningFrame>* target,
 // Get/init the global document controller (used by CLAP bridge).
 ARADocumentControllerStub* ARA_get_document_controller();
 
-} // namespace mamba
+} // namespace emt
 
 #endif

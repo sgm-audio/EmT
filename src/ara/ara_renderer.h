@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace mamba {
+namespace emt {
 
 class ARAHostDocument;
 
@@ -26,6 +26,6 @@ void EditorRenderer_create(EditorRenderer* renderer, ARAHostDocument* doc);
 void EditorRenderer_destroy(EditorRenderer* renderer);
 void EditorRenderer_update(EditorRenderer* renderer, const float* audio_data, size_t num_samples);
 
-} // namespace mamba
+} // namespace emt
 
 #endif

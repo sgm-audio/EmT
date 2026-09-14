@@ -4,7 +4,7 @@
 #include <cstdint>
 #include "config.h"
 
-namespace mamba {
+namespace emt {
 
 // ---------------------------------------------------------------------------
 // ConditioningFrame (Mamba-3 FiLM)
@@ -41,6 +41,6 @@ static_assert(alignof(ConditioningFrame) >= 64,
 // ARAConditioningFrame is structurally identical
 using ARAConditioningFrame = ConditioningFrame;
 
-} // namespace mamba
+} // namespace emt
 
 #endif

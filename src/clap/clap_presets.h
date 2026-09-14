@@ -3,7 +3,7 @@
 
 #include "clap_plugin.h"
 
-namespace mamba {
+namespace emt {
 
 // .mambapreset file format (binary, little-endian):
 //   uint32 magic   = 0x4D425052  'MBPR'
@@ -43,9 +43,9 @@ bool load_preset(MambaSynth* m, const char* path);
 // Resolve a weight file path with fallback search:
 //   1. Try path as-is
 //   2. Try relative to preset directory
-//   3. Try relative to $MAMBA_WEIGHTS_DIR or default models/
+//   3. Try relative to $EMT_WEIGHTS_DIR or default models/
 bool resolve_weight_path(const char* path, char* out, size_t out_size);
 
-} // namespace mamba
+} // namespace emt
 
 #endif

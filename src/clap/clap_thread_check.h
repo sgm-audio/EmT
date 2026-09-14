@@ -5,7 +5,7 @@
 #include <atomic>
 #include <thread>
 
-namespace mamba {
+namespace emt {
 
 // Helper around the host-provided thread-check extension (clap.thread-check).
 //
@@ -86,6 +86,6 @@ private:
     std::atomic<bool> has_audio_id_;
 };
 
-} // namespace mamba
+} // namespace emt
 
 #endif

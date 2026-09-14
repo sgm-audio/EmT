@@ -41,7 +41,7 @@ inline float softplus(float x) {
 
 } // namespace
 
-namespace mamba {
+namespace emt {
 
 SSMBlock::SSMBlock(size_t d_state, size_t d_model, size_t d_inner,
                    size_t nheads, size_t headdim, size_t mimo_rank,
@@ -439,4 +439,4 @@ void SSMBlock::apply_ftz_daz() {
     set_mxcsr_ftz_daz_impl();
 }
 
-} // namespace mamba
+} // namespace emt

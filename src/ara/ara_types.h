@@ -6,7 +6,7 @@
 //
 // If ARA_INCLUDE_DIR is set, we attempt to use the real ARA::PlugIn
 // namespace from the Celemony ARA 2.0 SDK.  Otherwise we use
-// hand-written stubs in namespace mamba that mirror the same API
+// hand-written stubs in namespace emt that mirror the same API
 // surface, so the plugin compiles and runs without the SDK.
 //
 // The conditioning pipeline (ara_conditioning_bridge.h) is fully
@@ -41,7 +41,7 @@ namespace ARA { namespace PlugIn {
 
 #include <cstdint>
 
-namespace mamba {
+namespace emt {
 
 // ---------------------------------------------------------------------------
 // Document ID — opaque handle used by both stub and real modes.
@@ -75,6 +75,6 @@ struct ARAContextState {
     float chord_one_hot[12];
 };
 
-} // namespace mamba
+} // namespace emt
 
 #endif

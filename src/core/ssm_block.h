@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <array>
 
-namespace mamba {
+namespace emt {
 
 // === Mamba-3 Complex Multi-Head State ===
 //
@@ -172,6 +172,6 @@ private:
     uint32_t sample_count_;
 };
 
-} // namespace mamba
+} // namespace emt
 
 #endif

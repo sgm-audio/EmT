@@ -3,10 +3,10 @@
 
 #include <clap/clap.h>
 
-namespace mamba {
+namespace emt {
 
 extern const clap_plugin_gui_t s_gui;
 
-} // namespace mamba
+} // namespace emt
 
 #endif

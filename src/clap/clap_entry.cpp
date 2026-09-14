@@ -3,12 +3,12 @@
 #include "clap/clap_fx_plugin.h"
 #include <cstring>
 
-namespace mamba {
+namespace emt {
 
 extern const clap_plugin_descriptor_t mamba_synth_descriptor;
 const clap_plugin_t* mamba_synth_create(const clap_host_t* host);
 
-} // namespace mamba
+} // namespace emt
 
 static uint32_t factory_get_plugin_count(const clap_plugin_factory_t* factory) {
     (void)factory;

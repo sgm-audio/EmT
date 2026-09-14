@@ -2,7 +2,7 @@
 #include <clap/clap.h>
 #include <cstring>
 
-namespace mamba {
+namespace emt {
 
 // 4.1: Define mono + stereo input/output port pairs. Each side gets one
 // mono and one stereo port. The stereo is the main port (must be at
@@ -44,4 +44,4 @@ const clap_plugin_audio_ports_t s_audio_ports = {
     audio_ports_get
 };
 
-} // namespace mamba
+} // namespace emt

@@ -15,7 +15,7 @@
 #include <X11/Xutil.h>
 #endif
 
-namespace mamba {
+namespace emt {
 
 #if defined(__linux__)
 struct GuiInstance {
@@ -232,4 +232,4 @@ const clap_plugin_gui_t s_gui = {gui_is_api_supported,gui_get_preferred_api,gui_
     gui_set_scale,gui_get_size,gui_can_resize,gui_get_resize_hints,gui_adjust_size,gui_set_size,
     gui_set_parent,gui_set_transient,gui_suggest_title,gui_show,gui_hide};
 const clap_plugin_timer_support_t s_timer_support = {gui_on_timer};
-} // namespace mamba
+} // namespace emt

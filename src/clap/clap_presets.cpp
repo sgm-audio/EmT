@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace mamba {
+namespace emt {
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -34,7 +34,7 @@ static bool file_read_f64(std::FILE* f, double& v) { return file_read_all(f, &v,
 } // namespace
 
 bool get_preset_directory(char* out, size_t out_size) {
-    // Linux: $XDG_DATA_HOME/clap/presets/com.mamba-ssm.synth/
+    // Linux: $XDG_DATA_HOME/clap/presets/com.emt.synth/
     const char* xdg = std::getenv("XDG_DATA_HOME");
     std::string base;
     if (xdg && xdg[0]) {
@@ -44,7 +44,7 @@ bool get_preset_directory(char* out, size_t out_size) {
         if (!home) return false;
         base = std::string(home) + "/.local/share";
     }
-    std::string dir = base + "/clap/presets/com.mamba-ssm.synth";
+    std::string dir = base + "/clap/presets/com.emt.synth";
     std::filesystem::create_directories(dir);
     std::strncpy(out, dir.c_str(), out_size - 1);
     out[out_size - 1] = '\0';
@@ -270,8 +270,8 @@ bool resolve_weight_path(const char* path, char* out, size_t out_size) {
         }
     }
 
-    // 3. Try $MAMBA_WEIGHTS_DIR
-    const char* mwd = std::getenv("MAMBA_WEIGHTS_DIR");
+    // 3. Try $EMT_WEIGHTS_DIR
+    const char* mwd = std::getenv("EMT_WEIGHTS_DIR");
     if (mwd && mwd[0]) {
         std::string candidate = std::string(mwd) + "/" + path;
         if (std::filesystem::exists(candidate)) {
@@ -297,4 +297,4 @@ bool resolve_weight_path(const char* path, char* out, size_t out_size) {
     return false;
 }
 
-} // namespace mamba
+} // namespace emt

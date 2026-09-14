@@ -8,7 +8,7 @@
 #include <windows.h>
 #endif
 
-namespace mamba {
+namespace emt {
 
 ArenaAllocator::ArenaAllocator(size_t size) : size_(size), offset_(0), is_mmaped_(false) {
 #if defined(__unix__) || defined(__APPLE__)

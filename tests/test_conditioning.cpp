@@ -17,7 +17,7 @@
 #include <thread>
 #include <vector>
 
-using namespace mamba;
+using namespace emt;
 
 // SSMBlock is ~6 MB — too large for stack.
 static std::unique_ptr<SSMBlock> make_test_block() {

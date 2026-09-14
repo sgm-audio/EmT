@@ -3,7 +3,7 @@
 
 #include <clap/clap.h>
 
-namespace mamba {
+namespace emt {
 
 // Factory function for the Mamba FX plugin.
 const clap_plugin_t* mamba_fx_create(const clap_host_t* host);
@@ -11,6 +11,6 @@ const clap_plugin_t* mamba_fx_create(const clap_host_t* host);
 // Descriptor for the FX plugin.
 extern const clap_plugin_descriptor_t mamba_fx_descriptor;
 
-} // namespace mamba
+} // namespace emt
 
 #endif

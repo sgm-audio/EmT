@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <new>
 
-namespace mamba {
+namespace emt {
 
 SSMInferenceCore::SSMInferenceCore()
     : cfg_(), layers_(nullptr), num_constructed_(0) {
@@ -143,4 +143,4 @@ void SSMInferenceCore::set_state(const MambaState& in) {
     }
 }
 
-} // namespace mamba
+} // namespace emt

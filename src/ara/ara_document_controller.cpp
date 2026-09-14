@@ -4,7 +4,7 @@
 #include "common/conditioning_frame.h"
 #include <cstring>
 
-namespace mamba {
+namespace emt {
 
 // ---------------------------------------------------------------------------
 // ARADocumentControllerStub
@@ -138,4 +138,4 @@ ARADocumentControllerStub* ARA_get_document_controller() {
     return &globalDocController();
 }
 
-} // namespace mamba
+} // namespace emt
