@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <array>
 
-namespace emt {
+namespace mamba {
 
 // === Mamba-3 Complex Multi-Head State ===
 //
@@ -108,9 +108,11 @@ public:
 
     // Process one sample: input is scalar (from previous layer sum), output is d_model floats.
     void process_sample(float input, float* output);
+    void process_sample(float input, float* output, SSMState& state);
 
     // Process a block of scalar samples.
     void process_block(const float* input, float* output, size_t size);
+    void process_block(const float* input, float* output, size_t size, SSMState& state);
 
     void set_weights(const SSMWeights& w);
     void set_params(const SSMBlockParams& params);
@@ -170,8 +172,25 @@ private:
 
     static constexpr uint32_t STATE_NORM_INTERVAL = SSM_STATE_NORM_INTERVAL;
     uint32_t sample_count_;
+
+    // === Decomposed execution steps (inlined in Release) ===
+    void step_film_conditioning(float input);
+    void step_in_proj(const float*& z_ptr, const float*& x_ptr,
+                      const float*& B_ptr, const float*& C_ptr,
+                      const float*& angle_ptr);
+    void step_preprocess_decay_and_dt(const float* C_ptr);
+    void step_rmsnorm_bc(const float* B_ptr, const float* C_ptr,
+                         float* B_norm, float* C_norm);
+    void step_rope_bc(SSMState& state, float* B_norm, float* C_norm, const float* angle_ptr);
+    void step_recurrence(SSMState& state, const float* x_ptr,
+                         const float* B_norm, const float* C_norm);
+    void step_silu_gate(const float* z_ptr);
+    void step_out_proj_residual(const float* x_ptr, float* output);
+    void step_periodic_normalization(SSMState& state);
 };
 
-} // namespace emt
+} // namespace mamba
+
+namespace emt = mamba;
 
 #endif

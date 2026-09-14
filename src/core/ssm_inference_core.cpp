@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <new>
 
-namespace emt {
+namespace mamba {
 
 SSMInferenceCore::SSMInferenceCore()
     : cfg_(), layers_(nullptr), num_constructed_(0) {
@@ -61,6 +61,24 @@ void SSMInferenceCore::reset() {
     }
 }
 
+void SSMInferenceCore::process_sample(float input, float* output, MambaState& state) {
+    if (cfg_.num_layers == 0) {
+        output[0] = input;
+        return;
+    }
+    alignas(64) float buf[MAX_D_MODEL];
+    layers_[0].process_sample(input, buf, state.layers[0]);
+    for (size_t i = 1; i < cfg_.num_layers; ++i) {
+        // Sum d_model outputs to mono for next layer's scalar input
+        float next = 0.0f;
+        for (size_t j = 0; j < cfg_.d_model; ++j) {
+            next += buf[j];
+        }
+        layers_[i].process_sample(next, buf, state.layers[i]);
+    }
+    std::copy(buf, buf + cfg_.d_model, output);
+}
+
 void SSMInferenceCore::process_sample(float input, float* output) {
     if (cfg_.num_layers == 0) {
         output[0] = input;
@@ -77,6 +95,36 @@ void SSMInferenceCore::process_sample(float input, float* output) {
         layers_[i].process_sample(next, buf);
     }
     std::copy(buf, buf + cfg_.d_model, output);
+}
+
+void SSMInferenceCore::process_block(const float* input, float* output, size_t size, MambaState& state) {
+    if (cfg_.num_layers == 0) {
+        if (output != input) {
+            std::memcpy(output, input, size * sizeof(float));
+        }
+        return;
+    }
+    if (cfg_.num_layers == 1) {
+        layers_[0].process_block(input, output, size, state.layers[0]);
+        return;
+    }
+    alignas(64) float buf_dm[MAX_BLOCK_SIZE * MAX_D_MODEL];
+    alignas(64) float buf_mono[MAX_BLOCK_SIZE];
+    layers_[0].process_block(input, buf_dm, size, state.layers[0]);
+    for (size_t i = 1; i < cfg_.num_layers; ++i) {
+        for (size_t t = 0; t < size; ++t) {
+            float sum = 0.0f;
+            for (size_t j = 0; j < cfg_.d_model; ++j) {
+                sum += buf_dm[t * cfg_.d_model + j];
+            }
+            buf_mono[t] = sum;
+        }
+        if (i == cfg_.num_layers - 1) {
+            layers_[i].process_block(buf_mono, output, size, state.layers[i]);
+        } else {
+            layers_[i].process_block(buf_mono, buf_dm, size, state.layers[i]);
+        }
+    }
 }
 
 void SSMInferenceCore::process_block(const float* input, float* output, size_t size) {
@@ -143,4 +191,4 @@ void SSMInferenceCore::set_state(const MambaState& in) {
     }
 }
 
-} // namespace emt
+} // namespace mamba

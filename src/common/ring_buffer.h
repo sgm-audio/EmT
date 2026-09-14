@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace emt {
+namespace mamba {
 
 template<typename T, size_t Capacity>
 class SPSCRingBuffer {
@@ -65,6 +65,6 @@ private:
     alignas(64) std::atomic<uint64_t> tail_;
 };
 
-} // namespace emt
+} // namespace mamba
 
 #endif

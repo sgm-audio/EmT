@@ -1,4 +1,5 @@
 #include "clap/clap_plugin.h"
+#include "clap/clap_common_utils.h"
 #include "clap/clap_gui.h"
 #include "config.h"
 #include <cstring>
@@ -8,7 +9,7 @@
 #include <clap/ext/timer-support.h>
 #include <new>
 
-namespace emt {
+namespace mamba {
 
 // Plugin instances (MambaSynth is tens of MB once sized for
 // MambaConfig::max_config()) are allocated with plain new/delete.
@@ -34,10 +35,11 @@ static const clap_plugin_descriptor_t s_descriptor = {
     "",
     "",
     "0.3.0",
-    "Mamba-3 SSM synthesizer with FiLM conditioning",
+    "EmT Mamba-3 SSM synthesizer with FiLM conditioning",
     reinterpret_cast<const char* const*>(s_features)
 };
 
+const clap_plugin_descriptor_t emt_synth_descriptor = s_descriptor;
 const clap_plugin_descriptor_t mamba_synth_descriptor = s_descriptor;
 
 static MambaSynth* get_synth(const clap_plugin_t* plugin) {
@@ -47,17 +49,8 @@ static MambaSynth* get_synth(const clap_plugin_t* plugin) {
 // Recompute smoothing coefficients after a sample-rate change. Called
 // from activate() and from any code path that mutates smooth_time_s.
 static void recompute_smooth_coefficients(MambaSynth* m) {
-    const double sr = (m->sample_rate > 1.0) ? m->sample_rate : 48000.0;
     for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
-        ParamSmooth& p = m->params[i];
-        if (p.smooth_time_s <= 0.0f) {
-            p.coeff = 1.0; // instant
-        } else {
-            const double t = static_cast<double>(p.smooth_time_s) * sr;
-            // 1 - exp(-1/t) for a one-pole lowpass with cutoff
-            // 1/(2*pi*smooth_time_s).
-            p.coeff = 1.0 - std::exp(-1.0 / t);
-        }
+        m->params[i].coeff = compute_one_pole_coeff(m->params[i].smooth_time_s, m->sample_rate);
     }
 }
 
@@ -166,7 +159,7 @@ static bool plugin_init(const clap_plugin_t* plugin) {
     // Initialize the double-buffer state mirror with empty content.
     {
         StateMirror* slot = m->state_mirror.begin_write();
-        *slot = StateMirror{};
+        std::memset(slot, 0, sizeof(StateMirror));
         for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
             slot->param_values[i] = m->params[i].default_value;
         }
@@ -293,64 +286,12 @@ static void apply_param_value(MambaSynth* m, clap_id id, double value) {
     }
 }
 
-static inline void advance_one_pole(double& cur, double target, double coeff) {
-    cur += coeff * (target - cur);
-}
-
 static void update_bypass_state_machine(MambaSynth* m, uint32_t frames) {
     const bool target = m->bypass_target.load(std::memory_order_acquire);
     uint32_t state = m->bypass_state.load(std::memory_order_relaxed);
     float fade = m->bypass_fade.load(std::memory_order_relaxed);
 
-    // Compute total fade step for the upcoming frames. We move fade
-    // toward 1.0 (bypassed) or 0.0 (processing) at BYPASS_FADE_RATE per
-    // sample, and allow the state machine to transition once fade
-    // reaches 0 or 1.
-    const float step = MambaSynth::BYPASS_FADE_RATE * static_cast<float>(frames);
-
-    switch (state) {
-    case BYPASS_PROCESSING:
-        if (target) {
-            // Begin fading out.
-            fade = std::min(1.0f, fade + step);
-            if (fade >= 1.0f) {
-                state = BYPASS_BYPASSED;
-            } else {
-                state = BYPASS_FADING_OUT;
-            }
-        }
-        break;
-    case BYPASS_FADING_OUT:
-        if (!target) {
-            // Cancellation: fade back in.
-            fade = std::max(0.0f, fade - step);
-            if (fade <= 0.0f) state = BYPASS_PROCESSING;
-        } else {
-            fade = std::min(1.0f, fade + step);
-            if (fade >= 1.0f) state = BYPASS_BYPASSED;
-        }
-        break;
-    case BYPASS_BYPASSED:
-        if (!target) {
-            // Begin fading in.
-            fade = std::max(0.0f, fade - step);
-            if (fade <= 0.0f) {
-                state = BYPASS_PROCESSING;
-            } else {
-                state = BYPASS_FADING_IN;
-            }
-        }
-        break;
-    case BYPASS_FADING_IN:
-        if (target) {
-            fade = std::min(1.0f, fade + step);
-            if (fade >= 1.0f) state = BYPASS_BYPASSED;
-        } else {
-            fade = std::max(0.0f, fade - step);
-            if (fade <= 0.0f) state = BYPASS_PROCESSING;
-        }
-        break;
-    }
+    advance_bypass_machine(target, fade, state, frames, MambaSynth::BYPASS_FADE_RATE);
 
     m->bypass_fade.store(fade, std::memory_order_relaxed);
     m->bypass_state.store(state, std::memory_order_relaxed);
@@ -532,60 +473,97 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
     double cur_mix = m->params[PARAM_MIX].current.load(std::memory_order_relaxed);
     const uint32_t event_count = process->in_events ? process->in_events->size(process->in_events) : 0;
     uint32_t event_index = 0;
+    uint32_t sample_pos = 0;
 
-    for (uint32_t n = 0; n < frames; ++n) {
+    while (sample_pos < frames) {
+        // Process all events scheduled at or before the current sample_pos
         while (event_index < event_count) {
             const clap_event_header_t* hdr = process->in_events->get(process->in_events, event_index);
-            if (!hdr) { ++event_index; continue; }
-            if (hdr->time > n) break;
+            if (!hdr) {
+                ++event_index;
+                continue;
+            }
+            if (hdr->time > sample_pos) {
+                break;
+            }
             apply_process_event(m, hdr);
             ++event_index;
         }
-        advance_one_pole(cur_gain, m->params[PARAM_GAIN].target.load(std::memory_order_relaxed), c_gain);
-        advance_one_pole(cur_mix, m->params[PARAM_MIX].target.load(std::memory_order_relaxed), c_mix);
 
-        float dry[2] = {0.0f, 0.0f};
-        const uint32_t in_channels = in_bus ? std::min<uint32_t>(in_bus->channel_count, 2) : 0;
-        for (uint32_t ch = 0; ch < in_channels; ++ch) {
-            if (in_bus->data32 && in_bus->data32[ch]) dry[ch] = in_bus->data32[ch][n];
-            else if (in_bus->data64 && in_bus->data64[ch]) dry[ch] = static_cast<float>(in_bus->data64[ch][n]);
-        }
-        const float mono = in_channels > 1 ? 0.5f * (dry[0] + dry[1]) : dry[0];
-        float voice_sum = 0.0f;
-        for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-            Voice& voice = m->voices[v];
-            switch (voice.stage) {
-            case VOICE_IDLE: continue;
-            case VOICE_ATTACK:
-                voice.env += voice.attack_rate;
-                if (voice.env >= 1.0f) { voice.env = 1.0f; voice.stage = VOICE_SUSTAIN; }
-                break;
-            case VOICE_SUSTAIN: voice.env = 1.0f; break;
-            case VOICE_RELEASE:
-                voice.env -= voice.release_rate;
-                if (voice.env <= 0.0f) { voice.env = 0.0f; voice.stage = VOICE_SILENT; }
-                break;
-            case VOICE_SILENT: voice.env = 0.0f; break;
-            default: voice.env = 0.0f; break;
+        // Determine the boundary for this sub-block (next event time or end of block)
+        uint32_t sub_block_end = frames;
+        while (event_index < event_count) {
+            const clap_event_header_t* next_hdr = process->in_events->get(process->in_events, event_index);
+            if (!next_hdr) {
+                ++event_index;
+                continue;
             }
-            m->voice_atomics[v].stage.store(voice.stage, std::memory_order_relaxed);
-            m->voice_atomics[v].env.store(voice.env, std::memory_order_relaxed);
-            if (voice.env <= 0.0f) continue;
-            m->core->set_state(voice.ssm_state);
-            alignas(64) float outbuf[MAX_D_MODEL];
-            m->core->process_sample(mono, outbuf);
-            m->core->get_state(voice.ssm_state);
-            voice_sum += outbuf[0] * voice.env * voice.velocity;
+            if (next_hdr->time <= sample_pos) {
+                apply_process_event(m, next_hdr);
+                ++event_index;
+                continue;
+            }
+            if (next_hdr->time < sub_block_end) {
+                sub_block_end = next_hdr->time;
+            }
+            break;
         }
-        const float wet = voice_sum * static_cast<float>(cur_gain);
-        for (uint32_t ch = 0; ch < out_bus.channel_count; ++ch) {
-            const float channel_dry = ch < in_channels ? dry[ch] : mono;
-            const float mixed = channel_dry * static_cast<float>(1.0 - cur_mix)
-                              + wet * static_cast<float>(cur_mix);
-            const float sample = mixed * (1.0f - fade) + channel_dry * fade;
-            if (out_bus.data32 && out_bus.data32[ch]) out_bus.data32[ch][n] = sample;
-            if (out_bus.data64 && out_bus.data64[ch]) out_bus.data64[ch][n] = sample;
+
+        for (uint32_t n = sample_pos; n < sub_block_end; ++n) {
+            advance_one_pole(cur_gain, m->params[PARAM_GAIN].target.load(std::memory_order_relaxed), c_gain);
+            advance_one_pole(cur_mix, m->params[PARAM_MIX].target.load(std::memory_order_relaxed), c_mix);
+
+            float dry[2] = {0.0f, 0.0f};
+            const uint32_t in_channels = in_bus ? std::min<uint32_t>(in_bus->channel_count, 2) : 0;
+            for (uint32_t ch = 0; ch < in_channels; ++ch) {
+                if (in_bus->data32 && in_bus->data32[ch]) dry[ch] = in_bus->data32[ch][n];
+                else if (in_bus->data64 && in_bus->data64[ch]) dry[ch] = static_cast<float>(in_bus->data64[ch][n]);
+            }
+            const float mono = in_channels > 1 ? 0.5f * (dry[0] + dry[1]) : dry[0];
+            float voice_sum = 0.0f;
+            for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+                Voice& voice = m->voices[v];
+                switch (voice.stage) {
+                case VOICE_IDLE: continue;
+                case VOICE_ATTACK:
+                    voice.env += voice.attack_rate;
+                    if (voice.env >= 1.0f) { voice.env = 1.0f; voice.stage = VOICE_SUSTAIN; }
+                    break;
+                case VOICE_SUSTAIN: voice.env = 1.0f; break;
+                case VOICE_RELEASE:
+                    voice.env -= voice.release_rate;
+                    if (voice.env <= 0.0f) { voice.env = 0.0f; voice.stage = VOICE_SILENT; }
+                    break;
+                case VOICE_SILENT: voice.env = 0.0f; break;
+                default: voice.env = 0.0f; break;
+                }
+                m->voice_atomics[v].stage.store(voice.stage, std::memory_order_relaxed);
+                m->voice_atomics[v].env.store(voice.env, std::memory_order_relaxed);
+                if (voice.env <= 0.0f) continue;
+                alignas(64) float outbuf[MAX_D_MODEL];
+                m->core->process_sample(mono, outbuf, voice.ssm_state);
+                voice_sum += outbuf[0] * voice.env * voice.velocity;
+            }
+            const float wet = voice_sum * static_cast<float>(cur_gain);
+            for (uint32_t ch = 0; ch < out_bus.channel_count; ++ch) {
+                const float channel_dry = ch < in_channels ? dry[ch] : mono;
+                const float mixed = channel_dry * static_cast<float>(1.0 - cur_mix)
+                                  + wet * static_cast<float>(cur_mix);
+                const float sample = mixed * (1.0f - fade) + channel_dry * fade;
+                if (out_bus.data32 && out_bus.data32[ch]) out_bus.data32[ch][n] = sample;
+                if (out_bus.data64 && out_bus.data64[ch]) out_bus.data64[ch][n] = sample;
+            }
         }
+        sample_pos = sub_block_end;
+    }
+
+    // Process any trailing events (e.g. at or beyond the last frame)
+    while (event_index < event_count) {
+        const clap_event_header_t* hdr = process->in_events->get(process->in_events, event_index);
+        if (hdr) {
+            apply_process_event(m, hdr);
+        }
+        ++event_index;
     }
     m->params[PARAM_GAIN].current.store(cur_gain, std::memory_order_relaxed);
     m->params[PARAM_MIX].current.store(cur_mix, std::memory_order_relaxed);

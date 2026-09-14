@@ -7,7 +7,7 @@
 #include <new>
 #include <type_traits>
 
-namespace emt {
+namespace mamba {
 
 // Double-buffer seqlock per ADR-001.
 //
@@ -118,6 +118,6 @@ private:
     DoubleBufferSeqLockCore core_;
 };
 
-} // namespace emt
+} // namespace mamba
 
 #endif

@@ -7,7 +7,7 @@
 #include <array>
 #include <new>
 
-namespace emt {
+namespace mamba {
 
 // Mamba-3 configuration: no d_conv, adds multi-head / MIMO / RoPE params
 struct MambaConfig {
@@ -54,7 +54,9 @@ public:
     void reset();
 
     void process_sample(float input, float* output);
+    void process_sample(float input, float* output, MambaState& state);
     void process_block(const float* input, float* output, size_t size);
+    void process_block(const float* input, float* output, size_t size, MambaState& state);
 
     void set_layer_weights(size_t layer, const SSMWeights& w);
     void set_layer_params(size_t layer, const SSMBlockParams& params);
@@ -76,6 +78,8 @@ private:
     alignas(64) std::array<float, COND_DIM> cond_;
 };
 
-} // namespace emt
+} // namespace mamba
+
+namespace emt = mamba;
 
 #endif

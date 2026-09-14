@@ -22,7 +22,7 @@ static int mamba_getpid() { return static_cast<int>(getpid()); }
 #define mamba_unlink unlink
 #endif
 
-using namespace emt;
+using namespace mamba;
 
 class WeightLoaderTest : public ::testing::Test {
 protected:

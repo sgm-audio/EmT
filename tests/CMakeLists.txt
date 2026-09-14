@@ -22,7 +22,7 @@ if(MSVC)
 endif()
 gtest_discover_tests(test_weight_loader)
 
-add_executable(test_conditioning test_conditioning.cpp)
+add_executable(test_conditioning test_conditioning.cpp ${PROJECT_SOURCE_DIR}/src/clap/clap_presets.cpp)
 target_link_libraries(test_conditioning PRIVATE core common GTest::gtest GTest::gtest_main Threads::Threads)
 if(MSVC)
     target_link_options(test_conditioning PRIVATE "/STACK:16777216")
@@ -52,7 +52,12 @@ if(MSVC)
 endif()
 gtest_discover_tests(test_stability)
 
-add_executable(test_realtime_safety test_realtime_safety.cpp)
+add_executable(test_realtime_safety
+    test_realtime_safety.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_fx_plugin.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_audio_ports.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_latency.cpp
+)
 target_link_libraries(test_realtime_safety PRIVATE core common GTest::gtest GTest::gtest_main)
 if(MSVC)
     target_link_options(test_realtime_safety PRIVATE "/STACK:16777216")
@@ -65,3 +70,10 @@ if(MSVC)
     target_link_options(test_cpp_parity PRIVATE "/STACK:16777216")
 endif()
 gtest_discover_tests(test_cpp_parity)
+
+add_executable(test_ara test_ara.cpp)
+target_link_libraries(test_ara PRIVATE ara_plugin core common GTest::gtest GTest::gtest_main Threads::Threads)
+if(MSVC)
+    target_link_options(test_ara PRIVATE "/STACK:16777216")
+endif()
+gtest_discover_tests(test_ara)

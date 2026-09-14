@@ -17,7 +17,7 @@ add_library(mamba_synth SHARED ${CLAP_SOURCES})
 target_include_directories(mamba_synth
 PRIVATE
 ${CMAKE_CURRENT_SOURCE_DIR}/..
-${CMAKE_SOURCE_DIR}/extern/clap/include
+${PROJECT_SOURCE_DIR}/extern/clap/include
 )
 
 target_link_libraries(mamba_synth PRIVATE core common ara_plugin)
@@ -32,23 +32,24 @@ find_package(X11 REQUIRED)
 target_link_libraries(mamba_synth PRIVATE ${X11_LIBRARIES})
 target_include_directories(mamba_synth PRIVATE ${X11_INCLUDE_DIR})
 set_target_properties(mamba_synth PROPERTIES
-OUTPUT_NAME "MambaSynth"
+OUTPUT_NAME "EmTSynth"
 SUFFIX ".clap"
 PREFIX ""
 )
 install(TARGETS mamba_synth DESTINATION lib/clap)
 elseif(CMAKE_SYSTEM_NAME MATCHES "Darwin")
 set_target_properties(mamba_synth PROPERTIES
-OUTPUT_NAME "MambaSynth"
+OUTPUT_NAME "EmTSynth"
 SUFFIX ""
 PREFIX ""
 )
 install(TARGETS mamba_synth DESTINATION /Library/Audio/Plug-Ins/CLAP)
 elseif(CMAKE_SYSTEM_NAME MATCHES "Windows")
 set_target_properties(mamba_synth PROPERTIES
-OUTPUT_NAME "MambaSynth"
+OUTPUT_NAME "EmTSynth"
 SUFFIX ".clap"
 PREFIX ""
 )
+target_link_libraries(mamba_synth PRIVATE user32 gdi32)
 install(TARGETS mamba_synth DESTINATION "C:/Program Files/Common Files/CLAP")
 endif()

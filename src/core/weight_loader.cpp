@@ -12,7 +12,7 @@
 #include <unistd.h>
 #endif
 
-namespace emt {
+namespace mamba {
 
 namespace {
 
@@ -36,6 +36,7 @@ bool resolve_path(const char* path, char* out, size_t out_size) {
         return true;
     }
     const char* env = std::getenv("EMT_WEIGHTS");
+    if (!env || !*env) env = std::getenv("MAMBA_WEIGHTS");
     if (env && *env) {
         std::snprintf(out, out_size, "%s", env);
         return true;
@@ -539,4 +540,4 @@ int WeightLoader::dequantize_layer_to(uint32_t layer, SSMWeights& out_f32) const
     return -100;
 }
 
-} // namespace emt
+} // namespace mamba

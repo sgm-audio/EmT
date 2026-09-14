@@ -1,18 +1,17 @@
 cmake_minimum_required(VERSION 3.20)
-project(EmT VERSION 0.1.0 LANGUAGES CXX)
+project(EmT VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(MSVC)
-    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG")
+    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /arch:AVX2 /DNDEBUG")
     set(CMAKE_CXX_FLAGS_DEBUG "/Od /Zi")
-    # MSVC has /W4 by default; map -Wall/-Wextra to it for parity.
-    set(_MAMBA_WARN_FLAGS /W4 /permissive-)
+    set(_MAMBA_WARN_FLAGS /W4 /permissive- /wd4324 /wd4996 /D_CRT_SECURE_NO_WARNINGS)
     set(_MAMBA_NO_EXCEPTIONS_RTTI_FLAGS /GR-)
 else()
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -fno-math-errno -fno-trapping-math -fno-reciprocal-math -fno-signaling-nans -fcx-limited-range")
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -mavx2 -mfma -fno-math-errno -fno-trapping-math -fno-reciprocal-math -fno-signaling-nans -fcx-limited-range")
     set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fsanitize=address")
     set(_MAMBA_WARN_FLAGS -Wall -Wextra -Wpedantic)
     set(_MAMBA_NO_EXCEPTIONS_RTTI_FLAGS -fno-exceptions -fno-rtti -fvisibility=hidden)
@@ -42,12 +41,11 @@ FetchContent_MakeAvailable(googletest)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/extern/clap/include)
 
-enable_testing()
-
 add_subdirectory(src/core)
 add_subdirectory(src/common)
 add_subdirectory(src/ara)
 add_subdirectory(src/clap)
+enable_testing()
 add_subdirectory(tests)
 
 # Custom target: clap-validator

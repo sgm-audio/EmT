@@ -2,7 +2,7 @@
 #include <clap/clap.h>
 #include <cstring>
 
-namespace emt {
+namespace mamba {
 
 static uint32_t note_ports_count(const clap_plugin_t* plugin, bool is_input) {
 (void)plugin;
@@ -25,4 +25,4 @@ note_ports_count,
 note_ports_get
 };
 
-} // namespace emt
+} // namespace mamba
