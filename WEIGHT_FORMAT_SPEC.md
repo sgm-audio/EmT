@@ -1,271 +1,188 @@
-# Weight File Format Specification
+# EmT Weight File Format Specification (Version 2 — Mamba-3)
 
-**Version:** 1.0  
-**Date:** 2026-06-14  
-**Magic:** `0x4D424D41` ("MBMA" in little-endian)
-
----
-
-## 1. Overview
-
-The Mamba-SSM weight file is a flat binary format designed for zero-copy mmap loading.
-A single file contains a fixed-size header (64 bytes), an optional quantization metadata
-block, and the concatenated weight data for all layers in a deterministic order.
-
-All multi-byte fields are **little-endian**. All floating-point values use **IEEE 754**.
+**Specification Version:** 2.0  
+**Status:** Current Production Standard  
+**Magic:** `0x4D424D41` ("MBMA" in little-endian)  
+**Target Architecture:** Mamba-3 Zero-Conv State Space Model (CLAP/ARA Engine)
 
 ---
 
-## 2. File Layout
+## 1. Executive Overview
+
+The EmT weight format is a cache-aligned, flat binary serialization designed specifically for high-throughput, **zero-copy memory-mapped (`mmap`) loading** in real-time audio environments.
+
+Unlike traditional weight formats (e.g. SafeTensors, PyTorch `.pt`, ONNX) which impose runtime parsing, string lookup dictionaries, nested graphs, or heap allocation overheads, the EmT format guarantees:
+- **Zero Heap Allocations on Load:** Mapped directly into virtual memory; layer tensors are addressed via deterministic byte pointer arithmetic.
+- **Cache-Line Alignment:** The file header is 64 bytes (`alignas(64)`), guaranteeing that the weight payload begins on a CPU cache-line boundary.
+- **Zero Algorithmic Latency:** Specifically formatted for the Mamba-3 zero-conv architecture, eliminating the 1D causal convolution and fusing all projections into `in_proj_w`.
+- **Hardware Portability:** Little-endian IEEE 754 floating-point with support for 8-bit integer quantization and FP16 half-precision.
+
+---
+
+## 2. File Binary Layout
 
 ```
-+------------------+  offset 0
-|  Header (64 B)   |
-+------------------+  offset 64
-|  Q-metadata      |  (0 bytes for Float32; variable for quantized formats)
-+------------------+  offset 64 + q_metadata_size
-|  Layer 0 weights |
-+------------------+
-|  Layer 1 weights |
-+------------------+
-|       ...        |
-+------------------+
-|  Layer L-1 wts   |
-+------------------+  offset 64 + q_metadata_size + weight_data_size
++-------------------------------------------------------------------------------+  Offset 0
+| Header: WeightFileHeader (64 bytes, cache-line aligned)                       |
++-------------------------------------------------------------------------------+  Offset 64
+| Quantization Metadata (Optional)                                              |
+| - Float32 / FP16: 0 bytes                                                     |
+| - Int8 (Tensor):  8 bytes (scale: f32, zero_point: i32)                       |
+| - Int8 (Layer):   num_layers × 8 bytes                                        |
++-------------------------------------------------------------------------------+  Offset 64 + q_metadata_size
+| Layer 0 Weights (13 contiguous arrays, tightly packed)                        |
++-------------------------------------------------------------------------------+
+| Layer 1 Weights (13 contiguous arrays, tightly packed)                        |
++-------------------------------------------------------------------------------+
+| ...                                                                           |
++-------------------------------------------------------------------------------+
+| Layer L-1 Weights                                                             |
++-------------------------------------------------------------------------------+  EOF
 ```
 
-### 2.1 Header (64 bytes, cache-line aligned)
+---
 
-| Offset | Size | C Type | Field | Description |
-|--------|------|--------|-------|-------------|
-| 0 | 4 | `uint32_t` | `magic` | `0x4D424D41` ("MBMA") |
-| 4 | 4 | `uint32_t` | `version` | Format version (currently `1`) |
-| 8 | 4 | `uint32_t` | `d_state` | State dimension (N) |
-| 12 | 4 | `uint32_t` | `d_model` | Model dimension (D) |
-| 16 | 4 | `uint32_t` | `d_inner` | Inner/expansion dimension (E) |
-| 20 | 4 | `uint32_t` | `d_conv` | Conv1d kernel width |
-| 24 | 4 | `uint32_t` | `num_layers` | Number of layers (L) |
-| 28 | 4 | `uint32_t` | `expansion_factor` | `d_inner / d_model` |
-| 32 | 4 | `uint32_t` | `cond_dim` | Conditioning vector dimension |
-| 36 | 4 | `uint32_t` | `quantization` | Quantization format (see §3) |
-| 40 | 4 | `uint32_t` | `q_metadata_size` | Size of quantization metadata block |
-| 44 | 4 | `uint32_t` | `flags` | Reserved (must be 0) |
-| 48 | 8 | `uint64_t` | `weight_data_size` | Total weight data bytes (after q-metadata) |
-| 56 | 8 | `uint64_t` | `reserved` | Reserved (must be 0) |
+## 3. Header Specification (`WeightFileHeader`)
 
-**Total:** 64 bytes (`static_assert(sizeof(WeightFileHeader) == 64)`).
+The header is fixed at exactly **64 bytes** (`static_assert(sizeof(WeightFileHeader) == 64)`).
 
-The header struct in C++:
+| Offset | Size (Bytes) | Type | Field Name | Description & Invariants |
+|:---|:---|:---|:---|:---|
+| `0` | 4 | `uint32_t` | `magic` | Magic identifier: `0x4D424D41` (ASCII `"MBMA"`). |
+| `4` | 4 | `uint32_t` | `version` | Format version: `2` (Mamba-3). Legacy v1 is rejected. |
+| `8` | 4 | `uint32_t` | `d_state` | State dimension ($N$). Must satisfy $1 \le d\_state \le 	ext{MAX\_D\_STATE}$ (32). |
+| `12` | 4 | `uint32_t` | `d_model` | Embedding / channel dimension ($D$). Must satisfy $1 \le d\_model \le 	ext{MAX\_D\_MODEL}$ (256). |
+| `16` | 4 | `uint32_t` | `d_inner` | Expanded inner dimension ($E = 2 	imes D$). Must satisfy $1 \le d\_inner \le 	ext{MAX\_D\_INNER}$ (512). |
+| `20` | 4 | `uint32_t` | `nheads` | Number of SSM heads ($H$). Must satisfy $1 \le nheads \le 	ext{MAX\_NHEADS}$ (8). |
+| `24` | 4 | `uint32_t` | `num_layers`| Total layer count ($L$). Must satisfy $1 \le num\_layers \le 	ext{MAX\_LAYERS}$ (6). |
+| `28` | 4 | `uint32_t` | `headdim` | Head dimension ($P = E / H$). Must satisfy $1 \le headdim \le 	ext{MAX\_HEADDIM}$ (64). |
+| `32` | 4 | `uint32_t` | `cond_dim` | Musical conditioning dimension ($C$). Must satisfy $1 \le cond\_dim \le 	ext{COND\_DIM}$ (128). |
+| `36` | 4 | `uint32_t` | `quantization`| Quantization format enum: `0` (Float32), `1` (Int8 Tensor), `2` (Int8 Layer), `3` (FP16). |
+| `40` | 4 | `uint32_t` | `q_metadata_size`| Size in bytes of quantization block (0 for Float32/FP16). |
+| `44` | 4 | `uint32_t` | `flags` | Reserved bitfield. Must be `0`. |
+| `48` | 8 | `uint64_t` | `weight_data_size`| Total byte size of the weight block across all layers. |
+| `56` | 8 | `uint64_t` | `reserved` | Reserved for future expansion. Must be `0`. |
+
+### C++ Header Definition
+
 ```cpp
 struct WeightFileHeader {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t d_state;
-    uint32_t d_model;
-    uint32_t d_inner;
-    uint32_t d_conv;
-    uint32_t num_layers;
-    uint32_t expansion_factor;
-    uint32_t cond_dim;
-    uint32_t quantization;
-    uint32_t q_metadata_size;
-    uint32_t flags;
-    uint64_t weight_data_size;
-    uint64_t reserved;
+    uint32_t magic;             // 0x4D424D41 ("MBMA")
+    uint32_t version;           // 2 (Mamba-3 format)
+    uint32_t d_state;           // N (state dimension)
+    uint32_t d_model;           // D (embedding dimension)
+    uint32_t d_inner;           // E (expanded dimension = 2*D)
+    uint32_t nheads;            // H (number of heads)
+    uint32_t num_layers;        // L
+    uint32_t headdim;           // P (head dimension = E/H)
+    uint32_t cond_dim;          // Conditioning vector dimension
+    uint32_t quantization;      // 0 = Float32, 1 = Int8 per-tensor, 2 = Int8 per-layer, 3 = FP16
+    uint32_t q_metadata_size;   // Size in bytes of q-metadata block (0 for Float32)
+    uint32_t flags;             // Reserved (must be 0)
+    uint64_t weight_data_size;  // Bytes of weight data after header (and q-metadata)
+    uint64_t reserved;          // Reserved (must be 0)
 };
+static_assert(sizeof(WeightFileHeader) == 64, "Header must be 64 bytes");
 ```
 
 ---
 
-## 3. Quantization Formats
+## 4. Quantization Formats & Metadata
 
-| `quantization` value | Name | Description |
-|----------------------|------|-------------|
-| `0` | **Float32** | IEEE 754 single-precision, raw float array |
-| `1` | **Int8 (per-tensor)** | Single scale + zero_point for all weights |
-| `2` | **Int8 (per-layer)** | Per-layer scale + zero_point |
-| `3` | **FP16** | IEEE 754 half-precision (`binary16`) |
-
-### 3.1 Float32
-- No quantization metadata block (`q_metadata_size = 0`).
-- Weights stored as native `float[4]` arrays.
-
-### 3.2 Int8 Quantization
-- Weight values stored as `int8_t`.
-- Dequantization formula: `float_value = (int8_value - zero_point) * scale`
-- **Per-tensor:** One `scale` (float) + `zero_point` (int32) for the entire file.
-  `q_metadata_size = 8` bytes.
-- **Per-layer:** One `scale` (float) + `zero_point` (int32) per layer.
-  `q_metadata_size = L * 8` bytes.
-- Q-metadata block layout:
-  ```
-  [scale_0: f32, zp_0: i32] [scale_1: f32, zp_1: i32] ...
-  ```
-  (or just one pair for per-tensor)
-
-### 3.3 FP16 Quantization
-- Weight values stored as `uint16_t` (IEEE 754 `binary16`).
-- No quantization metadata block (`q_metadata_size = 0`).
-- Convert to float32 using IEEE 754 `binary16` → `binary32` conversion.
-  Subnormals are flushed to zero (FTZ) to match the audio thread's denormal policy.
-- Dequantization code: `float fp16_to_fp32(uint16_t h)` — rebias exponent from 15 to 127,
-  preserve sign, shift mantissa to upper 23 bits.
+| `quantization` Code | Enumeration | Quantization Mode | Element Size | `q_metadata_size` | Dequantization Formula |
+|:---:|:---|:---|:---:|:---:|:---|
+| `0` | `QuantFormat::Float32` | Raw Single Precision | 4 bytes | `0` bytes | None (identity) |
+| `1` | `QuantFormat::Int8Tensor` | Per-Tensor Signed Int8 | 1 byte | `8` bytes | $v = (i_8 - 	ext{zp}) 	imes 	ext{scale}$ |
+| `2` | `QuantFormat::Int8PerLayer` | Per-Layer Signed Int8 | 1 byte | $L 	imes 8$ bytes | $v = (i_8 - 	ext{zp}_l) 	imes 	ext{scale}_l$ |
+| `3` | `QuantFormat::FP16` | IEEE 754 Half Precision | 2 bytes | `0` bytes | IEEE 754 binary16 $	o$ binary32 conversion with FTZ |
 
 ---
 
-## 4. Per-Layer Weight Ordering
+## 5. Per-Layer Weight Ordering (Mamba-3 Tensor Layout)
 
-Each layer's weight block contains 16 arrays concatenated in this **deterministic order**:
+Each layer contains **13 contiguous arrays**, serialized strictly in row-major layout without inter-tensor padding:
 
-| # | Array | Shape | Size (floats) |
-|---|-------|-------|---------------|
-| 1 | `A_log` | `(d_state,)` | `d_state` |
-| 2 | `D_proj` | `(d_state,)` | `d_state` |
-| 3 | `dt_bias` | `(d_state,)` | `d_state` |
-| 4 | `dt_proj_w` | `(d_state, d_inner)` | `d_state × d_inner` |
-| 5 | `B_proj_w` | `(d_inner, d_state)` | `d_inner × d_state` |
-| 6 | `C_proj_w` | `(d_inner, d_state)` | `d_inner × d_state` |
-| 7 | `conv1d_w` | `(d_conv, d_inner)` | `d_conv × d_inner` |
-| 8 | `conv1d_b` | `(d_inner,)` | `d_inner` |
-| 9 | `W_in` | `(d_inner, d_model)` | `d_inner × d_model` |
-| 10 | `W_out` | `(d_model, d_inner)` | `d_model × d_inner` |
-| 11 | `W_ssm` | `(d_model, d_state)` | `d_model × d_state` |
-| 12 | `b_in` | `(d_inner,)` | `d_inner` |
-| 13 | `cond_proj_dt` | `(d_state, cond_dim)` | `d_state × cond_dim` |
-| 14 | `cond_proj_B` | `(d_state, cond_dim)` | `d_state × cond_dim` |
-| 15 | `cond_dt_bias` | `(d_state,)` | `d_state` |
-| 16 | `cond_B_bias` | `(d_state,)` | `d_state` |
+| Index | Array Name | Tensor Shape | Float Count | Mathematical Role |
+|:---:|:---|:---|:---|:---|
+| **1** | `in_proj_w` | `[in_proj_out, d_model]` | `in_proj_out × d_model` | Fused input projection for $z, x, B, C, \Delta, A, 	ext{trap}, 	heta$ |
+| **2** | `dt_bias` | `[nheads]` | `nheads` | Learnable log-scale time-step bias |
+| **3** | `B_bias` | `[nheads, mimo_rank, d_state]` | `nheads × mimo_rank × d_state` | Additive bias for input projection $B$ |
+| **4** | `C_bias` | `[nheads, mimo_rank, d_state]` | `nheads × mimo_rank × d_state` | Additive bias for state readout $C$ |
+| **5** | `B_norm_weight` | `[d_state]` | `d_state` | RMSNorm gain parameters for $B$ |
+| **6** | `C_norm_weight` | `[d_state]` | `d_state` | RMSNorm gain parameters for $C$ |
+| **7** | `mimo_x` | `[nheads, mimo_rank, headdim]` | `nheads × mimo_rank × headdim` | MIMO input coupling weights |
+| **8** | `mimo_z` | `[nheads, mimo_rank, headdim]` | `nheads × mimo_rank × headdim` | MIMO gate coupling weights |
+| **9** | `mimo_o` | `[nheads, mimo_rank, headdim]` | `nheads × mimo_rank × headdim` | MIMO output combination weights |
+| **10** | `D_proj` | `[nheads]` | `nheads` | Direct skip-connection feedthrough gains |
+| **11** | `out_proj_w` | `[d_model, d_inner]` | `d_model × d_inner` | Final linear projection back to $D$ |
+| **12** | `film_proj_w` | `[2 * d_model, cond_dim]` | `2 × d_model × cond_dim` | FiLM projection for output modulation $(\gamma, eta)$ |
+| **13** | `dt_film_proj_w`| `[2 * nheads, cond_dim]` | `2 × nheads × cond_dim` | FiLM projection for $\Delta$ modulation |
 
-### 4.1 Total Floats Per Layer
+### Fused Input Dimension (`in_proj_out`)
 
-```
-floats_per_layer = 3·ds + 3·ds·di + dc·di + 2·di + di·dm + dm·di + dm·ds + 2·ds·cd + 2·ds
-```
-Where `ds = d_state`, `dm = d_model`, `di = d_inner`, `dc = d_conv`, `cd = cond_dim`.
+The dimension `in_proj_out` fuses all input-dependent projections into a single dense matrix multiply:
+$$	ext{in\_proj\_out} = 2 \cdot d\_inner + 2 \cdot nheads \cdot mimo\_rank \cdot d\_state + 3 \cdot nheads + 	ext{MAX\_NUM\_ROPE\_ANGLES}$$
 
-### 4.2 Total File Size
-
-```
-file_size = 64 + q_metadata_size + (floats_per_layer × L × elem_size)
-```
-Where `elem_size = 4` (Float32), `1` (Int8), or `2` (FP16).
+Where:
+- $2 \cdot d\_inner$: Projections for gate $z$ and input $x$
+- $2 \cdot nheads \cdot mimo\_rank \cdot d\_state$: Projections for $B$ and $C$
+- $3 \cdot nheads$: Projections for $\Delta$, decay $A$, and trapezoidal parameter $lpha$
+- $	ext{MAX\_NUM\_ROPE\_ANGLES}$: Angular velocity parameters for Rotary Position Embedding
 
 ---
 
-## 5. Loader Algorithm
+## 6. Zero-Copy C++ Layer Views
 
-The C++ `WeightLoader` class implements the following:
-
-1. **Open** the file via `open()` + `mmap()` (read-only, private).
-2. **Validate** the header:
-   - `magic == 0x4D424D41`
-   - `version == 1`
-   - `d_state > 0`, `d_model > 0`, `d_inner > 0`, `d_conv > 0`, `num_layers > 0`, `cond_dim > 0`
-   - File size matches `64 + q_metadata_size + weight_data_size`
-3. **Check** dimensions fit within `config.h` `MAX_*` bounds (file dimensions must be ≤ `MAX_*`):
-   ```cpp
-   d_state <= MAX_D_STATE && d_model <= MAX_D_MODEL &&
-   d_inner <= MAX_D_INNER && d_conv <= MAX_D_CONV &&
-   num_layers <= MAX_LAYERS && cond_dim <= COND_DIM
-   ```
-4. **Compute** per-layer pointers using `layer_base(layer)`:
-   - Points past header + q-metadata block + `layer * bytes_per_layer`.
-   - Each of the 16 arrays is offset from `layer_base` by the cumulative size of preceding arrays.
-5. **Dequantize** if INT8/FP16 → convert to float32 before copying into `SSMWeights`.
-
-### 5.1 Weight Path Resolution
-
-```
-1. Explicit path argument       (highest priority)
-2. MAMBA_WEIGHTS env variable
-3. "models/test_model.bin"     (relative to cwd, lowest priority)
-```
-
----
-
-## 6. C++ Data Structures
-
-The mmap'd data populates the `SSMWeights` struct (stack-allocated, fixed-size using `MAX_*`):
+In C++, `WeightLoader` constructs a `WeightLayerPointers` struct pointing directly into the `mmap` region:
 
 ```cpp
-struct SSMWeights {
-    float A_log[MAX_D_STATE];
-    float D_proj[MAX_D_STATE];
-    float dt_bias[MAX_D_STATE];
-    float dt_proj_w[MAX_D_STATE][MAX_D_INNER];
-    float B_proj_w[MAX_D_INNER][MAX_D_STATE];
-    float C_proj_w[MAX_D_INNER][MAX_D_STATE];
-    float conv1d_w[MAX_D_CONV][MAX_D_INNER];
-    float conv1d_b[MAX_D_INNER];
-    float W_in[MAX_D_INNER][MAX_D_MODEL];
-    float W_out[MAX_D_MODEL][MAX_D_INNER];
-    float W_ssm[MAX_D_MODEL][MAX_D_STATE];
-    float b_in[MAX_D_INNER];
-    float cond_proj_dt[MAX_D_STATE][COND_DIM];
-    float cond_proj_B[MAX_D_STATE][COND_DIM];
-    float cond_dt_bias[MAX_D_STATE];
-    float cond_B_bias[MAX_D_STATE];
+struct WeightLayerPointers {
+    const float* in_proj_w;       // [in_proj_out, d_model]
+    const float* dt_bias;         // [nheads]
+    const float* B_bias;          // [nheads, mimo_rank, d_state]
+    const float* C_bias;          // [nheads, mimo_rank, d_state]
+    const float* B_norm_weight;   // [d_state]
+    const float* C_norm_weight;   // [d_state]
+    const float* mimo_x;          // [nheads, mimo_rank, headdim]
+    const float* mimo_z;          // [nheads, mimo_rank, headdim]
+    const float* mimo_o;          // [nheads, mimo_rank, headdim]
+    const float* D_proj;          // [nheads]
+    const float* out_proj_w;      // [d_model, d_inner]
+    const float* film_proj_w;     // [2 * d_model, cond_dim]
+    const float* dt_film_proj_w;  // [2 * nheads, cond_dim]
 };
 ```
 
-Array layout is **row-major**. For `float[d_state][d_inner]`, elements are stored as:
-`[0,0], [0,1], ..., [0,di-1], [1,0], ...`
+---
+
+## 7. Path Resolution Hierarchy
+
+When loading weights at runtime, the plugin resolves candidates in strict precedence:
+
+1. **Explicit Path Argument:** Caller-provided absolute path.
+2. **`EMT_WEIGHTS` Environment Variable:** System-wide or container-level override.
+3. **`MAMBA_WEIGHTS` Environment Variable:** Backward-compatible fallback.
+4. **`EMT_WEIGHTS_DIR` / `MAMBA_WEIGHTS_DIR`:** Search directory prepended to relative paths.
+5. **Standard User Models Directory:**
+   - Windows: `%APPDATA%/emt/models/model.bin`
+   - Linux: `~/.local/share/emt/models/model.bin`
+6. **Local CWD:** `models/test_model.bin` (fallback for test runners).
 
 ---
 
-## 7. Config.h Generation
+## 8. Validation Rules & Error Codes
 
-The export tool (`scripts/export_mamba_weights.py`) can auto-generate `src/config.h` with
-`MAX_*` constants matching the weight file dimensions:
+The loader returns explicit negative error codes upon validation failure:
 
-```bash
-python scripts/export_mamba_weights.py \
-    --state-dim 16 --model-dim 16 --inner-dim 32 --conv-dim 4 --layers 2 \
-    --random-init --output models/test_model.bin --config-h src/config.h
-```
-
-**Rule:** `config.h` must be regenerated whenever the weight file dimensions change.
-The `MAX_*` constants must be **≥** all actual weight file dimensions, or the loader
-will reject the file (`fits_in_static_weights()` returns `false`).
-
-### 7.1 Generated Config.h Template
-
-```c
-#define MAX_D_STATE <d_state>
-#define MAX_D_MODEL <d_model>
-#define MAX_D_INNER <d_inner>
-#define MAX_D_CONV  <d_conv>
-#define MAX_LAYERS  <num_layers>
-#define MAX_BLOCK_SIZE 512
-#define MAX_PARAM_ATOMS 256
-#define COND_DIM    <cond_dim>
-#define SSM_STATE_NORM_INTERVAL 4096
-```
-
----
-
-## 8. Validation
-
-```bash
-# Export random-init weights
-python scripts/export_mamba_weights.py --random-init --layers 2 --output models/test_model.bin
-
-# Validate round-trip (binary → PyTorch → verify)
-python scripts/validate_export.py models/test_model.bin
-
-# The C++ test suite validates loading, dimensions, and bad-file rejection:
-./build/tests/test_weight_loader
-```
-
----
-
-## 9. Binary Compatibility
-
-| Version | Date | Changes |
-|---------|------|---------|
-| 1 | 2026-05 | Initial format: 16 arrays per layer, 64-byte header, Float32/Int8/FP16 |
-
-- **Backward compatibility:** Not guaranteed across format version bumps.
-- **Endianness:** Little-endian only. Big-endian platforms must byteswap on load.
-- **Alignment:** Header is 64-byte aligned (cache-line). Weight arrays are tightly packed
-  (no padding between arrays).
+| Return Code | Cause | Description |
+|:---:|:---|:---|
+| `0` | Success | File mapped, validated, and layer pointers established. |
+| `-1` | File Open Failure | Path does not exist or insufficient OS read permissions. |
+| `-10` | Header Truncation | File size is smaller than `sizeof(WeightFileHeader)` (64 bytes). |
+| `-11` | Invalid Magic | Header `magic != 0x4D424D41`. |
+| `-12` | Version Incompatible | Header `version != 2`. Version 1 files are rejected. |
+| `-13` | Corrupt Payload Size | File size does not match $64 + q\_metadata\_size + weight\_data\_size$, or weight data does not equal $L 	imes 	ext{bytes\_per\_layer}$. |
+| `-14` | Dimension Overflow | One or more dimensions exceed the compile-time limits in `config.h`. |
+| `-15` | Unsupported Quantization | `quantization > QuantFormat::FP16`. |
+| `-16` | Non-Zero Reserved Fields | Header `flags != 0` or `reserved != 0`. |
+| `-17` | Invalid Metadata Size | `q_metadata_size` does not match expected size for the declared quantization format. |

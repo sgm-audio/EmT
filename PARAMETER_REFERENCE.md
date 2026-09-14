@@ -23,7 +23,7 @@ Exposed via `CLAP_EXT_PARAMS`. Total count: `PARAM_COUNT = 5`.
 | **3** | **Mix** | `SSM` | `0.0` (0% wet) | `1.0` (100% wet) | `1.0` (100% wet) | Linear | 10 ms | `CLAP_PARAM_IS_AUTOMATABLE` |
 | **4** | **Bypass** | `""` (root) | `0.0` (Off) | `1.0` (On) | `0.0` (Off) | Stepped | 0 ms (Instant) | `IS_AUTOMATABLE \| IS_STEPPED \| IS_BYPASS` |
 
-### 1.2 Mamba FX Parameters (`com.mamba-ssm.fx`)
+### 1.2 EmT FX Parameters (`com.emt.fx`)
 
 Exposed via `CLAP_EXT_PARAMS`. Total count: `FX_PARAM_COUNT = 3`.
 

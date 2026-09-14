@@ -25,8 +25,8 @@ All notable changes to the EmT CLAP/ARA Plugin Suite (EmT).
   - Full mouse drag interaction with parameter normalization and clamped updates dispatched through host parameter flushes.
   - Window resizing (`WM_SIZE`), paint validation (`WM_PAINT`, `WM_ERASEBKGND`), timer-driven invalidation via `CLAP_EXT_TIMER_SUPPORT`.
   - Dual-platform support: automatically negotiates `CLAP_WINDOW_API_WIN32` on Windows and `CLAP_WINDOW_API_X11` on Linux.
-- **Mamba FX State Serialization (`CLAP_EXT_STATE`)**:
-  - Implemented `clap_plugin_state_t` extension for `com.mamba-ssm.fx` plugin (`clap_fx_plugin.cpp`).
+- **EmT FX State Serialization (`CLAP_EXT_STATE`)**:
+  - Implemented `clap_plugin_state_t` extension for `com.emt.fx` plugin (`clap_fx_plugin.cpp`).
   - Serializes and deserializes FX parameter states (Gain, Mix, Bypass) with binary magic `0x4D424658` (`MBFX`) and versioning schema.
   - Fully compatible with host DAW project saving, reloading, and undo/redo snapshots.
 - **Stack Pressure Elimination & MSVC Safety**:

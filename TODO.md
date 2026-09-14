@@ -1,8 +1,8 @@
-# Mamba-SSM CLAP/ARA Plugin Suite (EmT) — Master Gap & Verification Log
+# EmT CLAP/ARA Plugin Suite — Master Gap & Verification Log
 
 **Monorepo Location**: `apps/emt` (EmT — Distinct from CLARA)  
 **Status**: Real-time C++ CLAP Audio Plugin (Synth & FX) with ARA 2.0 Architectural Foundation  
-**Baseline**: MSVC C++20 Release build passes cleanly (0 errors, 0 warnings), 42/42 CTest unit & stability tests passing (100%).
+**Baseline**: MSVC C++20 Release build passes cleanly (0 errors, 0 warnings), 64/64 CTest unit & stability tests passing (100%).
 
 ---
 
@@ -26,7 +26,7 @@
     - Single layer block(64): **1.985 µs/sample** (503,853 samples/sec) — 5.03× faster than the 10 µs real-time target.
     - Single layer block(512): **2.008 µs/sample** (497,930 samples/sec).
     - 2 layers: **3.820 µs/sample** (261,776 samples/sec).
-  - Numerical parity verified: Test 42 `CppParity.OutputMatchesPythonReference` passes within $10^{-5}$ tolerance. All 42 CTest suites pass.
+  - Numerical parity verified: Test 49 `CppParity.OutputMatchesPythonReference` passes within $10^{-5}$ tolerance. All 64 CTest suites pass.
 
 ---
 

@@ -174,10 +174,10 @@ Benchmarked on AMD x86-64 hardware using AVX2 SIMD vectorization:
 
 ### Latency & Safety Metrics
 
-- **Algorithmic Latency**: 0 samples (zero latency).
-- **Audio Thread Heap Allocations**: 0 bytes (`malloc`/`free`/`new` strictly forbidden).
+- **Algorithmic Latency**: 0 samples (zero algorithmic delay).
+- **Audio Thread Heap Allocations**: 0 bytes (`malloc`/`free`/`new` strictly forbidden on the audio path).
 - **Denormal Prevention**: Automatic FTZ (Flush-to-Zero) and DAZ (Denormals-are-Zero) configured in MXCSR per audio block.
-- **CTest Pass Rate**: **42/42 tests passing** (100% pass rate in 2.79 seconds).
+- **CTest Pass Rate**: **64/64 tests passing** (100% pass rate in ~2.6 seconds).
 
 ---
 
@@ -232,7 +232,7 @@ ctest --test-dir build --output-on-failure
 
 ### Running CTest & Benchmarks
 
-Run CTest across all 42 registered unit and stability tests:
+Run CTest across all 64 registered unit and stability tests:
 ```powershell
 ctest --test-dir build -C Release --output-on-failure
 ```
@@ -246,7 +246,7 @@ Run the standalone throughput benchmark:
 
 ### Plugin Installation Paths
 
-After compilation, copy `MambaSynth.clap` to your system's CLAP plugin directory:
+After compilation, copy `EmTSynth.clap` to your system's CLAP plugin directory:
 
 | OS | Default CLAP Directory |
 |----|------------------------|
@@ -279,60 +279,62 @@ python scripts/export_mamba_weights.py \
 ---
 
 ## Directory Structure
-
-```
-apps/emt/
-├── CMakeLists.txt               # Root CMake orchestration with enable_testing()
-├── README.md                    # Comprehensive project documentation
-├── CHANGELOG.md                 # Complete release history and gap records
-├── TODO.md                      # Master gap analysis & verification evidence (100% DONE)
-├── ARCHITECTURE.md              # Deep technical architectural overview
-├── PARAMETER_REFERENCE.md       # Plugin parameter specifications
-├── WEIGHT_FORMAT_SPEC.md        # Mamba-3 binary format specification
-├── LICENSE                      # Apache 2.0 open-source license
-├── src/
-│   ├── config.h                 # Compile-time MAX_* dimension limits
-│   ├── core/                    # Core SSM inference engine (static library)
-│   │   ├── ssm_block.h/.cpp     # Mamba-3 layer (RoPE, RMSNorm, trapezoidal scan)
-│   │   ├── ssm_inference_core.h/.cpp # Multi-layer inference coordinator
-│   │   ├── weight_loader.h/.cpp # Memory-mapped zero-copy weight loader
-│   │   ├── arena_allocator.h/.cpp # Bump allocator
-│   │   └── simd_helpers.h       # AVX2/SSE2/NEON portable vector intrinsics
-│   ├── common/                  # Real-time lock-free primitives (interface library)
-│   │   ├── ring_buffer.h        # SPSC lock-free parameter ring buffer
-│   │   ├── seqlock.h            # Single-writer multi-reader SeqLock
-│   │   ├── double_buffer_seqlock.h # Atomic snapshot double-buffer exchange
-│   │   └── conditioning_frame.h # Conditioning structures (MIDI / ARA)
-│   ├── clap/                    # CLAP plugin implementations (shared library)
-│   │   ├── clap_entry.cpp       # Plugin factory (exports synth and fx)
-│   │   ├── clap_plugin.h/.cpp   # EmT Synth instrument plugin
-│   │   ├── clap_fx_plugin.h/.cpp# EmT FX audio effect plugin
-│   │   ├── clap_gui.h/.cpp      # Dual Win32 HWND & Linux X11 native GUI
-│   │   ├── clap_params.cpp      # Parameter definitions & smoothing
-│   │   ├── clap_state.cpp       # Plugin state serialization (Schema v3)
-│   │   ├── clap_presets.h/.cpp  # Preset file save/load engine
-│   │   ├── clap_audio_ports.cpp # Stereo audio port configuration
-│   │   ├── clap_note_ports.cpp  # MIDI note input port configuration
-│   │   ├── clap_tail.cpp        # Reverb/decay tail handling (100 ms)
-│   │   └── clap_latency.cpp     # Algorithmic latency reporter (0 samples)
-│   └── ara/                     # Celemony ARA 2.0 integration (static library)
-│       ├── ara_document_controller.h/.cpp # Musical context extraction
-│       ├── ara_playback_renderer.cpp     # Timeline region playback renderer
-│       ├── ara_editor_renderer.cpp       # Editor renderer
-│       └── ara_types.h          # ARA data structures & forward declarations
-├── tests/                       # GoogleTest verification suite (42 tests)
-│   ├── test_ssm_block.cpp       # Recurrence, multi-layer, state parity tests
-│   ├── test_weight_loader.cpp   # mmap validation, quantization, dimension checks
-│   ├── test_conditioning.cpp    # FiLM modulation, seqlock tear resistance
-│   ├── test_stability.cpp       # Extreme parameter stability, zero-input decay
-│   ├── test_realtime_safety.cpp # Zero allocation audit, zero-copy voice test
-│   ├── test_cpp_parity.cpp      # C++ vs Python numerical parity verification
-│   └── benchmark_ssm_block.cpp  # Real-time throughput benchmark
-├── scripts/                     # Python offline toolchain
-│   ├── export_mamba_weights.py  # Checkpoint exporter & config.h generator
-│   └── validate_export.py       # Binary weight validator
-└── models/                      # Binary model files (.bin)
-```
+ 
+ ```
+ .
+ ├── CMakeLists.txt               # Root CMake orchestration with enable_testing()
+ ├── README.md                    # Comprehensive project documentation
+ ├── CHANGELOG.md                 # Complete release history and gap records
+ ├── TODO.md                      # Master gap analysis & verification evidence (100% DONE)
+ ├── ARCHITECTURE.md              # Deep technical architectural overview
+ ├── PARAMETER_REFERENCE.md       # Plugin parameter specifications
+ ├── WEIGHT_FORMAT_SPEC.md        # Mamba-3 binary format specification
+ ├── LICENSE                      # Apache 2.0 open-source license
+ ├── src/
+ │   ├── config.h                 # Compile-time MAX_* dimension limits
+ │   ├── core/                    # Core SSM inference engine (static library)
+ │   │   ├── ssm_block.h/.cpp     # Mamba-3 layer (RoPE, RMSNorm, trapezoidal scan)
+ │   │   ├── ssm_inference_core.h/.cpp # Multi-layer inference coordinator
+ │   │   ├── weight_loader.h/.cpp # Memory-mapped zero-copy weight loader
+ │   │   └── simd_helpers.h       # AVX2/SSE2/NEON portable vector intrinsics
+ │   ├── common/                  # Real-time lock-free primitives (interface library)
+ │   │   ├── ring_buffer.h        # SPSC lock-free parameter ring buffer
+ │   │   ├── seqlock.h            # Single-writer multi-reader SeqLock
+ │   │   ├── double_buffer_seqlock.h # Atomic snapshot double-buffer exchange
+ │   │   └── conditioning_frame.h # Conditioning structures (MIDI / ARA)
+ │   ├── clap/                    # CLAP plugin implementations (shared library)
+ │   │   ├── clap_entry.cpp       # Plugin factory (exports synth and fx)
+ │   │   ├── clap_plugin.h/.cpp   # EmT Synth instrument plugin
+ │   │   ├── clap_fx_plugin.h/.cpp# EmT FX audio effect plugin
+ │   │   ├── clap_gui.h/.cpp      # Dual Win32 HWND & Linux X11 native GUI
+ │   │   ├── clap_params.cpp      # Parameter definitions & smoothing
+ │   │   ├── clap_state.cpp       # Plugin state serialization (Schema v3)
+ │   │   ├── clap_presets.h/.cpp  # Preset file save/load engine
+ │   │   ├── clap_common_utils.h  # Common CLAP conversion & validation utilities
+ │   │   ├── clap_audio_ports.cpp # Stereo audio port configuration
+ │   │   ├── clap_note_ports.cpp  # MIDI note input port configuration
+ │   │   ├── clap_tail.cpp        # Reverb/decay tail handling (100 ms)
+ │   │   └── clap_latency.cpp     # Algorithmic latency reporter (0 samples)
+ │   └── ara/                     # Celemony ARA 2.0 integration (static library)
+ │       ├── ara_document_controller.h/.cpp # Musical context extraction
+ │       ├── ara_playback_renderer.cpp     # Timeline region playback renderer
+ │       ├── ara_editor_renderer.cpp       # Editor renderer
+ │       └── ara_types.h          # ARA data structures & forward declarations
+ ├── tests/                       # GoogleTest verification suite (64 tests)
+ │   ├── test_ssm_block.cpp       # Recurrence, multi-layer, state parity tests
+ │   ├── test_weight_loader.cpp   # mmap validation, quantization, dimension checks
+ │   ├── test_conditioning.cpp    # FiLM modulation, seqlock tear resistance
+ │   ├── test_stability.cpp       # Extreme parameter stability, zero-input decay
+ │   ├── test_realtime_safety.cpp # Zero allocation audit, zero-copy voice test, FX state roundtrip
+ │   ├── test_cpp_parity.cpp      # C++ vs Python numerical parity verification
+ │   ├── test_ara.cpp             # Celemony ARA 2.0 document controller & playback renderer tests
+ │   └── benchmark_ssm_block.cpp  # Real-time multi-rate throughput benchmark
+ ├── scripts/                     # Python offline toolchain
+ │   ├── export_mamba_weights.py  # Checkpoint exporter & config.h generator
+ │   ├── validate_export.py       # Binary weight validator
+ │   └── reference_mamba3.py      # NumPy Mamba-3 reference for parity vectors
+ └── models/                      # Binary model files (.bin)
+ ```
 
 ---
 
