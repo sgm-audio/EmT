@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace mamba {
+namespace emt {
 
 class ArenaAllocator {
 public:
@@ -50,6 +50,6 @@ private:
     ArenaAllocator* arena_ = nullptr;
 };
 
-} // namespace mamba
+} // namespace emt
 
 #endif

@@ -22,7 +22,7 @@ static int mamba_getpid() { return static_cast<int>(getpid()); }
 #define mamba_unlink unlink
 #endif
 
-using namespace mamba;
+using namespace emt;
 
 class WeightLoaderTest : public ::testing::Test {
 protected:
@@ -463,9 +463,9 @@ TEST(WeightLoaderPath, MAMBAWeightsEnvVar) {
     std::fclose(f);
 
 #ifdef _WIN32
-    _putenv_s("MAMBA_WEIGHTS", tmp_path);
+    _putenv_s("EMT_WEIGHTS", tmp_path);
 #else
-    ::setenv("MAMBA_WEIGHTS", tmp_path, 1);
+    ::setenv("EMT_WEIGHTS", tmp_path, 1);
 #endif
     WeightLoader loader;
     int rc = loader.load();
@@ -473,9 +473,9 @@ TEST(WeightLoaderPath, MAMBAWeightsEnvVar) {
     EXPECT_STREQ(loader.source_path(), tmp_path);
     loader.unload();
 #ifdef _WIN32
-    _putenv_s("MAMBA_WEIGHTS", "");
+    _putenv_s("EMT_WEIGHTS", "");
 #else
-    ::unsetenv("MAMBA_WEIGHTS");
+    ::unsetenv("EMT_WEIGHTS");
 #endif
     mamba_unlink(tmp_path);
 }

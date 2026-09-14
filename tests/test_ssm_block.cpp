@@ -5,7 +5,7 @@
 #include <cmath>
 #include <memory>
 
-using namespace mamba;
+using namespace emt;
 
 // SSMBlock is ~6 MB — too large for stack. Use heap.
 static std::unique_ptr<SSMBlock> make_test_block() {

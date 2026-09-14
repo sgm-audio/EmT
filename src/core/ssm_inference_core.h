@@ -7,7 +7,7 @@
 #include <array>
 #include <new>
 
-namespace mamba {
+namespace emt {
 
 // Mamba-3 configuration: no d_conv, adds multi-head / MIMO / RoPE params
 struct MambaConfig {
@@ -76,6 +76,6 @@ private:
     alignas(64) std::array<float, COND_DIM> cond_;
 };
 
-} // namespace mamba
+} // namespace emt
 
 #endif

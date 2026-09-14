@@ -9,7 +9,7 @@
 #include "core/ssm_inference_core.h"
 #include "config.h"
 
-using namespace mamba;
+using namespace emt;
 
 namespace {
 

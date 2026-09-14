@@ -8,7 +8,7 @@ cmake --build build -j4
 ctest --test-dir build -C Release --output-on-failure    # 40/40 tests
 ```
 
-CMake 3.20+, C++20. GoogleTest fetched via FetchContent. All subdirectories (`src/core`, `src/common`, `src/clap`, `src/ara`) wired into root CMakeLists.txt. Output is `MambaSynth.clap` (CLAP bundle).
+CMake 3.20+, C++20. GoogleTest fetched via FetchContent. All subdirectories (`src/core`, `src/common`, `src/clap`, `src/ara`) wired into root CMakeLists.txt. Output is `EmT.clap` (CLAP bundle).
 
 ### MSVC quirk
 Test executables and the plugin itself need a **16 MB stack** (`/STACK:16777216`). `SSMWeights` at MAX config is ~4 MB. `tests/CMakeLists.txt` and `src/clap/CMakeLists.txt` already set this.
@@ -27,7 +27,7 @@ Everything in `namespace mamba`. Core types:
 - `FxState` — Mamba FX plugin state (parallel struct, separate descriptor)
 
 ### Two CLAP plugins are exported
-`clap_entry.cpp` factory returns **2** plugins: `com.mamba-ssm.synth` (Mamba Synth, instrument) and `com.mamba-ssm.fx` (Mamba FX, effect). Both use the same `SSMInferenceCore`.
+`clap_entry.cpp` factory returns **2** plugins: `com.emt.synth` (EmT Synth, instrument) and `com.emt.fx` (EmT FX, effect). Both use the same `SSMInferenceCore`.
 
 ## Three-Thread Architecture
 

@@ -19,7 +19,7 @@
 #include "ara/ara_document_controller.h"
 #include "config.h"
 
-namespace mamba {
+namespace emt {
 
 enum ParamIds : clap_id {
     PARAM_GAIN = 0,
@@ -201,6 +201,6 @@ extern const clap_plugin_latency_t s_latency;
 extern const clap_plugin_gui_t s_gui;
 extern const clap_plugin_timer_support_t s_timer_support;
 
-} // namespace mamba
+} // namespace emt
 
 #endif

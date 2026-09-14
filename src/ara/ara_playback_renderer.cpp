@@ -3,7 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace mamba {
+namespace emt {
 
 struct alignas(64) PlaybackRendererContext {
     alignas(64) std::byte ssm_storage[sizeof(SSMBlock)];

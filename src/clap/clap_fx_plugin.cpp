@@ -17,7 +17,7 @@
 // If the FX needs different SSM behavior (e.g., no FiLM, different
 // projection), add FX-specific SSM paths here.
 
-namespace mamba {
+namespace emt {
 
 // FX-specific param IDs (subset of synth params)
 enum FxParamId : clap_id {
@@ -302,10 +302,10 @@ static const char* fx_features[] = {
 
 static const clap_plugin_descriptor_t fx_descriptor = {
     CLAP_VERSION_INIT,
-    "com.mamba-ssm.fx",
-    "Mamba FX",
-    "Mamba Audio",
-    "https://mamba-audio.com",
+    "com.emt.fx",
+    "EmT FX",
+    "EmT Audio",
+    "https://emt-audio.com",
     "",
     "",
     "0.1.0",
@@ -353,4 +353,4 @@ const clap_plugin_t* mamba_fx_create(const clap_host_t* host) {
     return plugin;
 }
 
-} // namespace mamba
+} // namespace emt

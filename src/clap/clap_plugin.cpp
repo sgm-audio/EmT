@@ -8,7 +8,7 @@
 #include <clap/ext/timer-support.h>
 #include <new>
 
-namespace mamba {
+namespace emt {
 
 // Plugin instances (MambaSynth is tens of MB once sized for
 // MambaConfig::max_config()) are allocated with plain new/delete.
@@ -27,10 +27,10 @@ static const char* s_features[] = {
 
 static const clap_plugin_descriptor_t s_descriptor = {
     CLAP_VERSION_INIT,
-    "com.mamba-ssm.synth",
-    "Mamba Synth",
-    "Mamba Audio",
-    "https://mamba-audio.com",
+    "com.emt.synth",
+    "EmT Synth",
+    "EmT Audio",
+    "https://emt-audio.com",
     "",
     "",
     "0.3.0",

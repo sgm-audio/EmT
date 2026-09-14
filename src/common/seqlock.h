@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace mamba {
+namespace emt {
 
 class SeqLock {
 public:
@@ -61,6 +61,6 @@ struct Seqlocked {
     }
 };
 
-} // namespace mamba
+} // namespace emt
 
 #endif

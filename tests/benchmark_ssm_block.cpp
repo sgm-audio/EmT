@@ -7,7 +7,7 @@
 #include "core/ssm_inference_core.h"
 #include "config.h"
 
-using namespace mamba;
+using namespace emt;
 using clock_type = std::chrono::steady_clock;
 
 static double elapsed_seconds(clock_type::time_point start,
