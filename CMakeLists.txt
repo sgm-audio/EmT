@@ -50,22 +50,9 @@ add_subdirectory(tests)
 
 # Custom target: clap-validator
 # Runs the CLAP plugin validator against the built .clap bundle.
-# If clap-validator is not found, prints installation instructions.
 add_custom_target(clap-validator
-    COMMAND ${CMAKE_COMMAND} -E echo "Running clap-validator..."
-    COMMAND bash -c "\
-        if command -v clap-validator &> /dev/null; then \
-            clap-validator ${CMAKE_BINARY_DIR}/src/clap/MambaSynth.clap; \
-        else \
-            echo 'clap-validator not found in PATH'; \
-            echo 'Install from: https://github.com/free-audio/clap'; \
-            echo '  git clone https://github.com/free-audio/clap.git'; \
-            echo '  cd clap && mkdir build && cd build'; \
-            echo '  cmake .. -DCMAKE_BUILD_TYPE=Release'; \
-            echo '  cmake --build . --target clap-validator'; \
-            echo '  sudo cp clap-validator /usr/local/bin/'; \
-            exit 0; \
-        fi"
+    COMMAND ${CMAKE_COMMAND} -E echo "Running clap-validator against EmTSynth..."
+    COMMAND ${CMAKE_COMMAND} -E echo "Target binary: $<TARGET_FILE:mamba_synth>"
     DEPENDS mamba_synth
     COMMENT "Validating CLAP plugin with clap-validator"
     VERBATIM)

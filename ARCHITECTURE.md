@@ -1,13 +1,13 @@
 # Architecture Overview
 
-**Mamba-SSM CLAP/ARA Plugin Suite** — Architecture Version: Mamba-3 (`v0.3.0`)  
-**Targets:** `MambaSynth.clap` (CLAP Bundle exporting `com.mamba-ssm.synth` and `com.mamba-ssm.fx`)
+**EmT CLAP/ARA Plugin Suite** — Architecture Version: Mamba-3 (`v0.3.0`)  
+**Targets:** `EmTSynth.clap` (CLAP Bundle exporting `com.emt.synth` and `com.emt.fx`)
 
 ---
 
 ## 1. Executive Summary & System Architecture
 
-The Mamba-SSM Plugin Suite is a high-performance, real-time neural audio synthesizer and effect processor built on the **Mamba-3** Structured State Space Model (SSM) architecture. It is engineered for low-latency digital audio workstations (DAWs) supporting the CLAP (CLever Audio Plug-in) 1.2+ specification and Celemony ARA 2.0.
+The EmT Plugin Suite is a high-performance, real-time neural audio synthesizer and effect processor built on the **Mamba-3** Structured State Space Model (SSM) architecture. It is engineered for low-latency digital audio workstations (DAWs) supporting the CLAP (CLever Audio Plug-in) 1.2+ specification and Celemony ARA 2.0.
 
 Key architectural innovations include:
 - **Zero-Conv Architecture:** Total elimination of causal 1D convolutions, achieving true **0-sample algorithmic latency**.
@@ -41,7 +41,7 @@ Key architectural innovations include:
                                           │
                                           ▼
                       ┌───────────────────────────────────────┐
-                      │              MambaSynth               │
+                      │               EmTSynth                │
                       │ ┌───────────────────────────────────┐ │
                       │ │         SSMInferenceCore          │ │
                       │ │   Layer 0 ──► Layer 1 ──► ...     │ │
