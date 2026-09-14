@@ -3,7 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace emt {
+namespace mamba {
 
 struct EditorRendererContext {
     float* ring_buffer;
@@ -49,4 +49,4 @@ void EditorRenderer_update(EditorRenderer* renderer, const float* audio_data, si
     renderer->update(renderer, audio_data, num_samples);
 }
 
-} // namespace emt
+} // namespace mamba

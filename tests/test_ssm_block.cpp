@@ -5,7 +5,7 @@
 #include <cmath>
 #include <memory>
 
-using namespace emt;
+using namespace mamba;
 
 // SSMBlock is ~6 MB — too large for stack. Use heap.
 static std::unique_ptr<SSMBlock> make_test_block() {
@@ -155,3 +155,26 @@ TEST(SSMInferenceCore, GetSetStateRoundTrip) {
     core2->process_sample(0.3f, buf2);
     EXPECT_FLOAT_EQ(buf1[0], buf2[0]);
 }
+
+TEST(SSMInferenceCore, ProcessSampleExplicitStateParity) {
+    auto core1 = std::make_unique<SSMInferenceCore>();
+    auto core2 = std::make_unique<SSMInferenceCore>();
+    MambaConfig cfg = MambaConfig::max_config();
+    cfg.num_layers = 2;
+    core1->init(cfg);
+    core2->init(cfg);
+    for (uint32_t layer = 0; layer < 2; ++layer) {
+        core1->set_layer_weights(layer, *make_test_weights());
+        core2->set_layer_weights(layer, *make_test_weights());
+    }
+    auto explicit_state = std::make_unique<MambaState>();
+    std::memset(explicit_state.get(), 0, sizeof(MambaState));
+    alignas(64) float buf1[MAX_D_MODEL], buf2[MAX_D_MODEL];
+    for (int i = 0; i < 50; ++i) {
+        float in = 0.1f * static_cast<float>(i);
+        core1->process_sample(in, buf1);
+        core2->process_sample(in, buf2, *explicit_state);
+        EXPECT_FLOAT_EQ(buf1[0], buf2[0]);
+    }
+}
+

@@ -1,4 +1,5 @@
 #include "clap/clap_plugin.h"
+#include "clap/clap_common_utils.h"
 #include "core/weight_loader.h"
 #include <clap/clap.h>
 #include <cstring>
@@ -6,7 +7,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace emt {
+namespace mamba {
 
 static MambaSynth* get_synth(const clap_plugin_t* plugin) {
     return static_cast<MambaSynth*>(plugin->plugin_data);
@@ -35,50 +36,7 @@ static constexpr uint32_t kStateSchemaV1 = 0x00010000u;
 static constexpr uint32_t kStateSchemaV2 = 0x00020000u;
 static constexpr uint32_t kStateSchemaV3 = 0x00030000u;
 
-static bool stream_write_all(const clap_ostream_t* stream, const void* data, uint64_t size) {
-    const uint8_t* ptr = static_cast<const uint8_t*>(data);
-    uint64_t remaining = size;
-    while (remaining > 0) {
-        int64_t written = stream->write(stream, ptr, remaining);
-        if (written < 0) return false;
-        if (written == 0) return false;
-        ptr += written;
-        remaining -= static_cast<uint64_t>(written);
-    }
-    return true;
-}
-
-static bool stream_read_all(const clap_istream_t* stream, void* data, uint64_t size) {
-    uint8_t* ptr = static_cast<uint8_t*>(data);
-    uint64_t remaining = size;
-    while (remaining > 0) {
-        int64_t rd = stream->read(stream, ptr, remaining);
-        if (rd < 0) return false;
-        if (rd == 0) return false;
-        ptr += rd;
-        remaining -= static_cast<uint64_t>(rd);
-    }
-    return true;
-}
-
-static bool stream_write_u32(const clap_ostream_t* s, uint32_t v) {
-    return stream_write_all(s, &v, sizeof(v));
-}
-static bool stream_read_u32(const clap_istream_t* s, uint32_t& v) {
-    return stream_read_all(s, &v, sizeof(v));
-}
-static bool stream_write_f32(const clap_ostream_t* s, float v) {
-    return stream_write_all(s, &v, sizeof(v));
-}
-static bool stream_read_f32(const clap_istream_t* s, float& v) {
-    return stream_read_all(s, &v, sizeof(v));
-}
-static bool stream_write_f64(const clap_ostream_t* s, double v) {
-    return stream_write_all(s, &v, sizeof(v));
-}
-static bool stream_read_f64(const clap_istream_t* s, double& v) {
-    return stream_read_all(s, &v, sizeof(v));
-}
+// Shared stream serialization helpers provided by clap/clap_common_utils.h
 
 static bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream) {
     if (!plugin || !stream) return false;
@@ -90,12 +48,14 @@ static bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream
     if (!stream_write_u32(stream, kStateSchemaV3)) return false;
 
     // Pull a fresh state-mirror snapshot from the audio thread.
-    StateMirror mirror;
+    auto mirror_ptr = std::make_unique<StateMirror>();
+    if (!mirror_ptr) return false;
+    StateMirror& mirror = *mirror_ptr;
     {
         constexpr int kMaxRetries = 8;
         bool ok = false;
         for (int retry = 0; retry < kMaxRetries; ++retry) {
-            mirror = StateMirror{};
+            std::memset(&mirror, 0, sizeof(StateMirror));
             if (m->state_mirror.read(mirror)) { ok = true; break; }
         }
         if (!ok) return false;

@@ -9,7 +9,7 @@
 #include "core/ssm_inference_core.h"
 #include "config.h"
 
-using namespace emt;
+using namespace mamba;
 
 namespace {
 
@@ -50,9 +50,9 @@ TEST(Stability, LongRunNoNaN) {
     core_ptr->init(cfg);
     auto& core = *core_ptr;
 
-    SSMWeights w{};
-    fill_random_weights(w, rng);
-    core.set_layer_weights(0, w);
+    auto w = std::make_unique<SSMWeights>();
+    fill_random_weights(*w, rng);
+    core.set_layer_weights(0, *w);
 
     std::uniform_real_distribution<float> input_dist(-1.0f, 1.0f);
     float max_abs_output = 0.0f;
@@ -89,19 +89,19 @@ TEST(Stability, ExtremeParameters) {
     core_ptr->init(cfg);
     auto& core = *core_ptr;
 
-    SSMWeights w{};
-    std::memset(&w, 0, sizeof(w));
+    auto w = std::make_unique<SSMWeights>();
+    std::memset(w.get(), 0, sizeof(*w));
     for (size_t out = 0; out < SSMWeights::IN_PROJ_OUT; ++out)
         for (size_t j = 0; j < MAX_D_MODEL; ++j)
-            w.in_proj_w[out][j] = 10.0f;
-    for (size_t h = 0; h < MAX_NHEADS; ++h) w.dt_bias[h] = 10.0f;
+            w->in_proj_w[out][j] = 10.0f;
+    for (size_t h = 0; h < MAX_NHEADS; ++h) w->dt_bias[h] = 10.0f;
     for (size_t s = 0; s < MAX_D_STATE; ++s) {
-        w.B_norm_weight[s] = 1.0f;
-        w.C_norm_weight[s] = 1.0f;
+        w->B_norm_weight[s] = 1.0f;
+        w->C_norm_weight[s] = 1.0f;
     }
     for (size_t j = 0; j < MAX_D_MODEL && j < MAX_D_INNER; ++j)
-        w.out_proj_w[j][j] = 1.0f;
-    core.set_layer_weights(0, w);
+        w->out_proj_w[j][j] = 1.0f;
+    core.set_layer_weights(0, *w);
 
     float extremes[] = {0.0f, 1.0f, -1.0f, 100.0f, -100.0f};
     for (float input : extremes) {
@@ -125,10 +125,10 @@ TEST(Stability, ZeroInputStability) {
     core_ptr->init(cfg);
     auto& core = *core_ptr;
 
-    SSMWeights w{};
+    auto w = std::make_unique<SSMWeights>();
     std::mt19937 rng(99);
-    fill_random_weights(w, rng);
-    core.set_layer_weights(0, w);
+    fill_random_weights(*w, rng);
+    core.set_layer_weights(0, *w);
 
     for (int64_t n = 0; n < 50000; ++n) {
         alignas(64) float outbuf[MAX_D_MODEL];

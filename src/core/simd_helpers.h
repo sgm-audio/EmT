@@ -14,7 +14,7 @@
 #define MAMBA_NEON 1
 #endif
 
-namespace emt {
+namespace mamba {
 namespace simd {
 
 // Dot product: sum(a[i] * b[i]) for i in [0, n).
@@ -155,6 +155,6 @@ inline void scale(float* __restrict out, const float* __restrict a, float scalar
 }
 
 } // namespace simd
-} // namespace emt
+} // namespace mamba
 
 #endif

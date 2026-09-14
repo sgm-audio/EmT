@@ -1,7 +1,7 @@
 #include "clap/clap_plugin.h"
 #include <clap/clap.h>
 
-namespace emt {
+namespace mamba {
 
 // Tail is the time the plugin keeps producing audio after the host has
 // stopped sending new events (e.g. a held note still ringing out).
@@ -26,4 +26,4 @@ const clap_plugin_tail_t s_tail = {
     tail_get
 };
 
-} // namespace emt
+} // namespace mamba

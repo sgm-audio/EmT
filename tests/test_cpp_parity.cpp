@@ -15,14 +15,109 @@
 #include <cstdio>
 #include <vector>
 #include <memory>
+#include <filesystem>
+#include <string>
+#include <iostream>
+#include <algorithm>
 
-using namespace emt;
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#else
+#include <unistd.h>
+#endif
+
+using namespace mamba;
+
+namespace {
+
+std::filesystem::path get_executable_dir() {
+#if defined(_WIN32)
+    char buf[MAX_PATH];
+    DWORD len = GetModuleFileNameA(NULL, buf, MAX_PATH);
+    if (len > 0) {
+        return std::filesystem::path(buf).parent_path();
+    }
+#elif defined(__APPLE__)
+    char buf[1024];
+    uint32_t size = sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) == 0) {
+        return std::filesystem::path(buf).parent_path();
+    }
+#else
+    char buf[1024];
+    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (len > 0) {
+        buf[len] = '\0';
+        return std::filesystem::path(buf).parent_path();
+    }
+#endif
+    return std::filesystem::current_path();
+}
+
+std::string resolve_test_file(const std::string& filename) {
+    // 1. Check environment variable override
+    const char* env_dir = std::getenv("MAMBA_PARITY_DIR");
+    if (env_dir && *env_dir) {
+        std::error_code ec;
+        std::filesystem::path p = std::filesystem::path(env_dir) / filename;
+        if (std::filesystem::exists(p, ec)) {
+            return p.string();
+        }
+    }
+
+    // 2. Check candidate paths relative to current working directory
+    const std::vector<std::string> relative_candidates = {
+        "build/" + filename,
+        filename,
+        "apps/emt/build/" + filename,
+        "apps/emt/" + filename,
+        "apps/emt/models/" + filename,
+        "../" + filename,
+        "../build/" + filename,
+        "../../" + filename,
+        "../../build/" + filename,
+        "../../../" + filename,
+        "../../../build/" + filename,
+        "models/" + filename
+    };
+    for (const auto& cand : relative_candidates) {
+        std::error_code ec;
+        if (std::filesystem::exists(cand, ec)) {
+            return cand;
+        }
+    }
+
+    // 3. Check candidate paths relative to executable directory and its parents
+    std::filesystem::path cur = get_executable_dir();
+    for (int i = 0; i < 5; ++i) {
+        std::error_code ec;
+        std::filesystem::path p1 = cur / filename;
+        if (std::filesystem::exists(p1, ec)) {
+            return p1.string();
+        }
+        std::filesystem::path p2 = cur / "build" / filename;
+        if (std::filesystem::exists(p2, ec)) {
+            return p2.string();
+        }
+        if (cur.has_parent_path() && cur.parent_path() != cur) {
+            cur = cur.parent_path();
+        } else {
+            break;
+        }
+    }
+
+    return "";
+}
+
+} // namespace
 
 // Test helper: load SSMWeights from file into a single-layer SSMBlock
 static std::unique_ptr<SSMBlock> load_parity_block(const char* weight_path,
-                                                    size_t d_state, size_t d_model,
-                                                    size_t d_inner, size_t nheads,
-                                                    size_t headdim, size_t d_cond) {
+                                                    size_t /*d_state*/, size_t /*d_model*/,
+                                                    size_t /*d_inner*/, size_t /*nheads*/,
+                                                    size_t /*headdim*/, size_t /*d_cond*/) {
     WeightLoader loader;
     int rc = loader.load(weight_path);
     if (rc != 0) {
@@ -47,43 +142,44 @@ static std::unique_ptr<SSMBlock> load_parity_block(const char* weight_path,
         hdr.nheads, hdr.headdim, MAX_MIMO_RANK,
         MAX_NUM_BC_HEADS, hdr.cond_dim);
 
-    SSMWeights w{};
-    std::memset(&w, 0, sizeof(w));
+    auto w = std::make_unique<SSMWeights>();
+    std::memset(w.get(), 0, sizeof(*w));
 
     size_t ds = hdr.d_state, dm = hdr.d_model, di = hdr.d_inner;
     size_t nh = hdr.nheads, hd = hdr.headdim, cd = hdr.cond_dim;
 
     // Row-by-row copy for in_proj_w: destination stride is MAX_D_MODEL, source is dm
     for (size_t r = 0; r < in_proj_out; ++r) {
-        std::memcpy(w.in_proj_w[r], ptrs.in_proj_w + r * dm, dm * sizeof(float));
+        std::memcpy(w->in_proj_w[r], ptrs.in_proj_w + r * dm, dm * sizeof(float));
     }
-    std::memcpy(w.dt_bias,        ptrs.dt_bias,        nh * sizeof(float));
+    std::memcpy(w->dt_bias,        ptrs.dt_bias,        nh * sizeof(float));
     // Multi-D arrays: file has runtime dims, SSMWeights has MAX_* strides
     for (size_t h = 0; h < nh; ++h) {
         for (size_t r = 0; r < MAX_MIMO_RANK; ++r) {
-            size_t file_off = (h * MAX_MIMO_RANK + r) * ds;
-            std::memcpy(w.B_bias[h][r], ptrs.B_bias + file_off, ds * sizeof(float));
-            std::memcpy(w.C_bias[h][r], ptrs.C_bias + file_off, ds * sizeof(float));
-            std::memcpy(w.mimo_x[h][r], ptrs.mimo_x + file_off, ds * sizeof(float));
-            std::memcpy(w.mimo_z[h][r], ptrs.mimo_z + file_off, ds * sizeof(float));
-            std::memcpy(w.mimo_o[h][r], ptrs.mimo_o + file_off, ds * sizeof(float));
+            size_t bc_off = (h * MAX_MIMO_RANK + r) * ds;
+            std::memcpy(w->B_bias[h][r], ptrs.B_bias + bc_off, ds * sizeof(float));
+            std::memcpy(w->C_bias[h][r], ptrs.C_bias + bc_off, ds * sizeof(float));
+            size_t mimo_off = (h * MAX_MIMO_RANK + r) * hd;
+            std::memcpy(w->mimo_x[h][r], ptrs.mimo_x + mimo_off, hd * sizeof(float));
+            std::memcpy(w->mimo_z[h][r], ptrs.mimo_z + mimo_off, hd * sizeof(float));
+            std::memcpy(w->mimo_o[h][r], ptrs.mimo_o + mimo_off, hd * sizeof(float));
         }
     }
-    std::memcpy(w.B_norm_weight,  ptrs.B_norm_weight,  ds * sizeof(float));
-    std::memcpy(w.C_norm_weight,  ptrs.C_norm_weight,  ds * sizeof(float));
-    std::memcpy(w.D_proj,         ptrs.D_proj,         nh * sizeof(float));
+    std::memcpy(w->B_norm_weight,  ptrs.B_norm_weight,  ds * sizeof(float));
+    std::memcpy(w->C_norm_weight,  ptrs.C_norm_weight,  ds * sizeof(float));
+    std::memcpy(w->D_proj,         ptrs.D_proj,         nh * sizeof(float));
     // out_proj_w: [dm, di] in file, [MAX_D_MODEL, MAX_D_INNER] in struct
     for (size_t r = 0; r < dm; ++r) {
-        std::memcpy(w.out_proj_w[r], ptrs.out_proj_w + r * di, di * sizeof(float));
+        std::memcpy(w->out_proj_w[r], ptrs.out_proj_w + r * di, di * sizeof(float));
     }
     // film_proj_w: [2*dm, cd] in file, [2*MAX_D_MODEL, COND_DIM] in struct
     for (size_t r = 0; r < 2 * dm; ++r) {
-        std::memcpy(w.film_proj_w[r], ptrs.film_proj_w + r * cd, cd * sizeof(float));
+        std::memcpy(w->film_proj_w[r], ptrs.film_proj_w + r * cd, cd * sizeof(float));
     }
     // dt_film_proj_w: [2*nh, cd]
-    std::memcpy(w.dt_film_proj_w, ptrs.dt_film_proj_w, 2 * nh * cd * sizeof(float));
+    std::memcpy(w->dt_film_proj_w, ptrs.dt_film_proj_w, 2 * nh * cd * sizeof(float));
 
-    block->set_weights(w);
+    block->set_weights(*w);
     loader.unload();
 
     // Set conditioning (matching Python: cond[0]=0.5, cond[1]=-0.25)
@@ -96,33 +192,31 @@ static std::unique_ptr<SSMBlock> load_parity_block(const char* weight_path,
 }
 
 TEST(CppParity, OutputMatchesPythonReference) {
-    const char* weight_path = "build/parity_test_weights.bin";
-    const char* expect_path = "build/parity_expected.bin";
+    std::string weight_path = resolve_test_file("parity_test_weights.bin");
+    std::string expect_path = resolve_test_file("parity_expected.bin");
 
     // Check files exist
-    FILE* check = fopen(weight_path, "rb");
-    if (!check) {
-        GTEST_SKIP() << "Test vectors not generated. Run: "
-                      << "python3 scripts/reference_mamba3.py --generate";
+    if (weight_path.empty() || expect_path.empty()) {
+        GTEST_SKIP() << "Test vectors not generated or found (parity_test_weights.bin / parity_expected.bin). "
+                     << "Run: python scripts/reference_mamba3.py --generate";
     }
-    fclose(check);
 
-    check = fopen(expect_path, "rb");
-    if (!check) {
-        GTEST_SKIP() << "Expected output not generated.";
-    }
-    fclose(check);
+    std::cout << "[ Parity ] Found weights:  " << weight_path << "\n";
+    std::cout << "[ Parity ] Found expected: " << expect_path << "\n";
 
     // Read expected outputs
     std::vector<float> expected;
     {
-        FILE* f = fopen(expect_path, "rb");
+        FILE* f = fopen(expect_path.c_str(), "rb");
+        ASSERT_NE(f, nullptr) << "Failed to open expected file: " << expect_path;
         fseek(f, 0, SEEK_END);
         long sz = ftell(f);
         fseek(f, 0, SEEK_SET);
+        ASSERT_GT(sz, 0) << "Expected file is empty: " << expect_path;
         expected.resize(sz / sizeof(float));
-        fread(expected.data(), sizeof(float), expected.size(), f);
+        size_t read_count = fread(expected.data(), sizeof(float), expected.size(), f);
         fclose(f);
+        ASSERT_EQ(read_count, expected.size());
     }
 
     size_t d_model = 16;  // from --model-dim 16
@@ -131,8 +225,8 @@ TEST(CppParity, OutputMatchesPythonReference) {
     ASSERT_GE(num_samples, 1u);
 
     // Load C++ block
-    auto block = load_parity_block(weight_path, 16, 16, 32, 2, 16, 128);
-    ASSERT_NE(block, nullptr);
+    auto block = load_parity_block(weight_path.c_str(), 16, 16, 32, 2, 16, 128);
+    ASSERT_NE(block, nullptr) << "Failed to load parity block from " << weight_path;
 
     // Test inputs matching Python: [0.0, 1.0, -1.0, 0.5, -0.5, ...]
     const float test_inputs[] = {0.0f, 1.0f, -1.0f, 0.5f, -0.5f, 0.25f,
@@ -141,6 +235,7 @@ TEST(CppParity, OutputMatchesPythonReference) {
     const size_t num_inputs = sizeof(test_inputs) / sizeof(test_inputs[0]);
     ASSERT_EQ(num_inputs, num_samples);
 
+    float max_error = 0.0f;
     for (size_t i = 0; i < num_inputs; ++i) {
         alignas(64) float cpp_out[MAX_D_MODEL];
         block->process_sample(test_inputs[i], cpp_out);
@@ -154,9 +249,17 @@ TEST(CppParity, OutputMatchesPythonReference) {
             ASSERT_FALSE(std::isinf(cpp_out[j]))
                 << "C++ Inf at sample " << i << " channel " << j;
 
+            float diff = std::abs(cpp_out[j] - py_out[j]);
+            if (diff > max_error) {
+                max_error = diff;
+            }
+
             EXPECT_NEAR(cpp_out[j], py_out[j], 1e-5f)
                 << "Mismatch at sample " << i << " channel " << j
                 << " C++=" << cpp_out[j] << " Python=" << py_out[j];
         }
     }
+
+    std::cout << "[ Parity ] Max absolute difference over "
+              << num_inputs * d_model << " elements: " << max_error << "\n";
 }

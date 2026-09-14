@@ -3,12 +3,13 @@
 #include "clap/clap_fx_plugin.h"
 #include <cstring>
 
-namespace emt {
+namespace mamba {
 
-extern const clap_plugin_descriptor_t mamba_synth_descriptor;
+extern const clap_plugin_descriptor_t emt_synth_descriptor;
+extern const clap_plugin_descriptor_t emt_fx_descriptor;
 const clap_plugin_t* mamba_synth_create(const clap_host_t* host);
 
-} // namespace emt
+} // namespace mamba
 
 static uint32_t factory_get_plugin_count(const clap_plugin_factory_t* factory) {
     (void)factory;
@@ -18,19 +19,20 @@ static uint32_t factory_get_plugin_count(const clap_plugin_factory_t* factory) {
 static const clap_plugin_descriptor_t* factory_get_plugin_descriptor(
     const clap_plugin_factory_t* factory, uint32_t index) {
     (void)factory;
-    if (index == 0) return &emt::mamba_synth_descriptor;
-    if (index == 1) return &emt::mamba_fx_descriptor;
+    if (index == 0) return &mamba::emt_synth_descriptor;
+    if (index == 1) return &mamba::emt_fx_descriptor;
     return nullptr;
 }
 
 static const clap_plugin_t* factory_create_plugin(
     const clap_plugin_factory_t* factory, const clap_host_t* host, const char* plugin_id) {
     (void)factory;
-    if (!strcmp(plugin_id, emt::mamba_synth_descriptor.id)) {
-        return emt::mamba_synth_create(host);
+    if (!plugin_id) return nullptr;
+    if (!strcmp(plugin_id, mamba::emt_synth_descriptor.id) || !strcmp(plugin_id, "com.mamba-ssm.synth")) {
+        return mamba::mamba_synth_create(host);
     }
-    if (!strcmp(plugin_id, emt::mamba_fx_descriptor.id)) {
-        return emt::mamba_fx_create(host);
+    if (!strcmp(plugin_id, mamba::emt_fx_descriptor.id) || !strcmp(plugin_id, "com.mamba-ssm.fx")) {
+        return mamba::mamba_fx_create(host);
     }
     return nullptr;
 }

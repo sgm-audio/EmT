@@ -3,57 +3,124 @@
 
 #include "ara_types.h"
 #include "common/seqlock.h"
+#include "common/double_buffer_seqlock.h"
 #include "common/conditioning_frame.h"
 #include <cstdint>
 #include <cstddef>
 
-namespace emt {
+namespace mamba {
 
 // ---------------------------------------------------------------------------
-// ARADocumentControllerStub — stub document controller.
+// ARADocumentControllerStub — ARA 2.0 DocumentController implementation.
 //
-// Lifecycle (mirrors ARA::PlugIn::DocumentController):
-//   createDocument()   -> allocates a per-document context
-//   destroyDocument()  -> frees the context
-//   updateMusicalContext() -> pushes ARAConditioningFrame to the seqlock
+// Lifecycle (mirrors ARA::PlugIn::DocumentController and ADR lifecycle state machine):
+//   Uninitialized -> Initializing -> Ready -> PlugInAdded (Document active)
+//   -> OfflineRendering / Analysis -> PlugInRemoved -> Ready -> Uninitialized
 //
-// In real-SDK mode, this class would inherit from
-// ARA::PlugIn::DocumentController instead.
+// Features:
+//   - Document lifecycle state machine
+//   - Analysis bounds negotiation
+//   - Musical context conversion to cache-aligned ARAConditioningFrame
+//   - Double-buffered seqlock exchange with audio thread (DoubleBufferSeqLock)
+//   - Backward-compatible single-buffered Seqlocked frame
+//   - Playback region timeline musical context lookups
 // ---------------------------------------------------------------------------
 
 class ARADocumentControllerStub {
 public:
+    static constexpr size_t kMaxRegions = 64;
+    static constexpr int64_t kMinAnalysisSamples = 128;
+    static constexpr int64_t kAnalysisChunkAlignment = 128;
+
     ARADocumentControllerStub();
     ~ARADocumentControllerStub();
 
-    // Document lifecycle.
+    // Plugin & Document lifecycle
+    void initialize();
+    void uninitialize();
+    ARALifecycleState lifecycleState() const { return lifecycle_state_; }
+    bool isDocumentActive() const { return active_doc_ != kInvalidDocumentID; }
+
     ARADocumentID createDocument();
     void destroyDocument(ARADocumentID doc_id);
     ARADocumentID activeDocument() const { return active_doc_; }
 
-    // Musical context update — pushes to the conditioning seqlock.
+    // Offline rendering transitions
+    bool beginOfflineRendering();
+    void endOfflineRendering();
+
+    // Analysis bounds negotiation and execution
+    bool negotiateAnalysisBounds(const ARAAnalysisBounds& requested,
+                                 ARAAnalysisBounds& negotiated,
+                                 int64_t max_source_samples = -1) const;
+    bool requestAnalysis(const ARAAnalysisBounds& bounds, int64_t max_source_samples = -1);
+    void updateAnalysisProgress(float progress_0_to_1);
+    void completeAnalysis(float tempo_bpm, float key_sig, const float* chord_one_hot);
+    void cancelAnalysis();
+    ARAAnalysisState analysisState() const { return analysis_state_; }
+    const ARAAnalysisBounds& currentAnalysisBounds() const { return analysis_bounds_; }
+    float analysisProgress() const { return analysis_progress_; }
+
+    // Musical context conversion: tempo, key signature, chord -> ARAConditioningFrame
+    static ARAConditioningFrame convertMusicalContext(float tempo_bpm,
+                                                     float key_sig,
+                                                     const float* chord_one_hot);
+
+    // Musical context update — pushes to both conditioning_sl_ and double buffer
     void updateMusicalContext(float tempo_bpm, float key_sig,
                               const float* chord_one_hot);
 
-    // ARA seqlock — the audio thread reads conditioning from here.
-    // The CLAP plugin's process() calls this to get the seqlock pointer.
+    // DoubleBufferSeqLock exchange (wait-free, zero allocation for audio thread)
+    DoubleBufferSeqLock<ARAConditioningFrame>* conditioningDoubleBuffer() {
+        return &conditioning_db_;
+    }
+    const DoubleBufferSeqLock<ARAConditioningFrame>* conditioningDoubleBuffer() const {
+        return &conditioning_db_;
+    }
+    bool readConditioning(ARAConditioningFrame& out) const {
+        return conditioning_db_.read(out);
+    }
+
+    // ARA seqlock — backward compatible accessor
     Seqlocked<ARAConditioningFrame>* conditioningSeqlock() {
         return &conditioning_sl_;
     }
 
-    // Renderer access (created by createPlaybackRenderer / createEditorRenderer).
+    // Playback regions management (timeline context)
+    void addPlaybackRegion(const ARAPlaybackRegion& region);
+    void clearPlaybackRegions();
+    size_t playbackRegionCount() const { return region_count_; }
+    const ARAPlaybackRegion* playbackRegion(size_t index) const;
+    bool getMusicalContextAtSample(int64_t sample_pos, float& tempo_bpm,
+                                  float& key_sig, float* chord_one_hot) const;
+    void updateMusicalContextForSample(int64_t sample_pos);
+
+    // Renderer access (created by createPlaybackRenderer / createEditorRenderer)
     void* playbackRendererData() const { return pb_renderer_data_; }
     void setPlaybackRendererData(void* d) { pb_renderer_data_ = d; }
     void* editorRendererData() const { return ed_renderer_data_; }
     void setEditorRendererData(void* d) { ed_renderer_data_ = d; }
 
 private:
-    ARADocumentID next_doc_id_;
-    ARADocumentID active_doc_;
+    ARALifecycleState lifecycle_state_{ARALifecycleState::Uninitialized};
+    ARADocumentID next_doc_id_{1};
+    ARADocumentID active_doc_{kInvalidDocumentID};
+
+    ARAAnalysisState analysis_state_{ARAAnalysisState::Idle};
+    ARAAnalysisBounds analysis_bounds_{};
+    float analysis_progress_{0.0f};
+
+    ARAPlaybackRegion regions_[kMaxRegions]{};
+    size_t region_count_{0};
+
     Seqlocked<ARAConditioningFrame> conditioning_sl_;
-    void* pb_renderer_data_;
-    void* ed_renderer_data_;
+    alignas(64) DoubleBufferSeqLock<ARAConditioningFrame> conditioning_db_;
+
+    void* pb_renderer_data_{nullptr};
+    void* ed_renderer_data_{nullptr};
 };
+
+using ARADocumentController = ARADocumentControllerStub;
 
 // ---------------------------------------------------------------------------
 // Global-conditioning free functions (backward-compatible with existing
@@ -70,9 +137,13 @@ void ARA_write_conditioning_to(Seqlocked<ARAConditioningFrame>* target,
                                float bpm, float key,
                                const float* chord_one_hot);
 
+DoubleBufferSeqLock<ARAConditioningFrame>* ARA_get_conditioning_double_buffer();
+bool ARA_read_conditioning_double_buffer(ARAConditioningFrame& out);
+void ARA_write_conditioning_double_buffer(float bpm, float key, const float* chord_one_hot);
+
 // Get/init the global document controller (used by CLAP bridge).
 ARADocumentControllerStub* ARA_get_document_controller();
 
-} // namespace emt
+} // namespace mamba
 
 #endif

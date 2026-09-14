@@ -5,7 +5,7 @@
 #include <cstdio>
 #include <cmath>
 
-namespace emt {
+namespace mamba {
 
 static MambaSynth* get_synth(const clap_plugin_t* plugin) {
     return static_cast<MambaSynth*>(plugin->plugin_data);
@@ -280,4 +280,4 @@ const clap_plugin_params_t s_params = {
     params_flush
 };
 
-} // namespace emt
+} // namespace mamba

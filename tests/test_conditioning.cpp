@@ -17,7 +17,7 @@
 #include <thread>
 #include <vector>
 
-using namespace emt;
+using namespace mamba;
 
 // SSMBlock is ~6 MB — too large for stack.
 static std::unique_ptr<SSMBlock> make_test_block() {
@@ -28,28 +28,28 @@ static std::unique_ptr<SSMBlock> make_test_block() {
 }
 
 // Helper: minimal test weights
-static SSMWeights make_test_weights() {
-    SSMWeights w{};
-    std::memset(&w, 0, sizeof(w));
+static std::unique_ptr<SSMWeights> make_test_weights() {
+    auto w = std::make_unique<SSMWeights>();
+    std::memset(w.get(), 0, sizeof(*w));
     for (size_t j = 0; j < MAX_D_MODEL && j < MAX_D_INNER; ++j) {
-        w.in_proj_w[j][j] = 0.1f;
+        w->in_proj_w[j][j] = 0.1f;
     }
     for (size_t h = 0; h < MAX_NHEADS; ++h) {
-        w.dt_bias[h] = 0.5f;
+        w->dt_bias[h] = 0.5f;
     }
     for (size_t s = 0; s < MAX_D_STATE; ++s) {
-        w.B_norm_weight[s] = 1.0f;
-        w.C_norm_weight[s] = 1.0f;
+        w->B_norm_weight[s] = 1.0f;
+        w->C_norm_weight[s] = 1.0f;
     }
     for (size_t j = 0; j < MAX_D_MODEL && j < MAX_D_INNER; ++j) {
-        w.out_proj_w[j][j] = 1.0f;
+        w->out_proj_w[j][j] = 1.0f;
     }
     return w;
 }
 
 TEST(ConditioningModulation, SetConditioningDoesNotCrash) {
     auto block = make_test_block();
-    block->set_weights(make_test_weights());
+    block->set_weights(*make_test_weights());
 
     float cond[COND_DIM] = {0.0f};
     cond[0] = 120.0f;
@@ -64,7 +64,7 @@ TEST(ConditioningModulation, SetConditioningDoesNotCrash) {
 
 TEST(ConditioningModulation, ZeroConditioningWorks) {
     auto block = make_test_block();
-    block->set_weights(make_test_weights());
+    block->set_weights(*make_test_weights());
 
     float cond[COND_DIM] = {0.0f};
     block->set_conditioning(cond);  // all zero → inactive
@@ -77,7 +77,7 @@ TEST(ConditioningModulation, ZeroConditioningWorks) {
 
 TEST(ConditioningModulation, NonZeroConditioningWorks) {
     auto block = make_test_block();
-    block->set_weights(make_test_weights());
+    block->set_weights(*make_test_weights());
 
     float cond[COND_DIM] = {0.0f};
     cond[0] = 1.0f;
@@ -138,4 +138,306 @@ TEST(ConditioningSeqlock, ReaderNeverObservesTornWrite) {
 
     EXPECT_FALSE(g_reader_saw_nan.load(std::memory_order_acquire));
     EXPECT_GT(g_reader_iters.load(std::memory_order_relaxed), 1000);
+}
+
+// ---------------------------------------------------------------------------
+// Preset Management & Serialization Unit Tests
+// ---------------------------------------------------------------------------
+
+#include "clap/clap_plugin.h"
+#include "clap/clap_presets.h"
+#include <filesystem>
+
+namespace mamba {
+// Provide load_weights implementation for test_conditioning target
+bool MambaSynth::load_weights(const char* path) {
+    if (!path || path[0] == '\0') return false;
+    return true;
+}
+} // namespace mamba
+
+namespace {
+
+struct TestSynthDeleter {
+    void operator()(MambaSynth* m) const {
+        if (m) {
+            if (m->core) {
+                m->core->~SSMInferenceCore();
+                m->core = nullptr;
+            }
+            delete m;
+        }
+    }
+};
+using TestSynthPtr = std::unique_ptr<MambaSynth, TestSynthDeleter>;
+
+static TestSynthPtr create_test_synth() {
+    auto m = std::unique_ptr<MambaSynth>(new (std::nothrow) MambaSynth());
+    if (!m) return nullptr;
+    m->host = nullptr;
+    m->core_cfg = MambaConfig::max_config();
+    m->core_cfg.num_layers = 1;
+    m->core = new (m->core_storage) SSMInferenceCore(m->core_cfg);
+    m->sample_rate = 48000.0;
+    m->block_size = 512;
+    m->is_active = false;
+    m->is_processing = false;
+    m->latency = 0;
+    m->weights_loaded.store(false, std::memory_order_relaxed);
+    m->next_note_id = 1;
+    m->gui_data = nullptr;
+    m->weight_path[0] = '\0';
+
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+        auto& voice = m->voices[v];
+        std::memset(&voice, 0, sizeof(voice));
+        voice.stage = VOICE_IDLE;
+        voice.key = -1;
+        voice.channel = -1;
+        voice.attack_rate = MambaSynth::VOICE_ATTACK_RATE;
+        voice.release_rate = MambaSynth::VOICE_RELEASE_RATE;
+        auto& va = m->voice_atomics[v];
+        va.stage.store(VOICE_IDLE, std::memory_order_relaxed);
+        va.env.store(0.0f, std::memory_order_relaxed);
+        va.key.store(-1, std::memory_order_relaxed);
+        va.channel.store(-1, std::memory_order_relaxed);
+        va.velocity.store(0.0f, std::memory_order_relaxed);
+    }
+
+    m->params[PARAM_GAIN].min_value = 0.0;
+    m->params[PARAM_GAIN].max_value = 2.0;
+    m->params[PARAM_GAIN].default_value = 1.0;
+
+    m->params[PARAM_ATTACK].min_value = 0.001;
+    m->params[PARAM_ATTACK].max_value = 1.0;
+    m->params[PARAM_ATTACK].default_value = 0.1;
+
+    m->params[PARAM_RELEASE].min_value = 0.001;
+    m->params[PARAM_RELEASE].max_value = 2.0;
+    m->params[PARAM_RELEASE].default_value = 0.3;
+
+    m->params[PARAM_MIX].min_value = 0.0;
+    m->params[PARAM_MIX].max_value = 1.0;
+    m->params[PARAM_MIX].default_value = 1.0;
+
+    m->params[PARAM_BYPASS].min_value = 0.0;
+    m->params[PARAM_BYPASS].max_value = 1.0;
+    m->params[PARAM_BYPASS].default_value = 0.0;
+
+    for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
+        m->param_values[i].store(m->params[i].default_value, std::memory_order_relaxed);
+        m->params[i].target.store(m->params[i].default_value, std::memory_order_relaxed);
+        m->params[i].current.store(m->params[i].default_value, std::memory_order_relaxed);
+    }
+    m->bypass_target.store(false, std::memory_order_relaxed);
+    m->bypass_state.store(BYPASS_PROCESSING, std::memory_order_relaxed);
+    m->bypass_fade.store(0.0f, std::memory_order_relaxed);
+    m->next_note_id = 1;
+
+    StateMirror* slot = m->state_mirror.begin_write();
+    if (slot) {
+        std::memset(slot, 0, sizeof(StateMirror));
+        for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
+            slot->param_values[i] = m->params[i].default_value;
+        }
+        slot->bypass_target = false;
+        slot->bypass_fade = 0.0f;
+        slot->weight_path[0] = '\0';
+        m->state_mirror.end_write();
+    }
+
+    return TestSynthPtr(m.release(), TestSynthDeleter());
+}
+
+} // namespace
+
+TEST(PresetManagement, FactoryPresetsBank) {
+    EXPECT_EQ(get_factory_preset_count(), 6u);
+
+    const char* expected_names[6] = {
+        "01 - Mamba Default",
+        "02 - Dark Lead",
+        "03 - Lush Pad",
+        "04 - Resonant Sub",
+        "05 - Fast Perc",
+        "06 - Neural Delay"
+    };
+
+    const char* expected_categories[6] = {
+        "Default",
+        "Lead",
+        "Pad",
+        "Bass",
+        "Percussion",
+        "FX"
+    };
+
+    for (size_t i = 0; i < 6; ++i) {
+        const FactoryPreset* fp = get_factory_preset(i);
+        ASSERT_NE(fp, nullptr);
+        EXPECT_STREQ(fp->name, expected_names[i]);
+        EXPECT_STREQ(fp->category, expected_categories[i]);
+
+        // Find by name
+        const FactoryPreset* found = find_factory_preset(expected_names[i]);
+        ASSERT_NE(found, nullptr);
+        EXPECT_EQ(found, fp);
+
+        // Parameters in valid range
+        EXPECT_GE(fp->param_values[PARAM_GAIN], 0.0);
+        EXPECT_LE(fp->param_values[PARAM_GAIN], 2.0);
+        EXPECT_GE(fp->param_values[PARAM_ATTACK], 0.001);
+        EXPECT_LE(fp->param_values[PARAM_ATTACK], 1.0);
+        EXPECT_GE(fp->param_values[PARAM_RELEASE], 0.001);
+        EXPECT_LE(fp->param_values[PARAM_RELEASE], 2.0);
+        EXPECT_GE(fp->param_values[PARAM_MIX], 0.0);
+        EXPECT_LE(fp->param_values[PARAM_MIX], 1.0);
+    }
+
+    EXPECT_EQ(get_factory_preset(6), nullptr);
+    EXPECT_EQ(find_factory_preset("Unknown Preset"), nullptr);
+}
+
+TEST(PresetManagement, ApplyFactoryPresets) {
+    auto synth = create_test_synth();
+    ASSERT_NE(synth, nullptr);
+
+    // Apply by index: "02 - Dark Lead"
+    EXPECT_TRUE(apply_factory_preset(synth.get(), 1));
+    EXPECT_NEAR(synth->param_values[PARAM_GAIN].load(), 1.2, 1e-6);
+    EXPECT_NEAR(synth->param_values[PARAM_ATTACK].load(), 0.015, 1e-6);
+    EXPECT_NEAR(synth->param_values[PARAM_RELEASE].load(), 0.4, 1e-6);
+    EXPECT_NEAR(synth->param_values[PARAM_MIX].load(), 0.85, 1e-6);
+    EXPECT_NEAR(synth->param_values[PARAM_BYPASS].load(), 0.0, 1e-6);
+
+    // Apply by name: "03 - Lush Pad"
+    EXPECT_TRUE(apply_factory_preset(synth.get(), "03 - Lush Pad"));
+    EXPECT_NEAR(synth->param_values[PARAM_GAIN].load(), 0.9, 1e-6);
+    EXPECT_NEAR(synth->param_values[PARAM_ATTACK].load(), 0.6, 1e-6);
+    EXPECT_NEAR(synth->param_values[PARAM_RELEASE].load(), 1.5, 1e-6);
+    EXPECT_NEAR(synth->param_values[PARAM_MIX].load(), 1.0, 1e-6);
+
+    // Apply by name: "04 - Resonant Sub"
+    EXPECT_TRUE(apply_factory_preset(synth.get(), "04 - Resonant Sub"));
+    EXPECT_NEAR(synth->param_values[PARAM_GAIN].load(), 1.4, 1e-6);
+    EXPECT_NEAR(synth->param_values[PARAM_ATTACK].load(), 0.005, 1e-6);
+    EXPECT_NEAR(synth->param_values[PARAM_RELEASE].load(), 0.25, 1e-6);
+
+    // Apply by name: "05 - Fast Perc"
+    EXPECT_TRUE(apply_factory_preset(synth.get(), "05 - Fast Perc"));
+    EXPECT_NEAR(synth->param_values[PARAM_ATTACK].load(), 0.001, 1e-6);
+    EXPECT_NEAR(synth->param_values[PARAM_RELEASE].load(), 0.05, 1e-6);
+
+    // Apply by name: "06 - Neural Delay"
+    EXPECT_TRUE(apply_factory_preset(synth.get(), "06 - Neural Delay"));
+    EXPECT_NEAR(synth->param_values[PARAM_MIX].load(), 0.5, 1e-6);
+
+    // Invalid applications
+    EXPECT_FALSE(apply_factory_preset(synth.get(), 99));
+    EXPECT_FALSE(apply_factory_preset(synth.get(), "NonExistent"));
+    EXPECT_FALSE(apply_factory_preset(nullptr, static_cast<size_t>(0)));
+}
+
+TEST(PresetManagement, BinaryPresetSaveLoadRoundTrip) {
+    auto synth1 = create_test_synth();
+    ASSERT_NE(synth1, nullptr);
+
+    synth1->param_values[PARAM_GAIN].store(1.35);
+    synth1->param_values[PARAM_ATTACK].store(0.045);
+    synth1->param_values[PARAM_RELEASE].store(0.750);
+    synth1->param_values[PARAM_MIX].store(0.60);
+    synth1->param_values[PARAM_BYPASS].store(1.0);
+    synth1->bypass_target.store(true);
+
+    auto tmp_file = std::filesystem::temp_directory_path() / "test_mamba_preset.mambapreset";
+    std::string path_str = tmp_file.string();
+
+    EXPECT_TRUE(save_preset(synth1.get(), path_str.c_str(), "Test Binary Preset"));
+
+    auto synth2 = create_test_synth();
+    ASSERT_NE(synth2, nullptr);
+
+    EXPECT_TRUE(load_preset(synth2.get(), path_str.c_str()));
+
+    EXPECT_NEAR(synth2->param_values[PARAM_GAIN].load(), 1.35, 1e-6);
+    EXPECT_NEAR(synth2->param_values[PARAM_ATTACK].load(), 0.045, 1e-6);
+    EXPECT_NEAR(synth2->param_values[PARAM_RELEASE].load(), 0.750, 1e-6);
+    EXPECT_NEAR(synth2->param_values[PARAM_MIX].load(), 0.60, 1e-6);
+    EXPECT_NEAR(synth2->param_values[PARAM_BYPASS].load(), 1.0, 1e-6);
+    EXPECT_TRUE(synth2->bypass_target.load());
+
+    std::error_code ec;
+    std::filesystem::remove(tmp_file, ec);
+}
+
+TEST(PresetManagement, JsonPresetExportImportFileRoundTrip) {
+    auto synth1 = create_test_synth();
+    ASSERT_NE(synth1, nullptr);
+
+    synth1->param_values[PARAM_GAIN].store(0.82);
+    synth1->param_values[PARAM_ATTACK].store(0.125);
+    synth1->param_values[PARAM_RELEASE].store(1.400);
+    synth1->param_values[PARAM_MIX].store(0.90);
+    synth1->param_values[PARAM_BYPASS].store(0.0);
+    synth1->bypass_target.store(false);
+
+    auto tmp_file = std::filesystem::temp_directory_path() / "test_mamba_preset.json";
+    std::string path_str = tmp_file.string();
+
+    EXPECT_TRUE(export_preset_json(synth1.get(), path_str.c_str(), "My JSON Preset", "Custom Category"));
+
+    auto synth2 = create_test_synth();
+    ASSERT_NE(synth2, nullptr);
+
+    EXPECT_TRUE(import_preset_json(synth2.get(), path_str.c_str()));
+
+    EXPECT_NEAR(synth2->param_values[PARAM_GAIN].load(), 0.82, 1e-6);
+    EXPECT_NEAR(synth2->param_values[PARAM_ATTACK].load(), 0.125, 1e-6);
+    EXPECT_NEAR(synth2->param_values[PARAM_RELEASE].load(), 1.400, 1e-6);
+    EXPECT_NEAR(synth2->param_values[PARAM_MIX].load(), 0.90, 1e-6);
+    EXPECT_NEAR(synth2->param_values[PARAM_BYPASS].load(), 0.0, 1e-6);
+    EXPECT_FALSE(synth2->bypass_target.load());
+
+    std::error_code ec;
+    std::filesystem::remove(tmp_file, ec);
+}
+
+TEST(PresetManagement, JsonStringExportImportAndValidation) {
+    auto synth1 = create_test_synth();
+    ASSERT_NE(synth1, nullptr);
+
+    std::string json_str;
+    EXPECT_TRUE(export_preset_json_string(synth1.get(), "Custom String Preset", "Experimental", json_str));
+    EXPECT_NE(json_str.find("\"format\": \"mamba-preset\""), std::string::npos);
+    EXPECT_NE(json_str.find("\"name\": \"Custom String Preset\""), std::string::npos);
+    EXPECT_NE(json_str.find("\"category\": \"Experimental\""), std::string::npos);
+
+    auto synth2 = create_test_synth();
+    ASSERT_NE(synth2, nullptr);
+
+    EXPECT_TRUE(import_preset_json_string(synth2.get(), json_str));
+
+    // Reject broken JSON syntax
+    EXPECT_FALSE(import_preset_json_string(synth2.get(), "{ broken json"));
+    EXPECT_FALSE(import_preset_json_string(synth2.get(), ""));
+
+    // Reject out-of-bounds parameter values
+    EXPECT_FALSE(import_preset_json_string(synth2.get(), R"({"parameters": {"gain": 99.0}})"));
+    EXPECT_FALSE(import_preset_json_string(synth2.get(), R"({"parameters": {"attack": 0.00001}})"));
+}
+
+TEST(PresetManagement, ExportFactoryPresetJson) {
+    std::string json;
+    EXPECT_TRUE(export_factory_preset_json(kFactoryPresets[1], json));
+    EXPECT_NE(json.find("\"02 - Dark Lead\""), std::string::npos);
+    EXPECT_NE(json.find("\"Lead\""), std::string::npos);
+
+    auto synth = create_test_synth();
+    ASSERT_NE(synth, nullptr);
+
+    EXPECT_TRUE(import_preset_json_string(synth.get(), json));
+    EXPECT_NEAR(synth->param_values[PARAM_GAIN].load(), 1.2, 1e-6);
+    EXPECT_NEAR(synth->param_values[PARAM_ATTACK].load(), 0.015, 1e-6);
+    EXPECT_NEAR(synth->param_values[PARAM_RELEASE].load(), 0.4, 1e-6);
+    EXPECT_NEAR(synth->param_values[PARAM_MIX].load(), 0.85, 1e-6);
 }

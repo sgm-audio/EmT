@@ -1,7 +1,7 @@
 #include "clap/clap_plugin.h"
 #include <clap/clap.h>
 
-namespace emt {
+namespace mamba {
 
 // Mamba-3: no conv1d → zero algorithmic latency.
 // Returns 0 always.

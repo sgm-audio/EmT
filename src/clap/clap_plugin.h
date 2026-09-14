@@ -19,7 +19,7 @@
 #include "ara/ara_document_controller.h"
 #include "config.h"
 
-namespace emt {
+namespace mamba {
 
 enum ParamIds : clap_id {
     PARAM_GAIN = 0,
@@ -190,6 +190,7 @@ struct MambaSynth {
     bool load_weights(const char* path);
 };
 
+extern const clap_plugin_descriptor_t emt_synth_descriptor;
 extern const clap_plugin_descriptor_t mamba_synth_descriptor;
 
 extern const clap_plugin_audio_ports_t s_audio_ports;
@@ -201,6 +202,6 @@ extern const clap_plugin_latency_t s_latency;
 extern const clap_plugin_gui_t s_gui;
 extern const clap_plugin_timer_support_t s_timer_support;
 
-} // namespace emt
+} // namespace mamba
 
 #endif
