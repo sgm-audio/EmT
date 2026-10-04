@@ -187,7 +187,9 @@ Modular ARA 2.0 components live in `src/ara/`:
 
 ## Performance & Benchmarks
 
-Run the harness and quote its output — never a number from a previous machine:
+Run the harness and quote its output — never a number from a previous machine.
+(CI wiring exists for this, but see the note under *Latency & Safety Metrics* about
+Actions not starting in this repository since 2026-09-14.)
 
 ```bash
 ./build/tests/benchmark_ssm_block                       # default CI gate
@@ -239,7 +241,12 @@ scalar FiLM/RMSNorm/SiLU work — see `ARCHITECTURE_FIDELITY.md` §3.
   are given them by CI before `ctest`, and `MAMBA_REQUIRE_PARITY=1` turns a
   missing vector file into a failure instead of a silent skip.
 - **Real-time gate**: `benchmark_ssm_block` exits non-zero when any measured
-  configuration exceeds `--budget-pct` of one core; CI runs it on every push.
+  configuration exceeds `--budget-pct` of one core. It is wired into
+  `.github/workflows/ci.yml`, **but this repository's Actions runs have not
+  started since 2026-09-14** (every run is a `startup_failure` with no jobs,
+  including on the unmodified `main` workflow) — so the gate is wired, not
+  currently enforced by CI. Run it locally (command below) until that is fixed;
+  the evidence is in `ARCHITECTURE_FIDELITY.md` §4b.
 
 ---
 
