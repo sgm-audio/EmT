@@ -34,7 +34,7 @@ RTOL = 1e-5
 def load_header(path: str) -> dict:
     with open(path, 'rb') as f:
         raw = f.read(HEADER_SIZE)
-    fields = struct.unpack('<12IQQ', raw)
+    fields = struct.unpack('<12IQII', raw)
     return {
         'magic': fields[0],
         'version': fields[1],
@@ -49,7 +49,10 @@ def load_header(path: str) -> dict:
         'q_metadata_size': fields[10],
         'flags': fields[11],
         'weight_data_size': fields[12],
-        'reserved': fields[13],
+        # Deviation D3: 0 = legacy file written before the field existed
+        # (treated as rank 1), 1 = rank-1 SISO.  The runtime refuses > 1.
+        'mimo_rank': fields[13],
+        'reserved': fields[14],
     }
 
 

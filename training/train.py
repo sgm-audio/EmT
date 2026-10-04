@@ -535,6 +535,16 @@ def main():
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
+    # Deviation D3: rank-R MIMO is reserved in the format but not implemented by
+    # the inference path.  Refuse the config up front rather than training a
+    # model whose rank-R weights would be ignored at inference time.
+    if int(cfg.get("mimo_rank", 1)) != 1:
+        raise SystemExit(
+            f"mimo_rank={cfg.get('mimo_rank')} is not supported: the runtime "
+            "implements rank-1 SISO per head (deviation D3 in "
+            "ARCHITECTURE_FIDELITY.md). Use mimo_rank: 1, or implement the "
+            "rank-R reduction first (see Prompts/DEVIATION_RESOLUTION/D3_MIMO_RANK.md).")
+
     for flag, key in [("batch_size", "batch_size"), ("grad_accum", "grad_accum"),
                       ("num_workers", "num_workers"), ("lr", "lr"),
                       ("epochs", "epochs"), ("seq_len", "seq_len")]:

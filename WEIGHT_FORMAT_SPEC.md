@@ -49,7 +49,7 @@ The header is fixed at exactly **64 bytes** (`static_assert(sizeof(WeightFileHea
 | Offset | Size (Bytes) | Type | Field Name | Description & Invariants |
 |:---|:---|:---|:---|:---|
 | `0` | 4 | `uint32_t` | `magic` | Magic identifier: `0x4D424D41` (ASCII `"MBMA"`). |
-| `4` | 4 | `uint32_t` | `version` | Format version: `2` (Mamba-3). Legacy v1 is rejected. |
+| `4` | 4 | `uint32_t` | `version` | Format version: `2` (Mamba-3). Legacy `1` files are still loadable; any other value is rejected with `-12`. |
 | `8` | 4 | `uint32_t` | `d_state` | State dimension ($N$). Must satisfy $1 \le d\_state \le 	ext{MAX\_D\_STATE}$ (32). |
 | `12` | 4 | `uint32_t` | `d_model` | Embedding / channel dimension ($D$). Must satisfy $1 \le d\_model \le 	ext{MAX\_D\_MODEL}$ (256). |
 | `16` | 4 | `uint32_t` | `d_inner` | Expanded inner dimension ($E = 2 	imes D$). Must satisfy $1 \le d\_inner \le 	ext{MAX\_D\_INNER}$ (512). |
@@ -61,7 +61,13 @@ The header is fixed at exactly **64 bytes** (`static_assert(sizeof(WeightFileHea
 | `40` | 4 | `uint32_t` | `q_metadata_size`| Size in bytes of quantization block (0 for Float32/FP16). |
 | `44` | 4 | `uint32_t` | `flags` | Reserved bitfield. Must be `0`. |
 | `48` | 8 | `uint64_t` | `weight_data_size`| Total byte size of the weight block across all layers. |
-| `56` | 8 | `uint64_t` | `reserved` | Reserved for future expansion. Must be `0`. |
+| `56` | 4 | `uint32_t` | `mimo_rank` | MIMO rank. `1` = rank-1 SISO per head (the only rank this runtime executes). `0` = legacy file written before the field existed, treated as rank 1. **Values `> 1` are refused at load with `-16`** (deviation D3) — the format reserves the slots, the forward pass does not execute them. |
+| `60` | 4 | `uint32_t` | `reserved` | Reserved for future expansion. Writers must emit `0`; readers ignore it. |
+
+The `mimo_rank` field occupies the low half of what was a single `reserved`
+`uint64_t` in earlier revisions of this spec; the byte layout (and the 64-byte
+total) is unchanged, so legacy files with a zero `reserved` double-word read back
+as rank 1.
 
 ### C++ Header Definition
 
@@ -80,7 +86,9 @@ struct WeightFileHeader {
     uint32_t q_metadata_size;   // Size in bytes of q-metadata block (0 for Float32)
     uint32_t flags;             // Reserved (must be 0)
     uint64_t weight_data_size;  // Bytes of weight data after header (and q-metadata)
-    uint64_t reserved;          // Reserved (must be 0)
+    uint32_t mimo_rank;         // version 2: 1 = rank-1 SISO (only rank implemented).
+                                // 0 = legacy file (treated as 1).  > 1 refused by load() (-16).
+    uint32_t reserved;          // Reserved (writers emit 0)
 };
 static_assert(sizeof(WeightFileHeader) == 64, "Header must be 64 bytes");
 ```
@@ -116,7 +124,7 @@ Each layer contains **13 contiguous arrays**, serialized strictly in row-major l
 | **10** | `D_proj` | `[nheads]` | `nheads` | Direct skip-connection feedthrough gains |
 | **11** | `out_proj_w` | `[d_model, d_inner]` | `d_model × d_inner` | Final linear projection back to $D$ |
 | **12** | `film_proj_w` | `[2 * d_model, cond_dim]` | `2 × d_model × cond_dim` | FiLM projection for output modulation $(\gamma, eta)$ |
-| **13** | `dt_film_proj_w`| `[2 * nheads, cond_dim]` | `2 × nheads × cond_dim` | FiLM projection for $\Delta$ modulation |
+| **13** | `dt_film_proj_w`| `[2 * nheads, cond_dim]` | `2 × nheads × cond_dim` | FiLM projection for $\Delta$ modulation. **Read by the forward pass since 2026-10-04 (deviation D6):** per head `h`, row `2h` is $\gamma$, row `2h+1` is $\beta$, applied as $(dd\_dt + dt\_bias) \mapsto v(1+\gamma) + \beta$ before `softplus`, only when the conditioning vector is non-zero |
 
 ### Fused Input Dimension (`in_proj_out`)
 
@@ -180,9 +188,14 @@ The loader returns explicit negative error codes upon validation failure:
 | `-1` | File Open Failure | Path does not exist or insufficient OS read permissions. |
 | `-10` | Header Truncation | File size is smaller than `sizeof(WeightFileHeader)` (64 bytes). |
 | `-11` | Invalid Magic | Header `magic != 0x4D424D41`. |
-| `-12` | Version Incompatible | Header `version != 2`. Version 1 files are rejected. |
+| `-12` | Version Incompatible | Header `version` is neither `1` (legacy) nor `2`. |
 | `-13` | Corrupt Payload Size | File size does not match $64 + q\_metadata\_size + weight\_data\_size$, or weight data does not equal $L 	imes 	ext{bytes\_per\_layer}$. |
 | `-14` | Dimension Overflow | One or more dimensions exceed the compile-time limits in `config.h`. |
 | `-15` | Unsupported Quantization | `quantization > QuantFormat::FP16`. |
-| `-16` | Non-Zero Reserved Fields | Header `flags != 0` or `reserved != 0`. |
-| `-17` | Invalid Metadata Size | `q_metadata_size` does not match expected size for the declared quantization format. |
+| `-16` | Unsupported MIMO Rank | Header `version >= 2` and `mimo_rank > 1`: rank-R MIMO is reserved in the format but not implemented by the forward pass (deviation D3). |
+| `-17` | Invalid Metadata Size | *Documented but not implemented* — `q_metadata_size` is bounds-checked against the file size instead. |
+
+Code that is documented above but not implemented in `WeightLoader::load()` today:
+the `flags`/`reserved` zero checks (writers emit 0; readers ignore the values)
+and `-17`.  The implemented set is `0`, `-1`, `-10` … `-16`; keep this table and
+`src/core/weight_loader.h` in sync when adding a code.

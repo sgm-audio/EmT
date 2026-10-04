@@ -7,6 +7,28 @@
 
 ---
 
+## 0. Post-review closure addendum (2026-10-04, second pass)
+
+The technical findings below were correct when written and are kept as the
+historical record.  Four of the six register deviations were then closed by code
+changes (D3, D4, D5, D6); D1/D2 remain open.  Current state is machine-checked by
+`python3 scripts/verify_deviations.py`, and the full ledger lives in
+`ARCHITECTURE_FIDELITY.md` §2 / §4c:
+
+| Deviation | Finding in this report | Now |
+|---|---|---|
+| D3 — MIMO unused | §1 table "MIMO … Unused" | **CLOSED** — rank-R files are refused at load (`-16`), export and config validation; the rank-R *implementation* remains unimplemented and is scoped in `Prompts/DEVIATION_RESOLUTION/D3_MIMO_RANK.md` |
+| D4 — input-derived `A` | §1 table "Deviation" | **CLOSED** — documented as a project variant; §1.2 of the register forbids describing it as the paper's parameterization |
+| D5 — periodic state renormalization | §1 table "Deviation / stability workaround"; appendix row 9 | **CLOSED** — the guard is removed from C++ and both references; stability now follows from the A-stable update, and a continuity + long-run test guards it.  The appendix's "characterised, not fixed" note below is superseded |
+| D6 — `dt_film_proj_w` unused | not covered by this report | **CLOSED** — Δ-FiLM is applied in the C++, NumPy and PyTorch forward passes with one convention, only when conditioning is active |
+| D1 — no exponential-trapezoidal recurrence | §1 table "Not reproduced" | **OPEN** — prompt: `Prompts/DEVIATION_RESOLUTION/D1_D2_TRAPEZOIDAL_COMPLEX_STATE.md` |
+| D2 — complex state inactive | §1 table "Inactive" | **OPEN** — same prompt; the claim policy in `ARCHITECTURE_FIDELITY.md` §1.2 still applies ("Mamba-3-inspired" until this lands) |
+
+The LoRA finding (no implementation; GUI mockup only) is unchanged and still
+binds: `ARCHITECTURE_FIDELITY.md` §1.2 forbids "runtime LoRA adapters".
+
+---
+
 ## 1. Verdict summary
 
 | # | Claim in the text | Verdict | Basis |
@@ -51,12 +73,12 @@ So the text's advice — "treat Mamba-3 as whatever paper and code you can actua
 | Mamba-3 paper | EmT implementation | Status |
 |---|---|---|
 | Exponential-trapezoidal, 3-term recurrence with `B_{t−1}x_{t−1}` history term | 2-term recurrence `h ← Ā h + B̄·(B_t x_t)` with Tustin/bilinear `Ā=(1+Δt·A/2)/(1−Δt·A/2)`, `B̄=Δt/(1−Δt·A/2)` | **Not reproduced** (classical trapezoidal rule, not the paper's exponential-trapezoidal update) |
-| Complex-valued state (2×2 rotation blocks / RoPE) | `ssm_imag[]` is allocated but **never written in the recurrence** (grep: only occurrence outside the header is a multiply-by-scale in periodic normalization) | **Inactive** |
-| MIMO (rank-R B/C coupling) | Weights loaded/exported, but the recurrence indexes rank 0 only; `TRAINING_PLAN.md` states this explicitly | **Unused** |
+| Complex-valued state (2×2 rotation blocks / RoPE) | `ssm_imag[]` is allocated but **never written in the recurrence** | **Inactive** (D2; the periodic normalization that used to scale it was removed for D5) |
+| MIMO (rank-R B/C coupling) | Weights loaded/exported, but the recurrence indexes rank 0 only | **Unused** — since the D3 closure, rank > 1 is refused at load instead of silently downgraded |
 | Input-dependent selective Δ, B, C (A a learned per-head parameter) | Δ and A are both derived from input projections (`A_t = −softplus(dd_A)`, clamped at −1) | **Deviation** (input-dependent A is a legitimate variant, but not the paper's parameterization) |
 | No conv1d | No conv1d | **Matches** |
 | RoPE on B/C + RMSNorm on B/C + learnable biases | Implemented (cumulative angle state, RMSNorm, B/C biases) | **Matches** |
-| State stability from parameterization | Manual **periodic state renormalization every 4096 samples** (absent from the paper) | Deviation / stability workaround |
+| State stability from parameterization | Manual **periodic state renormalization every 4096 samples** (absent from the paper) | **Removed** (D5 closure, 2026-10-04); stability now follows from the A-stable discretization |
 
 **Consequence for the strategy:** the "Mamba-3" label is currently doing more work than the code. For a technical audience — exactly the audience that refers contract work — claiming Mamba-3 while shipping a Tustin-approximated real-state SISO SSM is a credibility risk. Either bring the recurrence to the paper's form (3-term exponential-trapezoidal + active complex state + rank-0→rank-R path) or rename the architecture honestly (e.g., "Mamba-3-inspired causal SSM") in the README, docs, and demo copy.
 
@@ -215,9 +237,10 @@ it removes the specific gaps the verdicts identified.
 | 6 | No way to train an effect (dry -> wet) | `PairedAudioDataset` (`dry/` + `wet/` layout, or `--paired`), with an explicit no-delay alignment warning | 3-pair saturation run trains and exports (`sisdr_db` 11.1 at step 1) |
 | 7 | Trainer silently exported **untrained** weights when all audio failed to decode | Robust backend chain (`soundfile` -> `torchaudio` -> stdlib `wave`) plus a hard "refusing to export untrained weights" guard | Undecodable-file run now exits 1 with no `.bin` written |
 | 8 | CI never ran the gates it advertised | `.github/workflows/ci.yml`: parity vectors, `ctest`, objective self-test, trainer smoke test, real-time gate (40 %), report-only training-shape benchmark + JSON artifact | Workflow reviewed step-by-step; first hosted run pending |
-| 9 | State-renormalization artifact (D5) believed to be a parity bug | Reproduced in **both** implementations with a constructed model (|h| = 4): 20.918667 -> 17.822269 at n = 4096, i.e. a 14.8 % gain step every 4096 samples | Same step in C++ and NumPy => design defect, not drift; documented in D5 and `TRAINING_PLAN.md` |
+| 9 | State-renormalization artifact (D5) believed to be a parity bug | Reproduced in **both** implementations with a constructed model (|h| = 4): 20.918667 -> 17.822269 at n = 4096, i.e. a 14.8 % gain step every 4096 samples | Same step in C++ and NumPy => design defect, not drift; documented in D5 and `TRAINING_PLAN.md` — **then removed** (D5 closure §0; `scripts/verify_deviations.py` D5 keeps the counterfactual) |
 
 **Two things this appendix does not claim.** (a) The renorm artifact is *characterised*, not
-fixed; F4 in `ARCHITECTURE_FIDELITY.md` is the fix path and it needs a listening test, not
-just a unit test. (b) The CI workflow has not executed on GitHub yet in this environment
+fixed **in this appendix** — it was subsequently removed outright (D5 closure, §0 addendum);
+F4 in `ARCHITECTURE_FIDELITY.md` remains the fix path for D1/D2 and needs a listening test,
+not just a unit test. (b) The CI workflow has not executed on GitHub yet in this environment
 (no hosted runner here) — it is reviewed, not proven; the first push run is the proof.

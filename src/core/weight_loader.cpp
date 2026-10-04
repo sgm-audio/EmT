@@ -132,6 +132,15 @@ int WeightLoader::load(const char* path) {
         return -15;
     }
 
+    // Deviation D3: rank-R MIMO is reserved in the file format, but the forward
+    // pass implements rank-1 SISO per head only.  Refuse loudly instead of
+    // silently running a rank-R model as rank 1.  Field is version-2 only and
+    // 0 means "legacy file written before the field existed" -> rank 1.
+    if (header_->version >= 2 && header_->mimo_rank > 1) {
+        unload();
+        return -16;
+    }
+
     // Compute offset of weight data (header + q-metadata)
     const uint8_t* base = static_cast<const uint8_t*>(mapped_data_);
     size_t q_meta_size = header_->q_metadata_size;

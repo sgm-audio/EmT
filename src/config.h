@@ -33,7 +33,12 @@
 // Scale
 #define MAX_LAYERS          6  // maximum model depth
 #define COND_DIM          128  // FiLM conditioning dimension (cross-track semantic + f0 + loudness)
-#define SSM_STATE_NORM_INTERVAL 4096 // periodic normalization interval
+
+// Note (deviation D5, closed 2026-10-04): there is deliberately no periodic
+// state-renormalization interval here.  The bilinear/trapezoidal update is
+// A-stable for the clamped A (A_t <= -1), so the state is bounded without a
+// non-linear guard; the old 4096-sample renormalization produced a measured
+// 14.8 % output gain step at every interval boundary.
 
 // Versioning
 #define VERSION_MAJOR 0

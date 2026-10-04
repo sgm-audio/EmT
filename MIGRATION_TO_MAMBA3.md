@@ -11,6 +11,13 @@
 > rule on a real pole). See [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md)
 > for the deviation register and tests. Passing statements below should be read as
 > "API/format reserved for", not "runtime implemented".
+>
+> **Closures applied later the same day (deviations D3–D6):** rank-R MIMO files are
+> now **refused at load** (`-16`) instead of silently running rank 1; the periodic
+> state renormalization is **removed** (D5); `dt_film_proj_w` is **read** by the
+> forward pass (D6); the input-derived `A` is **documented** as a project variant
+> (D4).  D1/D2 (below) remain the only open fidelity work; the prompts are in
+> [`Prompts/DEVIATION_RESOLUTION/`](Prompts/DEVIATION_RESOLUTION/README.md).
 
 **Date:** 2026-06-14  
 **Last updated:** 2026-06-15 — **Phases 1-4 complete, core + CLAP builds**
@@ -56,7 +63,7 @@ Mamba-3 eliminates every Mamba-1 limitation:
 - **Multi-head SSM** — H heads, each a resonant complex pole
 - **Data-dependent rotation of B/C** — implemented (`step_rope_bc`); the *state* itself stays real
 - **(not implemented)** complex-valued state / complex-plane poles per head — `ssm_imag` is allocated but never written
-- **(format only)** MIMO — the weight format and exporter reserve rank R, but the inference path uses rank 0 and never applies `mimo_o`
+- **(refused, not executed — D3 closed 2026-10-04)** MIMO — the weight format, exporter and loader still reserve rank R, but the inference path implements rank 0 only. A file with `mimo_rank > 1` is now rejected at load (`-16`), at export, and at training-config validation; `mimo_o` is never applied.
 - **FiLM conditioning** — Feature-wise Linear Modulation from cross-track semantic + f0 + loudness context
 - **RMSNorm** on B and C for stable training/inference
 
@@ -532,7 +539,7 @@ These files/systems require **zero modifications**:
 
 | Risk | Probability | Mitigation |
 |------|-------------|------------|
-| Complex state explosion | 15% | Periodic normalization every 4096 samples (as Mamba-1 does) |
+| Complex state explosion | 15% | **No state renormalization** (removed, D5): boundedness comes from the A-stable trapezoidal update (`|Ā| < 1` for `A < 0`), verified by the long-run high-state test. Do not reintroduce a periodic guard — see `Prompts/DEVIATION_RESOLUTION/D5_STATE_RENORMALIZATION.md` |
 | RoPE numerical drift | 5% | Use `fmodf(angle, 2π)` on every step |
 | Trapezoidal division instability | 2% | Denominator `1 + Δ·|A|/2` always > 0 for stable A |
 | Memory footprint too large | 10% | State: 8 heads × 64 headdim × 32 state × 2 complex × 4 bytes = 128 KB per layer. 6 layers = 768 KB. Fine for RT. |

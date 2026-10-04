@@ -167,14 +167,18 @@ size.
 
 ## Known limitations
 
-- **State renormalization**: the reference (and the plugin) rescale the SSM state
-  when `max|h| > 1` every 4096 samples. Training windows are 2048/4096 samples, so
-  this fires at most once per window - or never. If your trained weights produce
-  `|h| > 1`, the plugin applies an untrained periodic gain step (measured: 14.8 %
-  every 4096 samples with a constructed model). See `ARCHITECTURE_FIDELITY.md`
-  deviation D5 and run the continuity check before shipping such a model.
-- **MIMO is inert**: `mimo_rank > 1` is accepted by the exporter but the inference
-  path uses rank 0 (deviation D3).
+- **State renormalization — removed (D5, closed 2026-10-04)**: there is no
+  periodic state scaling any more, in training or in the plugin. Training windows
+  therefore no longer need to be longer than 4096 samples for that reason; the
+  stability argument is in `ARCHITECTURE_FIDELITY.md` D5 and is guarded by
+  `tests/test_stability.cpp`.
+- **MIMO**: `mimo_rank > 1` is refused up front — by `training/train.py` before
+  training and by the exporter before writing a file (deviation D3, closed
+  2026-10-04). Keep `mimo_rank: 1` in your config until the rank-R reduction is
+  implemented (`Prompts/DEVIATION_RESOLUTION/D3_MIMO_RANK.md`).
+- **Δ-FiLM is live (D6, closed 2026-10-04)**: `dt_film_proj` now receives
+  gradients and modulates Δ at inference with the same convention as the input
+  FiLM. Do not disable it in the config: training and inference must agree.
 - **Hyper-parameter sweep order**: the real-time budget is set by the *shape*
   (`d_inner`, `nheads`, `headdim`, `d_state`, depth). Fix the shape from a
   benchmark first, then spend GPU hours on data and loss weights.
@@ -183,9 +187,9 @@ size.
 
 - `d_model=1` is tuned for raw audio.  For latent tokens, update `d_model` and
   make sure your dataset returns `(seq_len, d_model)` frames.
-- The C++ plugin currently uses only rank-0 B/C projection and ignores the
-  unused `dt_film_proj_w` weights.  Training still exports them for forward
-  compatibility.
+- The C++ plugin uses only rank-0 B/C projection (rank > 1 is refused, D3) and
+  since the D6 closure it *does* use `dt_film_proj_w` to modulate Δ.  Any change
+  to the conditioning path must land in the trainer and the runtime together.
 - `process_block()` in C++ is still a per-sample loop stub; real-time block
   processing is not yet optimized.
 - If you change `MAX_*` in `config.h`, rebuild all C++ targets; the

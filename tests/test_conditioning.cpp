@@ -75,6 +75,89 @@ TEST(ConditioningModulation, ZeroConditioningWorks) {
     EXPECT_FALSE(std::isinf(outbuf[0]));
 }
 
+// Deviation D6 regression: dt_film_proj_w must actually modulate Δ.
+//
+// make_test_weights() populates a small-model layout (rows/cols < MAX_D_MODEL),
+// so it leaves the x projection and the B/C projections at zero.  This fixture
+// first makes the recurrence live: x rows driven by the input, B/C driven by
+// their biases.  film_proj_w stays zero, so with a zero dt_film_proj_w the
+// conditioning vector can have no effect at all, and any output difference must
+// come from the Δ-FiLM path (per-head gamma/beta, rows 2h / 2h+1).
+//
+// NOTE: the DC gain of the trapezoidal update is 1/|A| and is independent of Δ,
+// so a converged constant-input response hides Δ.  Drive an alternating input
+// and compare the whole trajectory instead.
+static void make_dt_film_test_weights(SSMWeights& w) {
+    std::memset(&w, 0, sizeof(w));
+
+    // z rows (d_inner): small constant -> SiLU gate != 0
+    for (size_t i = 0; i < MAX_D_INNER; ++i) w.in_proj_w[i][0] = 0.1f;
+    // x rows (d_inner, offset d_inner): gain 1.0 -> x = input
+    for (size_t i = 0; i < MAX_D_INNER; ++i) w.in_proj_w[MAX_D_INNER + i][0] = 1.0f;
+
+    // B/C come from the biases because their projections are zero.
+    for (size_t h = 0; h < MAX_NHEADS; ++h) {
+        for (size_t r = 0; r < MAX_MIMO_RANK; ++r) {
+            for (size_t s = 0; s < MAX_D_STATE; ++s) {
+                w.B_bias[h][r][s] = 0.5f;
+                w.C_bias[h][r][s] = 1.0f;
+            }
+        }
+    }
+    for (size_t s = 0; s < MAX_D_STATE; ++s) {
+        w.B_norm_weight[s] = 1.0f;
+        w.C_norm_weight[s] = 1.0f;
+    }
+    for (size_t h = 0; h < MAX_NHEADS; ++h) w.dt_bias[h] = 0.5f;
+    for (size_t j = 0; j < MAX_D_MODEL && j < MAX_D_INNER; ++j) {
+        w.out_proj_w[j][j] = 1.0f;
+    }
+}
+
+TEST(ConditioningModulation, DtFilmModulatesDelta) {
+    float cond[COND_DIM] = {0.0f};
+    cond[0] = 0.5f;
+    cond[1] = -0.25f;
+
+    auto run = [](const SSMWeights& w, const float* c, int samples) {
+        auto block = make_test_block();
+        block->set_weights(w);
+        if (c) block->set_conditioning(c);
+        std::vector<float> ys(static_cast<size_t>(samples));
+        for (int i = 0; i < samples; ++i) {
+            alignas(64) float outbuf[MAX_D_MODEL];
+            block->process_sample((i % 2) ? -0.4f : 0.7f, outbuf);
+            ys[static_cast<size_t>(i)] = outbuf[0];
+        }
+        return ys;
+    };
+
+    // (a) Zero Δ-FiLM weights: conditioning is a no-op -> identical trajectory.
+    SSMWeights w_zero;
+    make_dt_film_test_weights(w_zero);
+    EXPECT_EQ(run(w_zero, nullptr, 200), run(w_zero, cond, 200))
+        << "zero dt_film_proj_w must leave unconditioned and conditioned "
+           "inference identical";
+
+    // (b) Non-zero Δ-FiLM weights: conditioning must change the trajectory.
+    SSMWeights w_dt;
+    make_dt_film_test_weights(w_dt);
+    for (size_t h = 0; h < MAX_NHEADS; ++h) {
+        for (size_t k = 0; k < COND_DIM; ++k) {
+            w_dt.dt_film_proj_w[2 * h][k] = 0.5f;      // gamma
+            w_dt.dt_film_proj_w[2 * h + 1][k] = 0.2f;  // beta
+        }
+    }
+    const std::vector<float> base = run(w_dt, nullptr, 200);
+    const std::vector<float> with_cond = run(w_dt, cond, 200);
+    float max_diff = 0.0f;
+    for (size_t i = 0; i < base.size(); ++i) {
+        max_diff = std::max(max_diff, std::fabs(base[i] - with_cond[i]));
+    }
+    EXPECT_GT(max_diff, 1e-4f)
+        << "Δ-FiLM weights are loaded but have no effect (deviation D6)";
+}
+
 TEST(ConditioningModulation, NonZeroConditioningWorks) {
     auto block = make_test_block();
     block->set_weights(*make_test_weights());

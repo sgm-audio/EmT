@@ -96,6 +96,44 @@ and the new [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md).
   replace the toy-shape 1.79 us/sample headline, and `TRAINING_PLAN.md` now warns
   that the RunPod L4 config is not real-time (~90 % of one core per layer).
 
+### Deviation closures (second pass, 2026-10-04)
+
+Closes four of the six entries in `ARCHITECTURE_FIDELITY.md` §2 (D3, D4, D5,
+D6); D1/D2 remain open with prompts in `Prompts/DEVIATION_RESOLUTION/`.
+`python3 scripts/verify_deviations.py` prints one verified status line per
+deviation and fails if a closed one regresses.
+
+- **D3 (MIMO) — refused instead of silently downgraded.** The 64-byte weight
+  header now carries a real `mimo_rank` field (`'<12IQII'`; `0` = legacy file,
+  treated as rank 1). `WeightLoader::load()` returns **-16** for `mimo_rank > 1`,
+  `fits_in_static_weights_with()` rejects such headers, the exporter raises
+  `SystemExit` instead of writing the file, and `training/train.py` refuses a
+  rank-R config before training. Guards:
+  `WeightLoaderTest.RejectsUnimplementedMimoRank`,
+  `WeightLoaderTest.LegacyHeaderWithoutMimoFieldIsRankOne`.
+- **D4 (input-derived `A`) — documented as a project variant.** D4 comments at
+  the clamp site (C++, both Python references, the header) plus a prohibition in
+  `ARCHITECTURE_FIDELITY.md` §1.2; no behaviour change.
+- **D5 (periodic state renormalization) — removed.** Deleted from
+  `src/core/ssm_block.{h,cpp}`, `src/config.h`, both Python references and the
+  exporter's `config.h` generator. The old guard stepped the output gain by
+  14.8 % every 4096 samples; stability now follows from the A-stable
+  trapezoidal update. Guards:
+  `Stability.NoRenormalizationGainStepAtFormerIntervalBoundary` (constructed
+  `|h| = 4` case; the verifier also reproduces the legacy artifact as a
+  counterfactual: 0.0000 % now vs 24.48 % with the old guard) and
+  `Stability.HighStateLongRunStaysBounded`.
+- **D6 (`dt_film_proj_w`) — wired into Δ.** Per-head `(γ, β)` rows `2h`/`2h+1`
+  modulate the step size with the same convention as the input FiLM, applied
+  only when conditioning is active (unconditioned inference is bit-identical).
+  Implemented in C++, `reference_mamba3.py`, `reference_forward.py` and the
+  PyTorch model used by the trainer; the parity generator now emits non-zero
+  Δ-FiLM weights, so the C++ ↔ NumPy parity test (1.19e-07) covers the path.
+  Behavioural guard: `ConditioningModulation.DtFilmModulatesDelta`.
+- Verification: `ctest` **72/72** (was 67); real-time gate
+  `--config small --layers 1,2 --budget-pct 40` still **8/8 PASS**
+  (worst 4.80 us/sample = 23.0 % of one core on the CI-equivalent build).
+
 ## [0.3.0] - 2026-09-13
 
 ### Added
