@@ -219,7 +219,7 @@ $$u_{\text{film}, j} = u_j \cdot (1.0 + \gamma_j) + \beta_j$$
 - **SiLU Gating on z Branch:** The \(z\) projection branch undergoes Sigmoid Linear Unit activation:
   $$z_{\text{silu}} = z \cdot \sigma(z) = \frac{z}{1 + e^{-z}}$$
   The head output \(y\) is multiplicatively gated: \(y_{\text{gated}} = y \cdot z_{\text{silu}}\).
-- **Periodic State Normalization:** Every \(4096\text{ samples}\) (`SSM_STATE_NORM_INTERVAL`), the audio thread scans the state vector. If \(\max |h| > 1.0\), all state elements are scaled down proportionally. This guarantees that 24/7 continuous audio processing never accumulates numerical creep or drift.
+- **State stability (no renormalization):** *Removed 2026-10-04 — deviation D5.* There is no periodic state-scaling pass and no `SSM_STATE_NORM_INTERVAL`; the old 4096-sample guard stepped the output gain by 14.8 % at each boundary. Boundedness now follows from the discretization: for the clamped \(A_t \le -1\) and \(\Delta > 0\) the trapezoidal factor satisfies \(|\bar{A}| < 1\), so the state is contractive and no untrained mutation is needed. Regression guards: `tests/test_stability.cpp` (`NoRenormalizationGainStepAtFormerIntervalBoundary`, `HighStateLongRunStaysBounded`) and `scripts/verify_deviations.py` (D5, including a counterfactual that reproduces the old artifact).
 
 ---
 

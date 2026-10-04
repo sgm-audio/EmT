@@ -13,6 +13,11 @@ namespace mamba {
 // Per-head complex-valued SSM state (real + imag), RoPE angle state,
 // and cached B projection.  alignas(64) prevents false sharing.
 //
+// DEVIATION D2 (open): the recurrence currently updates `ssm_real` only;
+// `ssm_imag` is allocated and scaled but never written by a rotational state
+// update.  Until D2 lands, describe the state as real with a data-dependent
+// rotary rotation applied to B and C — never as a complex-valued state.
+//
 // Memory footprint at MAX config:
 //   ssm_real/imag: 8 * 64 * 32 * 2 = 32,768 floats ≈ 131 KB
 //   k_state:       4 * 8 * 32 = 1,024 floats ≈ 4 KB
@@ -91,8 +96,14 @@ struct SSMBlockParams {
 // === Single Mamba-3 SSM Layer ===
 //
 // No conv1d — 0 samples algorithmic latency.
-// Multi-head SSM with complex-valued state, exponential-trapezoidal
-// discretization, MIMO coupling, and RoPE rotary embeddings.
+// Multi-head SSM with a real (rank-1) state, bilinear/trapezoidal
+// discretization, RoPE rotary embeddings on B/C, and FiLM conditioning.
+//
+// Claim policy (see ARCHITECTURE_FIDELITY.md):
+//   D1 open — two-term update, not the paper's exponential-trapezoidal
+//             three-term recurrence.
+//   D2 open — no rotational (complex) dynamics inside the state.
+//   D4 closed (documented) — A is input-derived, not a learned parameter.
 
 class SSMBlock {
 public:
@@ -170,9 +181,6 @@ private:
     bool conditioning_active_;
     bool weights_loaded_; 
 
-    static constexpr uint32_t STATE_NORM_INTERVAL = SSM_STATE_NORM_INTERVAL;
-    uint32_t sample_count_;
-
     // === Decomposed execution steps (inlined in Release) ===
     void step_film_conditioning(float input);
     void step_in_proj(const float*& z_ptr, const float*& x_ptr,
@@ -186,7 +194,13 @@ private:
                          const float* B_norm, const float* C_norm);
     void step_silu_gate(const float* z_ptr);
     void step_out_proj_residual(const float* x_ptr, float* output);
-    void step_periodic_normalization(SSMState& state);
+    // NOTE: there is no step_periodic_normalization().  The periodic state
+    // renormalization was removed on 2026-10-04 (deviation D5): it was an
+    // untrained non-linearity that stepped the output gain by 14.8 % every
+    // SSM_STATE_NORM_INTERVAL samples.  Stability now comes from the
+    // discretization itself (A_stab = (1 + A*dt/2) / (1 - A*dt/2), |A_stab| < 1
+    // for the clamped A <= -1), which keeps the state bounded without mutating
+    // it.  See ARCHITECTURE_FIDELITY.md D5.
 };
 
 } // namespace mamba

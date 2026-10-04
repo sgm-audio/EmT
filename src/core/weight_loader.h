@@ -30,7 +30,12 @@ struct WeightFileHeader {
     uint32_t q_metadata_size;   // size in bytes of q-metadata block (0 for FLOAT32)
     uint32_t flags;             // reserved (0)
     uint64_t weight_data_size;  // bytes of weight data after header (and q-metadata)
-    uint64_t reserved;          // zero
+    uint32_t mimo_rank;         // version 2 only: 1 = rank-1 SISO (the only rank
+                                // this runtime implements).  0 = legacy file
+                                // written before this field existed; treated as
+                                // rank 1.  Values > 1 are refused by load()
+                                // (deviation D3).
+    uint32_t reserved;          // zero
 };
 
 static_assert(sizeof(WeightFileHeader) == 64,
@@ -135,6 +140,15 @@ public:
 
     bool fits_in_static_weights() const;
 
+    // Return codes from load():
+    //    0  ok
+    //  -10  file smaller than the header
+    //  -11  bad magic
+    //  -12  unsupported version
+    //  -13  truncated / undersized weight data
+    //  -14  dimension exceeds the compiled MAX_* limits
+    //  -15  unsupported quantization format
+    //  -16  mimo_rank > 1 (deviation D3: reserved in the format, not implemented)
     static bool fits_in_static_weights_with(const WeightFileHeader& hdr) {
         return hdr.d_state    > 0 && hdr.d_state    <= MAX_D_STATE  &&
                hdr.d_model    > 0 && hdr.d_model    <= MAX_D_MODEL  &&
@@ -142,7 +156,9 @@ public:
                hdr.nheads     > 0 && hdr.nheads     <= MAX_NHEADS   &&
                hdr.headdim    > 0 && hdr.headdim    <= MAX_HEADDIM  &&
                hdr.cond_dim   > 0 && hdr.cond_dim   <= COND_DIM     &&
-               hdr.num_layers > 0 && hdr.num_layers <= MAX_LAYERS;
+               hdr.num_layers > 0 && hdr.num_layers <= MAX_LAYERS   &&
+               // Deviation D3: a rank-R file must not look loadable.
+               (hdr.version < 2 || hdr.mimo_rank <= 1);
     }
 
     bool validate_dimensions(uint32_t d_state, uint32_t d_model,

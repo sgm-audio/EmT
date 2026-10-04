@@ -48,17 +48,29 @@ Current values:
 MAX_D_STATE=32  MAX_D_MODEL=256  MAX_D_INNER=512  MAX_NHEADS=8
 MAX_HEADDIM=64  MAX_MIMO_RANK=4  MAX_NUM_BC_HEADS=1  MAX_NUM_ROPE_ANGLES=16
 MAX_LAYERS=6    COND_DIM=128     MAX_BLOCK_SIZE=512  MAX_PARAM_ATOMS=256
-MAX_CHUNK_SIZE=128  SSM_STATE_NORM_INTERVAL=4096
+MAX_CHUNK_SIZE=128
 ```
+
+(`SSM_STATE_NORM_INTERVAL` and the periodic state renormalization were removed
+on 2026-10-04 — deviation D5.  Stability comes from the A-stable trapezoidal
+update, and `scripts/verify_deviations.py` fails if any renorm code returns.)
 
 Mamba-3 has **no conv1d** — 0-sample algorithmic latency. `MAX_D_CONV` does not exist.
 
 ## Weight File Format (Mamba-3, Version 2)
 
 - Magic: `0x4D424D41` ("MBMA"), version 2, 64-byte cache-aligned header
+- Header fields: 12×u32 (`magic`, `version`, `d_state`, `d_model`, `d_inner`,
+  `nheads`, `num_layers`, `headdim`, `cond_dim`, `quantization`,
+  `q_metadata_size`, `flags`), u64 `weight_data_size`, u32 **`mimo_rank`**,
+  u32 `reserved` (Python format string `'<12IQII'`)
+- `mimo_rank`: `1` is the only rank this runtime executes; `0` = legacy file
+  written before the field existed (treated as 1); **`> 1` is refused by
+  `WeightLoader::load()` with error `-16`** (deviation D3). `fits_in_static_weights_with()`
+  rejects such headers too.
 - mmap read-only (`PROT_READ`, `MAP_PRIVATE` on POSIX; `PAGE_READONLY` + `MapViewOfFile` on Windows)
 - Weights never copied into writable memory; `dequantize_layer_to()` is the only exception (INT8/FP16 → float32)
-- 13 arrays per layer, deterministic order: `in_proj_w`, `dt_bias`, `B_bias`, `C_bias`, `B_norm_weight`, `C_norm_weight`, `mimo_x`, `mimo_z`, `mimo_o`, `D_proj`, `out_proj_w`, `film_proj_w`, `dt_film_proj_w`
+- 13 arrays per layer, deterministic order (array 13, `dt_film_proj_w`, is read by the forward pass since the D6 closure): `in_proj_w`, `dt_bias`, `B_bias`, `C_bias`, `B_norm_weight`, `C_norm_weight`, `mimo_x`, `mimo_z`, `mimo_o`, `D_proj`, `out_proj_w`, `film_proj_w`, `dt_film_proj_w`
 - Quantization: Float32(0), Int8 per-tensor(1), Int8 per-layer(2), FP16(3)
 - Path resolution: explicit arg > `MAMBA_WEIGHTS` env var > `models/test_model.bin`
 
@@ -78,18 +90,23 @@ Mamba-3 has **no conv1d** — 0-sample algorithmic latency. `MAX_D_CONV` does no
 - No SIMD in B/C projections (strided `[nheads][mimo_rank][d_state]` layout in `WeightLayerPointers`)
 - Process events are handled per-sample in `clap_plugin.cpp:plugin_process()` — events iterated inside the sample loop, not batched
 - Voices share one SSMInferenceCore; per-voice SSMState is save/restored each process() call
+- **Deviation status lives in `ARCHITECTURE_FIDELITY.md` §2 and is machine-checked by `python3 scripts/verify_deviations.py`** — D1 (three-term exponential-trapezoidal recurrence) and D2 (complex/rotational state) are still open; D3/D4/D5/D6 are closed and guarded. Check the D5 invariant notice in `src/core/ssm_block.h` before touching the recurrence
 
 ## Test Structure
 
+Counts below are the measured `[ OK ]` totals (2026-10-04); `ctest` discovers
+**72 tests** across the seven binaries.
+
 | File | Tests | What |
 |------|-------|------|
-| `test_ssm_block.cpp` | 9 | SSMBlock multi-head, SSMInferenceCore multi-layer, state round-trip |
-| `test_weight_loader.cpp` | 20 | Header validation, layer pointers, FP16/Int8 dequant, path resolution |
-| `test_conditioning.cpp` | 4 | FiLM conditioning, seqlock tear protection |
-| `test_stability.cpp` | 3 | Long-run no-NaN, extreme params, zero-input |
-| `test_realtime_safety.cpp` | 3 | Process call-graph audit, no allocation, no lock in path |
-| `test_cpp_parity.cpp` | 1 | C++ vs Python reference at 1e-5 tolerance |
-| `benchmark_ssm_block` | — | Per-sample throughput (~0.65 µs/sample single layer) |
+| `test_ssm_block.cpp` | 10 | SSMBlock multi-head, SSMInferenceCore multi-layer, state round-trip |
+| `test_weight_loader.cpp` | 23 | Header validation, layer pointers, FP16/Int8 dequant, path resolution, **D3:** rank-R refusal + legacy-header acceptance |
+| `test_conditioning.cpp` | 11 (3 suites) | FiLM conditioning, seqlock tear protection, **D6:** `DtFilmModulatesDelta` |
+| `test_stability.cpp` | 5 | Long-run no-NaN, extreme params, zero-input, **D5:** no gain step at the former 4096-sample renorm boundary + bounded state with `|h| > 1` |
+| `test_realtime_safety.cpp` | 7 | Process call-graph audit, no allocation, no lock in path, multi-layer model load |
+| `test_cpp_parity.cpp` | 1 | C++ vs Python reference at 1e-5 tolerance (env-gated; CI generates the vectors) |
+| `test_ara.cpp` | 15 | DocumentController / PlaybackRenderer / EditorRenderer stubs, musical-context conversion |
+| `benchmark_ssm_block` | — | Per-sample cost + `--budget-pct` gate + `--json`. **Quote the harness, never a headline**: `--config small --layers 1,2 --sample-rate 48000 --budget-pct 40` (currently 8/8 PASS, worst 4.80 µs/sample = 23.0 % of one core here) |
 
 Run a single test binary: `./build/tests/Release/test_weight_loader.exe`
 
