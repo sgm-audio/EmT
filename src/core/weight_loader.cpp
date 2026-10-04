@@ -181,8 +181,14 @@ void WeightLoader::unload() {
 }
 
 bool WeightLoader::fits_in_static_weights() const {
-    return validate_dimensions(MAX_D_STATE, MAX_D_MODEL, MAX_D_INNER,
-                               MAX_NHEADS, MAX_HEADDIM, MAX_LAYERS);
+    // NOTE: this used to call validate_dimensions(MAX_...), which requires
+    // *exact equality* with the compiled maximum shape - so it returned
+    // false for every file that was merely small enough to fit. The plugin
+    // load path relied on that predicate and therefore rejected any model
+    // whose layer count was not 1, including the shapes produced by
+    // training/configs/*.yaml. Forward to the predicate that does the
+    // intended '<=' comparison.
+    return header_ != nullptr && fits_in_static_weights_with(*header_);
 }
 
 bool WeightLoader::validate_dimensions(uint32_t d_state, uint32_t d_model,

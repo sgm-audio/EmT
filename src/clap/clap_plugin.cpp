@@ -102,7 +102,7 @@ static bool plugin_init(const clap_plugin_t* plugin) {
     auto* m = get_synth(plugin);
     m->core_cfg = MambaConfig::max_config();
     m->core_cfg.num_layers = 1;
-    m->core = new (m->core_storage) SSMInferenceCore(m->core_cfg);
+    m->core = new (m->core_storage.data) SSMInferenceCore(m->core_cfg);
     m->sample_rate = 48000.0;
     m->block_size = 512;
     m->is_active = false;
@@ -631,10 +631,12 @@ bool MambaSynth::load_weights(const char* path) {
 
     // Validate dimensions against the loaded header
     const auto& hdr = weight_loader.header();
-    if (!weight_loader.validate_dimensions(
-            hdr.d_state, hdr.d_model, hdr.d_inner,
-            hdr.nheads, hdr.headdim,
-            static_cast<uint32_t>(core_cfg.num_layers))) {
+    // The file may describe any shape that fits the compiled MAX_* limits;
+    // core_cfg is re-initialised from the header below. Do NOT compare the
+    // header against core_cfg.num_layers here: at this point that is still
+    // the 1-layer placeholder set in the constructor, so such a comparison
+    // rejects every multi-layer model.
+    if (!WeightLoader::fits_in_static_weights_with(hdr)) {
         weight_loader.unload();
         return false;
     }

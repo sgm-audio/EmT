@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   build-and-test:
@@ -21,7 +22,11 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip3 install numpy torch --break-system-packages
+          pip3 install --break-system-packages numpy pyyaml
+          # CPU wheel first (small, no CUDA payload); fall back to the default
+          # index if the PyTorch index is unavailable.
+          pip3 install --break-system-packages --index-url https://download.pytorch.org/whl/cpu torch \
+            || pip3 install --break-system-packages torch
 
       - name: Configure CMake
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -29,26 +34,72 @@ jobs:
       - name: Build
         run: cmake --build build --parallel $(nproc)
 
-      - name: Run tests
-        run: ctest --test-dir build --output-on-failure --timeout 120
+      # The CppParity test loads vectors produced by the NumPy reference. Generate
+      # them before ctest, otherwise the test silently skips and a "green" run
+      # proves nothing about C++/Python agreement.
+      - name: Generate parity vectors (C++ <-> NumPy reference)
+        run: |
+          python3 scripts/reference_mamba3.py --generate --output-dir build
+          ls -l build/parity_test_weights.bin build/parity_expected.bin
 
-      - name: Run benchmark
-        run: ./build/tests/benchmark_ssm_block
-
-      - name: Generate test weights (Mamba-3)
+      # A real 2-layer export, so the FX model-load path is exercised for real:
+      # the plugin must accept multi-layer files that fit the compiled limits.
+      - name: Generate test weights
         run: |
           python3 scripts/export_mamba_weights.py \
             --state-dim 16 --model-dim 16 --inner-dim 32 --nheads 2 \
             --layers 2 --random-init \
             --output models/ci_test_model.bin
+          python3 scripts/validate_export.py models/ci_test_model.bin
 
-      - name: Validate weight export
-        run: python3 scripts/validate_export.py models/ci_test_model.bin
+      - name: Run tests
+        env:
+          MAMBA_PARITY_DIR: ${{ github.workspace }}/build
+          MAMBA_REQUIRE_PARITY: "1"   # a missing vector file is a failure, not a skip
+          MAMBA_TEST_WEIGHTS: ${{ github.workspace }}/models/ci_test_model.bin
+        run: ctest --test-dir build --output-on-failure --timeout 120
+
+      # Properties of the objective (SI-SDR scale invariance, silent-target
+      # handling, noisy-reference caveat, gradient flow, MRSTFT sanity).
+      - name: Objective self-test
+        run: python3 training/losses.py
+
+      - name: Trainer smoke test (task-matched objective)
+        run: |
+          python3 training/train.py --smoke-test --steps 1 --loss hybrid \
+            --output-dir /tmp/emt_smoke
+          test -f /tmp/emt_smoke/plugin_weights.bin
+
+      # Regression tripwire. This gates the small benchmark shape at 40% of one
+      # core; it is NOT a product claim. Product-level gates belong on the target
+      # machine at the budget you actually sell against (see --budget-pct).
+      - name: Real-time cost gate
+        run: |
+          ./build/tests/benchmark_ssm_block \
+            --config small --layers 1,2 --sample-rate 48000 \
+            --budget-pct 40 --repeats 5 --seconds 0.1
+
+      # Report-only: the shapes the training configs actually produce. These are
+      # expected to be expensive; publishing the numbers is the point.
+      - name: Real-time cost report (training-config shapes, no gate)
+        run: |
+          ./build/tests/benchmark_ssm_block \
+            --config train4070,trainl4 --layers 1,3,6 --sample-rate 48000 \
+            --budget-pct 40 --no-gate --seconds 0.1 --repeats 3 \
+            --json bench-training-shapes.json || true
+          cat bench-training-shapes.json
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: bench-training-shapes.json
+          if-no-files-found: warn
 
       - name: clap-validator
         run: |
           if command -v clap-validator &> /dev/null; then
-            clap-validator ./build/src/clap/MambaSynth.clap
+            clap-validator ./build/src/clap/EmTSynth.clap
           else
             echo "clap-validator not installed — skipping"
             echo "Install from: https://github.com/free-audio/clap"

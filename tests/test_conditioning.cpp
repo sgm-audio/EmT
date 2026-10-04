@@ -177,7 +177,7 @@ static TestSynthPtr create_test_synth() {
     m->host = nullptr;
     m->core_cfg = MambaConfig::max_config();
     m->core_cfg.num_layers = 1;
-    m->core = new (m->core_storage) SSMInferenceCore(m->core_cfg);
+    m->core = new (m->core_storage.data) SSMInferenceCore(m->core_cfg);
     m->sample_rate = 48000.0;
     m->block_size = 512;
     m->is_active = false;
