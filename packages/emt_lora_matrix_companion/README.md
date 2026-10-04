@@ -1,3 +1,12 @@
+> **Status: GUI assets only — no LoRA implementation exists in this repository.**
+> This package contains mockups and a layout spec for a future adapter-selection
+> UI. There is no adapter training code, no adapter weight format, and no runtime
+> adapter path in `src/` or `training/`; `grep -ri lora` over the source tree
+> returns only this package and its asset zip. Treat "runtime LoRA" as *planned*.
+> Per-preset merged weights (separate `.bin` files) are the mechanism the format
+> supports today and are the simpler, faster ship path — see
+> [`../../ARCHITECTURE_FIDELITY.md`](../../ARCHITECTURE_FIDELITY.md) §1.2 and §5.
+
 # EmT 16-LoRA Matrix Companion - GUI Asset Package
 
 A companion neural LoRA selection and morphing plugin GUI.

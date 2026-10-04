@@ -3,6 +3,7 @@
 
 #include <clap/clap.h>
 #include "clap/clap_plugin.h"
+#include "common/aligned_storage.h"
 #include "core/ssm_inference_core.h"
 #include "core/weight_loader.h"
 #include <atomic>
@@ -20,7 +21,10 @@ enum FxParamId : clap_id {
 
 struct alignas(64) FxState {
     const clap_host_t* host;
-    std::byte core_storage[sizeof(SSMInferenceCore)];
+    // alignas lives on the member (not only on the struct): core_storage
+    // follows a pointer, so a bare std::byte[] would land 8 bytes off a
+    // 64-byte boundary and fault in the SSMInferenceCore constructor.
+    alignas(64) AlignedStorage<SSMInferenceCore, 64> core_storage;
     SSMInferenceCore* core;
     MambaConfig core_cfg;
     double sample_rate;
@@ -46,6 +50,12 @@ struct alignas(64) FxState {
     // Thread check
     alignas(64) ThreadCheck thread_check;
 };
+
+// Load a weight file into an FX instance (the plugin's real model-load path).
+// Exposed for tests: this is where the 'does this file fit the compiled
+// limits?' decision is made, and it must accept every multi-layer model
+// within those limits. Returns false (and unloads) on any rejection.
+bool fx_load_weights(FxState* f, const char* path);
 
 // Factory function for the Mamba FX plugin.
 const clap_plugin_t* mamba_fx_create(const clap_host_t* host);

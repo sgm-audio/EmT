@@ -1,5 +1,15 @@
 # Executive Audit & Verification Report: EmT Audio Plugin Suite
 
+> **⚠️ Superseded in part (2026-10-04).** This report predates the independent
+> verification in [`CLAIMS_VERIFICATION.md`](CLAIMS_VERIFICATION.md) and the
+> implemented-vs-paper ledger in [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md).
+> Specifically: the recurrence is a two-term bilinear update (not
+> exponential-trapezoidal), the state is real (`ssm_imag` is inert), MIMO is
+> carried in the format but not used at inference, the "zero latency" win is not
+> attributable to dropping conv1d, and per-shape real-time cost is 4-65x the
+> quoted toy-shape figure. Read the two documents above before quoting any
+> performance or architecture number from this file.
+
 **Project:** EmT — Real-time Mamba-3 SSM CLAP/ARA Audio Plugin Suite  
 **Repository:** `sgm-audio/EmT` (`https://github.com/sgm-audio/EmT`)  
 **Audit Level:** CEO / Executive Engineering Due Diligence  

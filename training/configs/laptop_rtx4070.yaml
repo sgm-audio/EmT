@@ -15,6 +15,20 @@ num_layers: 3
 mimo_rank: 1
 cond_dim: 32       # small FiLM vector for pitch/velocity/one-hot instrument
 
+# Objective
+# ---------
+# hybrid = pre-emphasis L1 + SI-SDR + multi-resolution STFT (recommended).
+# Use `mse` to reproduce the legacy next-sample objective, or l1/sisdr/mrstft.
+loss: hybrid
+loss_weights: {time: 1.0, sisdr: 1.0, stft: 1.0}
+loss_preemph: 0.97
+
+# Paired (dry/wet) effect training
+# --------------------------------
+# Point --dataset-dir at a folder containing dry/ and wet/ subfolders to learn a
+# dry->wet mapping instead of next-sample prediction. Sample i of dry must align
+# with sample i of wet (this model has zero algorithmic look-ahead).
+
 # Training
 # --------
 batch_size: 4

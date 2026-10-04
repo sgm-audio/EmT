@@ -3,10 +3,21 @@
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![CLAP](https://img.shields.io/badge/CLAP-1.2+-purple.svg)](https://cleveraudio.org/)
 [![ARA 2](https://img.shields.io/badge/ARA-2.0-orange.svg)](https://www.celemony.com/en/ara)
-[![CTest](https://img.shields.io/badge/tests-64%2F64%20passing-brightgreen.svg)]()
+[![CTest](https://img.shields.io/badge/tests-67%20passing-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-Real-time neural audio synthesis and effect processing plugins powered by the **Mamba-3 state-space model (SSM)** architecture. Delivered as low-overhead, real-time safe **CLAP** plugins with optional **ARA 2.0** integration for DAW-hosted generative workflows.
+Real-time neural audio synthesis and effect processing plugins powered by a **Mamba-3-inspired causal state-space model (SSM)**. Delivered as low-overhead, real-time safe **CLAP** plugins with optional **ARA 2.0** integration for DAW-hosted generative workflows.
+
+> **Read this before quoting architecture or performance claims:**
+> [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md) is the authoritative
+> record of what is implemented versus what the Mamba-3 paper (arXiv:2603.15569)
+> specifies, with a claim policy and a deviation register. The short version: the
+> core is a Mamba-family SSM with input-selective Δ/B/C, RMSNorm, B/C biases and
+> data-dependent rotation of B/C — but the recurrence is a two-term bilinear
+> update with a **real** state, not the paper's three-term exponential-trapezoidal
+> recurrence, and the MIMO path is carried in the weight format without being
+> used at inference. [`CLAIMS_VERIFICATION.md`](CLAIMS_VERIFICATION.md) is the
+> independent third-party-style review that produced this position.
 
 > **Project Identity:** This project is **EmT** (migrated from `mamba-ssm-plugin-suite-70317161`), a distinct Mamba-SSM CLAP/ARA plugin and training suite. It is separate from CLARA. No "0" in the name.
 
@@ -15,7 +26,8 @@ Real-time neural audio synthesis and effect processing plugins powered by the **
 ## Table of Contents
 
 - [Plugin Suite Overview](#plugin-suite-overview)
-- [Mamba-3 Core Innovations](#mamba-3-core-innovations)
+- [SSM Core — implemented vs planned](#ssm-core-what-is-actually-implemented)
+- [Architecture Fidelity & Claim Policy](ARCHITECTURE_FIDELITY.md)
 - [Architecture](#architecture)
   - [Three-Thread Concurrency Model](#three-thread-concurrency-model)
   - [Zero-Copy Polyphonic Voice Management](#zero-copy-polyphonic-voice-management)
@@ -24,6 +36,7 @@ Real-time neural audio synthesis and effect processing plugins powered by the **
   - [Dual-Platform GUI Backend](#dual-platform-gui-backend)
   - [Celemony ARA 2.0 Integration & Fallback](#celemony-ara-20-integration--fallback)
 - [Performance & Benchmarks](#performance--benchmarks)
+- [Training & Objectives](#training--objectives)
 - [Build Instructions](#build-instructions)
   - [Prerequisites](#prerequisites)
   - [Windows Build (MSVC)](#windows-build-msvc)
@@ -49,24 +62,41 @@ Both plugins are delivered in a single unified bundle: `EmTSynth.clap`.
 
 ---
 
-## Mamba-3 Core Innovations
+## SSM Core (what is actually implemented)
 
-EmT utilizes the Mamba-3 state-space model formulation, optimized specifically for real-time digital signal processing:
+The core is a Mamba-family selective SSM adapted for real-time audio. The list
+below is deliberately split into **implemented** and **not yet implemented**;
+see [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md) for `file:line`
+evidence and the plan to close the gaps.
 
-1. **Multi-Head Complex State Recurrence**:
-   Each layer decomposes the hidden state across $N_H$ heads with complex state representations ($h \in \mathbb{C}^{D_S}$):
-   $$\mathbf{h}_t = \bar{\mathbf{A}} \mathbf{h}_{t-1} + \bar{\mathbf{B}} u_t$$
-   $$y_t = \text{Re}\{\mathbf{C}^\dagger \mathbf{h}_t\} + \mathbf{D} u_t$$
-2. **Trapezoidal (Bilinear) Discretization**:
-   Replaces crude Euler or Zero-Order Hold (ZOH) discretization with trapezoidal integration:
-   $$\bar{A} = \frac{1 + \frac{1}{2} A \Delta}{1 - \frac{1}{2} A \Delta}, \quad \bar{B} = \frac{\Delta}{1 - \frac{1}{2} A \Delta} B$$
-   Guarantees A-stable discretization across high sample rates (44.1 kHz – 192 kHz).
-3. **Rotary Position Embedding (RoPE) & RMSNorm**:
-   Applies continuous angular rotation per head to encode pitch and temporal phase directly into recurrence states, stabilized by RMSNorm on input projections $B$ and $C$.
-4. **Feature-wise Linear Modulation (FiLM)**:
-   Modulates time-step $\Delta$ and projection matrix $B$ using conditioning vectors derived from MIDI pitch, velocity, and DAW musical context.
-5. **Zero Algorithmic Latency**:
-   Mamba-3 eliminates the causal 1D convolution (`conv1d`) present in Mamba-1/2, achieving **0 samples of algorithmic delay** for instantaneous live playing.
+**Implemented:**
+
+1. **Multi-head state recurrence** with a real-valued per-head state:
+   $$h_t = \bar{A}\, h_{t-1} + \bar{B}\,(B_t \odot x_t), \qquad y_t = C_t^{\top} h_t + D\,x_t$$
+   Each layer decomposes the hidden state across $N_H$ heads
+   (`src/core/ssm_block.cpp:245-273`).
+2. **Bilinear (Tustin) discretization**:
+   $$\bar{A} = \frac{1 + \frac{1}{2} A \Delta}{1 - \frac{1}{2} A \Delta}, \quad \bar{B} = \frac{\Delta}{1 - \frac{1}{2} A \Delta}$$
+   The bilinear map is A-stable, so the recurrence remains stable at 44.1–192 kHz.
+   *(This is a classical trapezoidal rule applied to a real pole — not the paper's
+   exponential-trapezoidal three-term form; see deviations D1/D2.)*
+3. **Data-dependent rotation of $B$ and $C$ plus RMSNorm**: a cumulative angular
+   state rotates each $(B, C)$ pair per head and dimension, with RMSNorm and
+   learned bias terms on both projections (`src/core/ssm_block.cpp:163-243`).
+4. **Feature-wise Linear Modulation (FiLM)** — an EmT addition, not a paper
+   feature: conditions the layer input on MIDI pitch, velocity and DAW/ARA context.
+5. **Zero algorithmic look-ahead**: the recurrence is causal and consumes one
+   sample per step with no future reads, so the plugin reports 0 samples of
+   latency. *(Mamba-1/2's causal conv is also streamable with no look-ahead —
+   dropping it is a simplification and a compute saving, not a latency win.)*
+
+**Not yet implemented** (do not claim these until F1–F3 in
+`ARCHITECTURE_FIDELITY.md` are done):
+
+- Exponential-trapezoidal (three-term, input-history) recurrence
+- Complex-valued state update (the `ssm_imag` array is allocated but unused at
+  runtime; only the B/C rotation is live)
+- MIMO rank-R coupling at inference (weights are carried; rank 0 is used)
 
 ---
 
@@ -157,27 +187,59 @@ Modular ARA 2.0 components live in `src/ara/`:
 
 ## Performance & Benchmarks
 
-Benchmarked on AMD x86-64 hardware using AVX2 SIMD vectorization:
+Run the harness and quote its output — never a number from a previous machine:
 
-### Throughput Benchmarks (`benchmark_ssm_block.exe`)
+```bash
+./build/tests/benchmark_ssm_block                       # default CI gate
+./build/tests/benchmark_ssm_block --budget-pct 10        # the strategy doc's target
+./build/tests/benchmark_ssm_block --config train4070,trainl4 --json bench.json
+./build/tests/benchmark_ssm_block --config max --layers 1  # stress shape
+```
 
-| Configuration | Processing Mode | Throughput | Samples / Second | Real-Time Headroom |
-|---------------|-----------------|------------|------------------|-------------------|
-| **Single Layer** | Per-sample scalar | 2.047 µs / sample | 488,596 s/sec | **10.2× RT** (at 48 kHz) |
-| **Single Layer** | Vectorized block (64) | **1.985 µs / sample** | **503,853 s/sec** | **10.5× RT** (at 48 kHz) |
-| **Single Layer** | Vectorized block (512) | 2.008 µs / sample | 497,930 s/sec | **10.4× RT** (at 48 kHz) |
-| **2 Layers** | Per-sample scalar | 3.820 µs / sample | 261,776 s/sec | **5.5× RT** (at 48 kHz) |
-| **2 Layers** | Vectorized block (512) | 4.562 µs / sample | 219,223 s/sec | **4.6× RT** (at 48 kHz) |
+Cost is reported as **microseconds per sample and percent of one CPU core** at a
+stated sample rate, gated against an explicit budget (`--budget-pct`), and the
+process **exits non-zero when the gate fails** so CI can enforce it.
 
-*Target Latency Budget:* $< 10.0$ µs / sample (achieved $1.985$ µs, exceeding project target by **5×**).  
-*CPU Budget at 48 kHz (20.83 µs budget):* Single layer uses only **9.5%** of available audio thread time.
+Measured 2026-10-04 on an Intel Xeon @ 2.60 GHz container (2 threads visible),
+gcc 12.2.0, `-O3 -mavx2 -mfma`. Core-only; a modern desktop is faster. Re-measure
+on your target machine before publishing anything.
+
+| Model shape | Layers | µs/sample | % of one core @48 kHz | Gate (40 %) |
+|---|---|---|---|---|
+| `small` (d_state 16, d_model 16, d_inner 32) | 1 | 3.03 | 14.6 % | PASS |
+| `small` | 2 | 5.42 | 26.0 % | PASS |
+| `train4070` (mirrors `configs/laptop_rtx4070.yaml`) | 1 | 4.3 | 20.6 % | PASS |
+| `train4070` | 3 | 8.4–9.6 | 40–46 % | borderline |
+| `train4070` | 6 | 15.5–16.7 | 74–80 % | FAIL |
+| `trainl4` (mirrors `configs/runpod_l4.yaml`) | 1 | 18.8–20.1 | **90–96 %** | FAIL |
+| `trainl4` | 6 | 114–117 | 546–564 % | FAIL |
+| `max` (all compile-time maxima — stress shape) | 1 | 319 | 1532 % | FAIL |
+
+**The honest headline:** a single small layer is comfortably real-time; the shapes
+this repo's own training configs produce are not. One layer of the RunPod L4
+config already consumes ≈90 % of one core at 48 kHz, and the plugin instantiates
+the compile-time maximum configuration until a weight file is loaded
+(`src/clap/clap_fx_plugin.cpp:58-59`). Shrink `d_inner`/`nheads`/`headdim` and
+re-measure before shipping a neural model.
+
+The dominant costs are the per-(head, dimension, state) scalar recurrence loop
+(not yet SIMD-vectorized), the dense `in_proj` executed once per sample, and
+scalar FiLM/RMSNorm/SiLU work — see `ARCHITECTURE_FIDELITY.md` §3.
 
 ### Latency & Safety Metrics
 
-- **Algorithmic Latency**: 0 samples (zero algorithmic delay).
+- **Algorithmic look-ahead**: 0 samples — the recurrence is causal and consumes
+  one sample per step, so the plugin reports 0 latency via the CLAP latency
+  extension. (Reported, not asserted: verify with `clap-validator` and the host.)
 - **Audio Thread Heap Allocations**: 0 bytes (`malloc`/`free`/`new` strictly forbidden on the audio path).
 - **Denormal Prevention**: Automatic FTZ (Flush-to-Zero) and DAZ (Denormals-are-Zero) configured in MXCSR per audio block.
-- **CTest Pass Rate**: **64/64 tests passing** (100% pass rate in ~2.6 seconds).
+- **CTest Pass Rate**: **67/67 tests** across 7 suites. The two tests that need
+  generated inputs — `CppParity` (parity vectors) and
+  `RealtimeSafety.FxAcceptsMultiLayerWeightsWithinLimits` (an exported model) —
+  are given them by CI before `ctest`, and `MAMBA_REQUIRE_PARITY=1` turns a
+  missing vector file into a failure instead of a silent skip.
+- **Real-time gate**: `benchmark_ssm_block` exits non-zero when any measured
+  configuration exceeds `--budget-pct` of one core; CI runs it on every push.
 
 ---
 
@@ -256,6 +318,38 @@ After compilation, copy `EmTSynth.clap` to your system's CLAP plugin directory:
 
 ---
 
+## Training & Objectives
+
+`training/train.py` imports the same model definition the exporter and the C++
+`WeightLoader` use, so there is no train/inference drift:
+
+```bash
+# Task-matched objective (pre-emphasis L1 + SI-SDR + multi-resolution STFT)
+python training/train.py --config training/configs/laptop_rtx4070.yaml \
+    --dataset-dir data/wav --output-dir runs/run1
+
+# Learn an effect: dry/ and wet/ subfolders are paired sample-for-sample
+python training/train.py --config training/configs/laptop_rtx4070.yaml \
+    --dataset-dir data/drywet --output-dir runs/fx --loss hybrid
+
+# Objective properties (scale invariance, silent-target handling, gradients)
+python training/losses.py
+
+# 2-step end-to-end check with no dataset
+python training/train.py --smoke-test --steps 2 --loss hybrid
+```
+
+Objectives: `mse` (legacy next-sample MSE, kept for reproducibility), `l1`,
+`sisdr`, `mrstft`, and `hybrid` (the recommended default in the shipped configs).
+The trainer **refuses to export untrained weights** if no optimisation step ran.
+
+> **Read before training:** the shape you pick decides whether the result can run
+> in an audio callback. See the measured table above and the warning in
+> [`TRAINING_PLAN.md`](TRAINING_PLAN.md) — the RunPod L4 config is not real-time
+> at one layer on a 2-core machine, and the L4 is not the bottleneck there.
+
+---
+
 ## Weight Export & Validation Pipeline
 
 Export trained PyTorch checkpoints into flat-binary zero-copy weight files:
@@ -288,12 +382,14 @@ python scripts/export_mamba_weights.py \
  ├── TODO.md                      # Master gap analysis & verification evidence (100% DONE)
  ├── ARCHITECTURE.md              # Deep technical architectural overview
  ├── PARAMETER_REFERENCE.md       # Plugin parameter specifications
- ├── WEIGHT_FORMAT_SPEC.md        # Mamba-3 binary format specification
+ ├── WEIGHT_FORMAT_SPEC.md        # SSM weight binary format specification
+ ├── ARCHITECTURE_FIDELITY.md     # implemented-vs-paper ledger and claim policy
+ ├── CLAIMS_VERIFICATION.md       # independent review of strategy/architecture claims
  ├── LICENSE                      # Apache 2.0 open-source license
  ├── src/
  │   ├── config.h                 # Compile-time MAX_* dimension limits
  │   ├── core/                    # Core SSM inference engine (static library)
- │   │   ├── ssm_block.h/.cpp     # Mamba-3 layer (RoPE, RMSNorm, trapezoidal scan)
+ │   │   ├── ssm_block.h/.cpp     # SSM layer (B/C rotation, RMSNorm, bilinear scan)
  │   │   ├── ssm_inference_core.h/.cpp # Multi-layer inference coordinator
  │   │   ├── weight_loader.h/.cpp # Memory-mapped zero-copy weight loader
  │   │   └── simd_helpers.h       # AVX2/SSE2/NEON portable vector intrinsics
@@ -320,7 +416,7 @@ python scripts/export_mamba_weights.py \
  │       ├── ara_playback_renderer.cpp     # Timeline region playback renderer
  │       ├── ara_editor_renderer.cpp       # Editor renderer
  │       └── ara_types.h          # ARA data structures & forward declarations
- ├── tests/                       # GoogleTest verification suite (64 tests)
+ ├── tests/                       # GoogleTest verification suite (67 tests)
  │   ├── test_ssm_block.cpp       # Recurrence, multi-layer, state parity tests
  │   ├── test_weight_loader.cpp   # mmap validation, quantization, dimension checks
  │   ├── test_conditioning.cpp    # FiLM modulation, seqlock tear resistance
@@ -332,7 +428,11 @@ python scripts/export_mamba_weights.py \
  ├── scripts/                     # Python offline toolchain
  │   ├── export_mamba_weights.py  # Checkpoint exporter & config.h generator
  │   ├── validate_export.py       # Binary weight validator
- │   └── reference_mamba3.py      # NumPy Mamba-3 reference for parity vectors
+ │   └── reference_mamba3.py      # NumPy reference implementation for parity vectors
+ ├── training/                    # Training (PyTorch)
+ │   ├── train.py                 # Trainer: --loss, paired dry/wet, export, smoke-test
+ │   ├── losses.py                # Task-matched objectives + self-test
+ │   └── configs/                 # laptop_rtx4070.yaml, runpod_l4.yaml (see the CPU warning in TRAINING_PLAN.md)
  └── models/                      # Binary model files (.bin)
  ```
 
