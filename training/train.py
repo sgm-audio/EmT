@@ -28,6 +28,20 @@ Usage
         --batch-size 2 --grad-accum 4 --num-workers 2 --no-amp \
         --dataset-dir data/wav --output-dir runs/run2
 
+Objectives:
+    --loss mse       next-sample MSE (legacy default; weak proxy for how an
+                     effect is judged - kept for reproducibility)
+    --loss hybrid    pre-emphasis L1 + SI-SDR + multi-resolution STFT, i.e. the
+                     task-matched objective (recommended for effects)
+    --loss l1|sisdr|mrstft   single-term variants
+
+Paired (dry/wet) effect training:
+    If --dataset-dir contains `dry/` and `wet/` subdirectories (or --paired is
+    given), the trainer learns the mapping dry -> wet instead of next-sample
+    prediction. Sample i of `dry/<name>.wav` must correspond to sample i of
+    `wet/<name>.wav` with no extra delay: this model is causal and reports zero
+    latency, so any offset in the wet render is learned as part of the effect.
+
 CLI overrides (these are the ones you will tweak the most):
     --batch-size     samples per forward/backward step
     --grad-accum     gradient accumulation steps (effective batch = B * G)
@@ -59,6 +73,7 @@ from export_mamba_weights import (  # noqa: E402
     export_model,
     generate_config_h,
 )
+from losses import build_loss  # noqa: E402
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".aiff"}
 
@@ -102,14 +117,82 @@ def make_model(cfg: dict) -> AudioMamba:
 # Datasets
 # ---------------------------------------------------------------------------
 
+def _resample_linear(x: np.ndarray, sr: int, target_sr: int) -> np.ndarray:
+    """Dependency-free linear resample. Fine for smoke tests; for production use
+    soundfile/torchaudio so the filter quality is not a variable in your results."""
+    if sr == target_sr:
+        return x
+    n_out = int(round(len(x) * target_sr / sr))
+    if n_out <= 0:
+        return x[:0]
+    src_idx = np.linspace(0.0, len(x) - 1.0, n_out, dtype=np.float64)
+    return np.interp(src_idx, np.arange(len(x)), x).astype(np.float32)
+
+
+def _load_with_wave_module(path: str) -> tuple:
+    """Built-in fallback: uncompressed PCM WAV only, no third-party dependency."""
+    import wave as _wave
+    with _wave.open(path, "rb") as w:
+        n_ch = w.getnchannels()
+        width = w.getsampwidth()
+        sr = w.getframerate()
+        frames = w.readframes(w.getnframes())
+    if width == 2:
+        data = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    elif width == 4:
+        data = np.frombuffer(frames, dtype="<i4").astype(np.float32) / 2147483648.0
+    elif width == 1:
+        data = (np.frombuffer(frames, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    else:
+        raise ValueError(f"unsupported sample width {width * 8} bit in {path}")
+    if n_ch > 1:
+        data = data.reshape(-1, n_ch).mean(axis=1)
+    return data.astype(np.float32), sr
+
+
 def load_audio(path: str, target_sr: int) -> np.ndarray:
-    import torchaudio
-    waveform, sr = torchaudio.load(path)
-    if waveform.shape[0] > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
-    if sr != target_sr:
-        waveform = torchaudio.functional.resample(waveform, sr, target_sr)
-    return waveform.squeeze(0).numpy().astype(np.float32)
+    """
+    Load a file as mono float32 at target_sr.
+
+    Tries, in order: soundfile, torchaudio, then the stdlib `wave` module for
+    uncompressed PCM WAV. Recent torchaudio releases require TorchCodec for
+    decoding, so the stdlib path keeps the trainer usable on a bare machine.
+    """
+    errors = []
+
+    try:
+        import soundfile as sf  # type: ignore
+        data, sr = sf.read(path, always_2d=False, dtype="float32")
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        return _resample_linear(data.astype(np.float32), int(sr), target_sr)
+    except ImportError:
+        pass
+    except Exception as exc:                      # noqa: BLE001 - try the next backend
+        errors.append(f"soundfile: {exc}")
+
+    try:
+        import torchaudio  # type: ignore
+        waveform, sr = torchaudio.load(path)
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+        if sr != target_sr:
+            waveform = torchaudio.functional.resample(waveform, sr, target_sr)
+        return waveform.squeeze(0).numpy().astype(np.float32)
+    except ImportError:
+        pass
+    except Exception as exc:                      # noqa: BLE001
+        errors.append(f"torchaudio: {exc}")
+
+    try:
+        data, sr = _load_with_wave_module(path)
+        return _resample_linear(data, sr, target_sr)
+    except Exception as exc:                      # noqa: BLE001
+        errors.append(f"wave: {exc}")
+
+    raise RuntimeError(
+        f"could not decode {path}; install soundfile or torchcodec for compressed "
+        f"formats. Backend errors: " + "; ".join(errors))
 
 
 def frame_waveform(wave: np.ndarray, seq_len: int) -> np.ndarray:
@@ -162,6 +245,91 @@ class AudioWaveDataset(torch.utils.data.IterableDataset):
                        torch.from_numpy(cond))
 
 
+class PairedAudioDataset(torch.utils.data.IterableDataset):
+    """
+    Dry/wet pairs for effect training: learns the mapping dry -> wet.
+
+    Layout:
+        <root>/dry/example1.wav
+        <root>/wet/example1.wav
+        ... (matching file names; other extensions are fine as long as they match)
+
+    Sample i of dry must correspond to sample i of wet. The model is causal with
+    zero algorithmic look-ahead, so any delay baked into the wet render becomes
+    part of the learned effect - align your renders before training.
+    """
+
+    def __init__(self, root: str, cfg: dict):
+        self.root = Path(root)
+        self.dry_dir = self.root / "dry"
+        self.wet_dir = self.root / "wet"
+        self.seq_len = cfg["seq_len"]
+        self.d_model = cfg["d_model"]
+        self.cond_dim = cfg.get("cond_dim", 128)
+        self.target_sr = cfg.get("sample_rate", 44100)
+
+        if not self.dry_dir.is_dir() or not self.wet_dir.is_dir():
+            raise RuntimeError(
+                f"paired mode needs '{self.dry_dir}' and '{self.wet_dir}' directories")
+
+        pairs = []
+        for dry_path in sorted(self.dry_dir.rglob("*")):
+            if not dry_path.is_file() or dry_path.suffix.lower() not in AUDIO_EXTENSIONS:
+                continue
+            wet_path = self.wet_dir / dry_path.relative_to(self.dry_dir)
+            if not wet_path.exists():
+                # try the same stem with any known extension
+                match = next((p for p in self.wet_dir.rglob(dry_path.stem + ".*")
+                              if p.suffix.lower() in AUDIO_EXTENSIONS), None)
+                wet_path = match
+            if wet_path is None or not wet_path.exists():
+                print(f"[skip] no wet counterpart for {dry_path.name}")
+                continue
+            pairs.append((dry_path, wet_path))
+
+        if not pairs:
+            raise RuntimeError(f"no dry/wet pairs found under {self.root}")
+        self.pairs = pairs
+        print(f"paired dataset: {len(self.pairs)} dry/wet pair(s)")
+
+    def _chunks(self, dry: np.ndarray, wet: np.ndarray):
+        n = min(len(dry), len(wet))
+        dry, wet = dry[:n], wet[:n]
+        usable = (n // self.seq_len) * self.seq_len
+        if usable == 0:
+            return
+        dry = dry[:usable].reshape(-1, self.seq_len)
+        wet = wet[:usable].reshape(-1, self.seq_len)
+        for x, y in zip(dry, wet):
+            if self.d_model == 1:
+                inp = x.reshape(-1, 1)
+                tgt = y.reshape(-1, 1)
+            else:
+                raise RuntimeError("paired mode currently expects d_model == 1 (raw audio)")
+            cond = np.zeros(self.cond_dim, dtype=np.float32)
+            yield (torch.from_numpy(np.ascontiguousarray(inp)),
+                   torch.from_numpy(np.ascontiguousarray(tgt)),
+                   torch.from_numpy(cond))
+
+    def __iter__(self) -> Iterator[tuple]:
+        worker_info = torch.utils.data.get_worker_info()
+        pairs = list(self.pairs)
+        if worker_info is not None:
+            per_worker = math.ceil(len(pairs) / worker_info.num_workers)
+            pairs = pairs[worker_info.id * per_worker:(worker_info.id + 1) * per_worker]
+        else:
+            random.Random().shuffle(pairs)
+
+        for dry_path, wet_path in pairs:
+            try:
+                dry = load_audio(str(dry_path), self.target_sr)
+                wet = load_audio(str(wet_path), self.target_sr)
+            except Exception as exc:
+                print(f"[skip] {dry_path.name}: {exc}")
+                continue
+            yield from self._chunks(dry, wet)
+
+
 class SyntheticDataset(torch.utils.data.IterableDataset):
     def __init__(self, cfg: dict, num_samples: int = 1000):
         self.seq_len = cfg["seq_len"]
@@ -196,7 +364,7 @@ def collate(batch):
 
 def train(cfg: dict, output_dir: Path, dataset_dir: Optional[str] = None,
           device: Optional[str] = None, use_amp: bool = True,
-          resume: Optional[str] = None, smoke_steps: Optional[int] = None,
+          resume: Optional[str] = None, max_steps: Optional[int] = None,
           validate: bool = False):
     torch.manual_seed(cfg.get("seed", 0))
     np.random.seed(cfg.get("seed", 0))
@@ -212,7 +380,11 @@ def train(cfg: dict, output_dir: Path, dataset_dir: Optional[str] = None,
     print(f"model params: {model.num_parameters:,}")
 
     if dataset_dir and Path(dataset_dir).exists():
-        dataset = AudioWaveDataset(dataset_dir, cfg)
+        paired_dir = (Path(dataset_dir) / "dry").is_dir() and (Path(dataset_dir) / "wet").is_dir()
+        if cfg.get("paired", False) or paired_dir:
+            dataset = PairedAudioDataset(dataset_dir, cfg)
+        else:
+            dataset = AudioWaveDataset(dataset_dir, cfg)
     else:
         print("[warn] no dataset-dir; using synthetic sinusoids")
         dataset = SyntheticDataset(cfg)
@@ -233,7 +405,10 @@ def train(cfg: dict, output_dir: Path, dataset_dir: Optional[str] = None,
     )
 
     grad_accum = max(1, int(cfg.get("grad_accum", 1)))
-    criterion = torch.nn.MSELoss()
+    loss_name = cfg.get("loss", "mse")
+    criterion = build_loss(loss_name, cfg, device)
+    print(f"objective: {loss_name}"
+          + (f" (weights: {cfg['loss_weights']})" if cfg.get("loss_weights") else ""))
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "config.yaml").write_text(yaml.dump(cfg))
 
@@ -270,9 +445,18 @@ def train(cfg: dict, output_dir: Path, dataset_dir: Optional[str] = None,
                 accum = 0
 
                 if step == 1 or step % cfg.get("log_every", 10) == 0:
+                    extra = ""
+                    if hasattr(criterion, "components"):
+                        try:
+                            comps = criterion.components(pred.detach(), y)
+                            extra = ("  [" +
+                                     "  ".join(f"{k}={v:.3f}" for k, v in comps.items()) +
+                                     "]")
+                        except Exception:
+                            extra = ""
                     print(f"step {step:>6}  loss={loss.item() * grad_accum:.6f}  "
                           f"lr={optimizer.param_groups[0]['lr']:.2e}  "
-                          f"{time.time() - start:.1f}s")
+                          f"{time.time() - start:.1f}s{extra}")
 
                 if step % cfg.get("save_every", 1000) == 0:
                     torch.save({"step": step,
@@ -282,11 +466,19 @@ def train(cfg: dict, output_dir: Path, dataset_dir: Optional[str] = None,
                                 "config": cfg},
                                output_dir / f"checkpoint_{step:07d}.pt")
 
-                if smoke_steps is not None and step >= smoke_steps:
+                if max_steps is not None and step >= max_steps:
+                    print(f"reached --steps {max_steps}; stopping")
                     done = True
                     break
         if done:
             break
+
+    if step == 0:
+        raise RuntimeError(
+            "no training steps ran - every dataset item was skipped or the split "
+            "produced no windows. Check the [skip] messages above (decoding, "
+            "length shorter than seq_len, or missing dry/wet counterparts). "
+            "Refusing to export untrained weights.")
 
     torch.save({"model_state_dict": model.state_dict(), "config": cfg},
                output_dir / "final.pt")
@@ -319,7 +511,9 @@ def main():
     p.add_argument("--device", default=None)
     p.add_argument("--resume", default=None)
     p.add_argument("--smoke-test", action="store_true", help="short synthetic run")
-    p.add_argument("--steps", type=int, default=5, help="steps for --smoke-test")
+    p.add_argument("--steps", type=int, default=None,
+                   help="hard cap on optimisation steps (default: 5 with "
+                        "--smoke-test, otherwise run all epochs)")
     p.add_argument("--validate", action="store_true", help="run validate_export.py after export")
 
     # Frequent overrides
@@ -330,6 +524,11 @@ def main():
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--seq-len", type=int, default=None)
+    p.add_argument("--loss", default=None,
+                   choices=["mse", "l1", "sisdr", "mrstft", "hybrid"],
+                   help="objective; 'hybrid' = pre-emph L1 + SI-SDR + multi-res STFT")
+    p.add_argument("--paired", action="store_true",
+                   help="treat --dataset-dir as dry/ + wet/ effect pairs")
 
     args = p.parse_args()
 
@@ -344,9 +543,16 @@ def main():
             cfg[key] = val
     if args.no_amp:
         cfg["amp"] = False
+    if args.loss is not None:
+        cfg["loss"] = args.loss
+    if args.paired:
+        cfg["paired"] = True
 
+    max_steps = args.steps
     if args.smoke_test:
         cfg["epochs"] = 1
+        if max_steps is None:
+            max_steps = 5
         if args.dataset_dir is None:
             print("[smoke] using synthetic data")
 
@@ -356,7 +562,7 @@ def main():
           device=args.device,
           use_amp=not args.no_amp,
           resume=args.resume,
-          smoke_steps=args.steps if args.smoke_test else None,
+          max_steps=max_steps,
           validate=args.validate)
 
 

@@ -9,6 +9,13 @@
 #include <memory>
 #include <vector>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 #include <algorithm>
 
 using namespace mamba;
@@ -197,3 +204,124 @@ TEST(RealtimeSafety, FxStateSaveLoadRoundtrip) {
 }
 
 
+
+// ---------------------------------------------------------------------------
+// Model-load path: the plugin must accept any weight file that fits the
+// compiled MAX_* limits, not only single-layer files.
+//
+// Regression test for a real bug: `WeightLoader::validate_dimensions(MAX_...)`
+// compares for *equality* with the compiled maximum shape, so any model the
+// training configs produce (3 layers by default) was rejected at load time.
+// Set MAMBA_TEST_WEIGHTS to a generated model to run this test; CI exports one
+// (2 layers) before ctest. Skips when the file is absent, like CppParity.
+// ---------------------------------------------------------------------------
+namespace {
+
+int mamba_test_pid() {
+#if defined(_WIN32)
+    return static_cast<int>(GetCurrentProcessId());
+#else
+    return static_cast<int>(::getpid());
+#endif
+}
+
+bool write_raw_header(const char* path, uint32_t d_state, uint32_t d_model,
+                      uint32_t d_inner, uint32_t nheads, uint32_t num_layers,
+                      uint32_t headdim, uint32_t cond_dim) {
+    WeightFileHeader hdr{};
+    hdr.magic = WEIGHT_MAGIC;
+    hdr.version = WEIGHT_VERSION;
+    hdr.d_state = d_state;
+    hdr.d_model = d_model;
+    hdr.d_inner = d_inner;
+    hdr.nheads = nheads;
+    hdr.num_layers = num_layers;
+    hdr.headdim = headdim;
+    hdr.cond_dim = cond_dim;
+    hdr.quantization = static_cast<uint32_t>(QuantFormat::Float32);
+    hdr.weight_data_size = 64;
+    std::FILE* f = std::fopen(path, "wb");
+    if (!f) return false;
+    std::fwrite(&hdr, sizeof(hdr), 1, f);
+    std::vector<uint8_t> zeros(64, 0);
+    std::fwrite(zeros.data(), 1, zeros.size(), f);
+    std::fclose(f);
+    return true;
+}
+
+}  // namespace
+
+TEST(RealtimeSafety, FxAcceptsMultiLayerWeightsWithinLimits) {
+    const char* path = std::getenv("MAMBA_TEST_WEIGHTS");
+    if (!path || path[0] == '\0') {
+        GTEST_SKIP() << "set MAMBA_TEST_WEIGHTS to a generated .bin to run this";
+    }
+
+    const clap_plugin_t* plugin = mamba_fx_create(nullptr);
+    ASSERT_NE(plugin, nullptr);
+    ASSERT_TRUE(plugin->init(plugin));
+    auto* fx = static_cast<FxState*>(plugin->plugin_data);
+    ASSERT_NE(fx, nullptr);
+
+    WeightLoader probe;
+    ASSERT_EQ(probe.load(path), 0);
+    const auto& hdr = probe.header();
+    ASSERT_GT(hdr.num_layers, 1u) << "this test needs a multi-layer model";
+    ASSERT_TRUE(WeightLoader::fits_in_static_weights_with(hdr))
+        << "test model does not fit the compiled limits; regenerate it smaller";
+    probe.unload();
+
+    EXPECT_TRUE(fx_load_weights(fx, path))
+        << "the plugin rejected a " << hdr.num_layers
+        << "-layer model that fits the compiled limits";
+    EXPECT_TRUE(fx->weights_loaded.load(std::memory_order_acquire));
+    EXPECT_EQ(fx->core_cfg.num_layers, hdr.num_layers);
+    EXPECT_EQ(fx->core_cfg.d_model, hdr.d_model);
+
+    // And it must actually run.
+    ASSERT_TRUE(plugin->activate(plugin, 48000.0, 32, 512));
+    ASSERT_TRUE(plugin->start_processing(plugin));
+    alignas(64) float in[64] = {};
+    alignas(64) float out[64] = {};
+    float* in_ptrs[1] = {in};
+    float* out_ptrs[1] = {out};
+    clap_audio_buffer_t in_bufs{};
+    in_bufs.data32 = in_ptrs;
+    in_bufs.channel_count = 1;
+    clap_audio_buffer_t out_bufs{};
+    out_bufs.data32 = out_ptrs;
+    out_bufs.channel_count = 1;
+    in[0] = 0.25f;
+    clap_process_t proc{};
+    proc.steady_time = 0;
+    proc.frames_count = 64;
+    proc.audio_inputs = &in_bufs;
+    proc.audio_inputs_count = 1;
+    proc.audio_outputs = &out_bufs;
+    proc.audio_outputs_count = 1;
+    plugin->process(plugin, &proc);
+    EXPECT_TRUE(std::isfinite(out[0]));
+    plugin->stop_processing(plugin);
+    plugin->destroy(plugin);
+}
+
+TEST(RealtimeSafety, FxRejectsWeightsExceedingCompiledLimits) {
+    char path[512];
+    const char* tmpdir = std::getenv("TMPDIR");
+    std::snprintf(path, sizeof(path), "%s/mamba_too_big_%d.bin",
+                  tmpdir && tmpdir[0] ? tmpdir : "/tmp",
+                  mamba_test_pid());
+    ASSERT_TRUE(write_raw_header(path, MAX_D_STATE + 1, MAX_D_MODEL, MAX_D_INNER,
+                                 MAX_NHEADS, MAX_LAYERS, MAX_HEADDIM, COND_DIM));
+
+    const clap_plugin_t* plugin = mamba_fx_create(nullptr);
+    ASSERT_NE(plugin, nullptr);
+    ASSERT_TRUE(plugin->init(plugin));
+    auto* fx = static_cast<FxState*>(plugin->plugin_data);
+    ASSERT_NE(fx, nullptr);
+
+    EXPECT_FALSE(fx_load_weights(fx, path));
+    EXPECT_FALSE(fx->weights_loaded.load(std::memory_order_acquire));
+    plugin->destroy(plugin);
+    std::remove(path);
+}

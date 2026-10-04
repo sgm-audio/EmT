@@ -520,3 +520,25 @@ TEST(WeightLoaderPath, FitsInStaticWeights) {
     hdr.d_state = MAX_D_STATE + 1;
     EXPECT_FALSE(WeightLoader::fits_in_static_weights_with(hdr));
 }
+
+// Regression pin for the model-load path. `fits_in_static_weights_with` asks
+// "is this file within the compiled limits?" - which is what the plugins need.
+// `validate_dimensions` asks "does this file's shape equal the shape I pass?",
+// so calling it with the constructor's placeholder num_layers (1) rejected every
+// multi-layer model, including the ones training/configs/*.yaml produce. Both
+// plugins now call the predicate below; this test documents the difference.
+TEST(WeightLoaderPath, MultiLayerModelIsLoadable) {
+    WeightFileHeader hdr{};
+    hdr.magic = WEIGHT_MAGIC;
+    hdr.version = WEIGHT_VERSION;
+    hdr.d_state = 16; hdr.d_model = 1; hdr.d_inner = 64;
+    hdr.nheads = 2; hdr.num_layers = 3; hdr.headdim = 32;
+    hdr.cond_dim = 32;
+
+    EXPECT_TRUE(WeightLoader::fits_in_static_weights_with(hdr))
+        << "a 3-layer model within the compiled limits must be accepted";
+
+    hdr.num_layers = MAX_LAYERS + 1;
+    EXPECT_FALSE(WeightLoader::fits_in_static_weights_with(hdr))
+        << "a model with more layers than MAX_LAYERS must be rejected";
+}

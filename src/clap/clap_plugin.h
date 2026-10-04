@@ -15,6 +15,7 @@
 #include "common/seqlock.h"
 #include "common/conditioning_frame.h"
 #include "common/double_buffer_seqlock.h"
+#include "common/aligned_storage.h"
 #include "clap/clap_thread_check.h"
 #include "ara/ara_document_controller.h"
 #include "config.h"
@@ -131,7 +132,7 @@ struct alignas(64) VoiceAtomics {
 struct MambaSynth {
     const clap_host_t* host;
 
-    alignas(64) std::byte core_storage[sizeof(SSMInferenceCore)];
+    alignas(64) AlignedStorage<SSMInferenceCore, 64> core_storage;
     SSMInferenceCore* core;
     MambaConfig core_cfg;
 
