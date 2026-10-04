@@ -33,7 +33,8 @@ and the new [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md).
 - **Silent no-op training**: `training/train.py` skipped undecodable files with a
   warning and then exported untrained weights if nothing loaded. It now raises
   ("refusing to export untrained weights") when zero optimisation steps ran, and
-  the empty-training guard is exercised in CI.
+  the empty-training guard is exercised in the CI workflow (see the Actions
+  known issue below).
 
 ### Added
 - **`ARCHITECTURE_FIDELITY.md`** - implemented-vs-paper ledger, deviation register
@@ -55,9 +56,21 @@ and the new [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md).
   **exits non-zero when a configuration misses the budget**. Adds `train4070` and
   `trainl4` shapes mirroring the training configs and a `max` stress shape.
 - **CI**: parity vectors are generated before `ctest` (the C++/Python parity test
-  previously skipped silently), the benchmark gate runs on every push, the
+  previously skipped silently), the benchmark gate is invoked on every push, the
   training-shape benchmark is published as an artifact, and the objective
   self-test + trainer smoke test were added.
+
+### Known issue (not fixable from the workflow file)
+- **GitHub Actions does not start for this repository.** Every run since
+  2026-10-02 is a `startup_failure` with no jobs, attributed to GitHub's
+  `BuildFailed` placeholder workflow — including a push to `main` whose
+  `ci.yml` is byte-identical to the version that ran on 2026-09-14, and the
+  GitHub-managed `Dependency Graph` workflow. Both files validate against the
+  official workflow schema (`check-jsonschema --builtin-schema
+  github-workflows`). This is an account/repository-level Actions problem
+  (billing/spending limit or Actions disabled) that needs an admin. Until it is
+  resolved the gates are **wired, not enforced**; `ARCHITECTURE_FIDELITY.md` §4b
+  records the evidence and the local equivalent of every CI step.
 
 ### Changed
 - **Test suite: 67 tests, 0 failures** (was 62 + a segfaulting FX state test + a

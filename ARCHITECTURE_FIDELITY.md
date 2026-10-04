@@ -23,10 +23,10 @@ wants (audio developers who read code and papers). The rule from here on:
 | Claim | Evidence |
 |---|---|
 | Causal, streaming, zero-look-ahead core | No conv1d and no future-index reads: `src/core/ssm_block.cpp:325-373` processes one sample per step using only carried state |
-| Real-time cost is measurable and CI-gated | `tests/benchmark_ssm_block.cpp` (percentage-of-one-core reporting + non-zero exit on budget failure); CI step runs it every push |
+| Real-time cost is measurable and gated on demand | `tests/benchmark_ssm_block.cpp` (percentage-of-one-core reporting + non-zero exit on budget failure); the gate is wired into CI (**Actions has not started since 2026-09-14** — see §4b, so it is not currently enforced by CI) |
 | C++ inference matches the Python reference | `tests/test_cpp_parity.cpp`, max abs error **1.19e-07** over 256 elements (measured 2026-10-04 with generated vectors) |
 | Audio-thread discipline is enforced structurally | Lock-free SPSC/seqlock paths, `-fno-exceptions -fno-rtti`, no heap in `process_sample`; `tests/test_realtime_safety.cpp` (7/7) |
-| Real-time-safe plugin host integration with honest latency reporting | `src/clap/clap_latency.cpp`; CLAP plugin builds; `clap-validator` step in CI |
+| Real-time-safe plugin host integration with honest latency reporting | `src/clap/clap_latency.cpp`; CLAP plugin builds; a `clap-validator` step exists in CI (see §4b on CI not starting) |
 | The conditional-emission parts of Mamba-2/3 are present | Input-dependent Δ, B, C via a single `in_proj` (`src/core/ssm_block.cpp:123-161`), RMSNorm on B/C (`:163-206`), B/C bias terms, data-dependent rotation applied to B/C (`:211-243`) |
 | Weights are a flat binary loadable with no Python present | `WEIGHT_FORMAT_SPEC.md`, `src/core/weight_loader.cpp` (mmap) |
 | Training and inference share one model definition | `training/train.py` imports the reference model from `scripts/export_mamba_weights.py` |
@@ -152,6 +152,34 @@ Other measurements from the same session:
 | `load_weights` validated the header with `validate_dimensions(hdr…, core_cfg.num_layers)`. That function compares for **equality** with the compiled maximum shape, and `core_cfg.num_layers` is still the constructor's `1` at that point, so **every multi-layer model was rejected** — including the shapes `training/configs/*.yaml` produce | Both plugins now call `WeightLoader::fits_in_static_weights_with(hdr)` (the `<=' comparison); `WeightLoader::fits_in_static_weights()` had the same equality bug and now forwards to it | `RealtimeSafety.FxAcceptsMultiLayerWeightsWithinLimits`, `RealtimeSafety.FxRejectsWeightsExceedingCompiledLimits`, `WeightLoaderPath.MultiLayerModelIsLoadable` |
 | `CppParity` **skipped silently** when the vectors were absent, so a green run proved nothing | CI generates the vectors before `ctest` and sets `MAMBA_REQUIRE_PARITY=1`, which turns a missing vector into a failure | `tests/test_cpp_parity.cpp:198-207` |
 | The trainer exported weights even when every audio file failed to decode (untrained model, "successful" run) | Hard failure: "refusing to export untrained weights"; plus a decoder chain (`soundfile` → `torchaudio` → stdlib `wave`) so silent skips are much less likely | Ran against an undecodable file: exit 1, no `.bin` written |
+
+---
+
+## 4b. CI is wired but has not run since 2026-09-14 (repository-level)
+
+Verifying the "CI-gated" claim produced this, which anyone relying on the badge
+should know:
+
+| Date | Run | Result |
+|---|---|---|
+| 2026-09-14 | `CI` on `main` (workflow id 297117519) | ran, concluded **failure** (job-level) |
+| 2026-10-02 | push to `main` (unmodified workflow file) | **startup_failure**, attributed to GitHub's `BuildFailed` placeholder workflow |
+| 2026-10-02 / 10-04 | PRs and pushes on arena branches | **startup_failure**, same placeholder |
+| — | `Dependency Graph` (GitHub-managed) | no runs at all since 2026-09-14 |
+
+Diagnosis: **the workflow file is not the problem.** The file on `main` is
+byte-identical to the version that ran on 2026-09-14, and both that file and the
+rewritten one validate cleanly against the official GitHub workflow schema
+(`check-jsonschema --builtin-schema github-workflows .github/workflows/ci.yml`
+→ `ok`). Runs since 2026-10-02 are attributed to GitHub's `BuildFailed`
+placeholder workflow and produce no jobs, which is what an account/repository
+level Actions block looks like (billing/spending limit, or Actions disabled for
+the repository).
+
+Action needed (requires repository admin): check **Settings → Actions → General**
+and the account's **Billing & plans → Actions** spending limit, then re-run the
+workflow. Until then, treat the CI badge and every "gated in CI" statement as
+**wired, not enforced**, and run the gate locally (see §7).
 
 ---
 
