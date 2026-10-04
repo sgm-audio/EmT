@@ -15,8 +15,12 @@ Real-time neural audio synthesis and effect processing plugins powered by a **Ma
 > core is a Mamba-family SSM with input-selective Δ/B/C, RMSNorm, B/C biases and
 > data-dependent rotation of B/C — but the recurrence is a two-term bilinear
 > update with a **real** state, not the paper's three-term exponential-trapezoidal
-> recurrence, and the MIMO path is carried in the weight format without being
-> used at inference. [`CLAIMS_VERIFICATION.md`](CLAIMS_VERIFICATION.md) is the
+> recurrence (deviation D1/D2, still open), and rank-R MIMO is reserved in the
+> weight format but **refused at load** rather than silently downgraded
+> (deviation D3, closed 2026-10-04).  `python3 scripts/verify_deviations.py`
+> prints one verified status line per deviation; the per-deviation prompts live in
+> [`Prompts/DEVIATION_RESOLUTION/`](Prompts/DEVIATION_RESOLUTION/README.md).
+> [`CLAIMS_VERIFICATION.md`](CLAIMS_VERIFICATION.md) is the
 > independent third-party-style review that produced this position.
 
 > **Project Identity:** This project is **EmT** (migrated from `mamba-ssm-plugin-suite-70317161`), a distinct Mamba-SSM CLAP/ARA plugin and training suite. It is separate from CLARA. No "0" in the name.
@@ -90,13 +94,23 @@ evidence and the plan to close the gaps.
    latency. *(Mamba-1/2's causal conv is also streamable with no look-ahead —
    dropping it is a simplification and a compute saving, not a latency win.)*
 
-**Not yet implemented** (do not claim these until F1–F3 in
-`ARCHITECTURE_FIDELITY.md` are done):
+**Not yet implemented** (do not claim these until D1/D2 in
+`ARCHITECTURE_FIDELITY.md` §2 are closed):
 
-- Exponential-trapezoidal (three-term, input-history) recurrence
+- Exponential-trapezoidal (three-term, input-history) recurrence — D1
 - Complex-valued state update (the `ssm_imag` array is allocated but unused at
-  runtime; only the B/C rotation is live)
-- MIMO rank-R coupling at inference (weights are carried; rank 0 is used)
+  runtime; only the B/C rotation is live) — D2
+
+Closed on 2026-10-04 with regression guards (do not regress them):
+
+- MIMO rank-R coupling at inference — **refused, not approximated**: rank-R files
+  are rejected at load (`-16`), export and config validation (D3)
+- Periodic state renormalization — **removed**; stability comes from the
+  A-stable update (D5)
+- `dt_film_proj_w` is now **read**: Δ-FiLM modulates the step size when
+  conditioning is active (D6)
+- `A` is input-derived and clamped; this is documented as a project variant, not
+  the paper's learned parameterization (D4)
 
 ---
 

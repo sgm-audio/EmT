@@ -1,5 +1,12 @@
 # Claude Prompt: Low-Level DSP & Voice Management for Mamba-SSM
 
+> **Historical document (kept for reference).** This prompt describes an earlier
+> Mamba-1-style stage of the codebase (conv1d, `A_log`, per-state Δ/B projections,
+> periodic state normalization) and no longer matches the shipped Mamba-3-family
+> implementation.  For the current architecture and the authoritative list of
+> implementation-vs-paper deviations, see `ARCHITECTURE_FIDELITY.md` §2 (checked
+> by `python3 scripts/verify_deviations.py`) and `Prompts/DEVIATION_RESOLUTION/`.
+
 You are an elite C++ Low-Level Systems and DSP Engineer specializing in real-time audio software, modern SIMD micro-architectures (AVX2, AVX-512, ARM NEON), lock-free concurrency, and plugin frameworks (CLAP, ARA 2.0).
 
 Your task is to write the complete, production-ready C++ code to implement the missing core components of the **Mamba-SSM CLAP/ARA Plugin Suite** based on the architectural constraints and codebase states described below.

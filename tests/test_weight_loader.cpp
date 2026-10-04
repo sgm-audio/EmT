@@ -59,7 +59,9 @@ protected:
                2 * nh * cd;         // dt_film_proj_w
     }
 
-    bool create_valid_weight_file(uint32_t num_layers = 1) {
+    // `mimo_rank` defaults to 0 = legacy file written before the field existed
+    // (WeightLoader treats 0 as rank 1).  Pass > 1 to exercise the D3 refusal.
+    bool create_valid_weight_file(uint32_t num_layers = 1, uint32_t mimo_rank = 0) {
         size_t fpl = floats_per_layer();
         size_t total_floats = fpl * num_layers;
         size_t data_size = total_floats * sizeof(float);
@@ -77,6 +79,7 @@ protected:
         hdr.num_layers = num_layers;
         hdr.headdim = MAX_HEADDIM;
         hdr.cond_dim = COND_DIM;
+        hdr.mimo_rank = mimo_rank;
         hdr.weight_data_size = static_cast<uint64_t>(data_size);
 
         fwrite(&hdr, sizeof(hdr), 1, f);
@@ -101,6 +104,32 @@ TEST_F(WeightLoaderTest, LoadValidFile) {
 
     loader.unload();
     EXPECT_FALSE(loader.is_loaded());
+}
+
+// Deviation D3: rank-R MIMO is reserved in the format but the forward pass
+// implements rank-1 SISO per head.  A rank-R file must be refused loudly, not
+// silently run as rank 1.
+TEST_F(WeightLoaderTest, RejectsUnimplementedMimoRank) {
+    ASSERT_TRUE(create_valid_weight_file(/*num_layers=*/1, /*mimo_rank=*/2));
+
+    WeightLoader loader;
+    int rc = loader.load(tmp_path_);
+    EXPECT_EQ(rc, -16) << "rank-2 MIMO file must be refused with the dedicated "
+                          "error code, not loaded";
+    EXPECT_FALSE(loader.is_loaded());
+    EXPECT_FALSE(loader.fits_in_static_weights());
+}
+
+// Files written before the mimo_rank field existed have a zero `reserved` slot
+// there and must keep loading as rank 1.
+TEST_F(WeightLoaderTest, LegacyHeaderWithoutMimoFieldIsRankOne) {
+    ASSERT_TRUE(create_valid_weight_file(/*num_layers=*/1, /*mimo_rank=*/0));
+
+    WeightLoader loader;
+    EXPECT_EQ(loader.load(tmp_path_), 0);
+    EXPECT_TRUE(loader.is_loaded());
+    EXPECT_EQ(loader.header().mimo_rank, 0u);
+    EXPECT_TRUE(loader.fits_in_static_weights());
 }
 
 TEST_F(WeightLoaderTest, LoadNonexistentFile) {

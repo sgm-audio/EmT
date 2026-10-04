@@ -49,7 +49,7 @@ SSMBlock::SSMBlock(size_t d_state, size_t d_model, size_t d_inner,
     : d_state_(d_state), d_model_(d_model), d_inner_(d_inner),
       nheads_(nheads), headdim_(headdim), mimo_rank_(mimo_rank),
       num_bc_heads_(num_bc_heads), num_rope_angles_(d_state / 2),
-      d_cond_(d_cond), sample_count_(0) {
+      d_cond_(d_cond) {
     // Clamp to MAX limits
     if (d_state_ > MAX_D_STATE) d_state_ = MAX_D_STATE;
     if (d_model_ > MAX_D_MODEL) d_model_ = MAX_D_MODEL;
@@ -92,18 +92,25 @@ void SSMBlock::reset() {
     std::memset(rope_buf_.data(), 0, rope_buf_.size() * sizeof(float));
     std::memset(y_head_.data(), 0, y_head_.size() * sizeof(float));
     std::memset(out_.data(), 0, out_.size() * sizeof(float));
-    sample_count_ = 0;
 }
 
 // === Mamba-3 per-sample forward pass ===
 //
 // Eliminates Mamba-1's conv1d entirely. Uses:
-//   - Exponential-trapezoidal discretization (2nd-order)
+//   - Bilinear (Tustin) discretization of a real pole (deviation D1 open:
+//     the paper's exponential-trapezoidal three-term recurrence with the
+//     β/γ input-history term is not implemented yet)
 //   - Multi-head SSM with per-head decay (A) and step size (Δ)
 //   - RoPE rotary position embedding on B and C
 //   - RMSNorm on B and C
-//   - FiLM conditioning (optional)
-//   - MIMO rank coupling (simplified to rank=1 initially)
+//   - FiLM conditioning on the input and on Δ
+//   - rank-1 (SISO per head) state update; rank-R MIMO weights are reserved in
+//     the file format but refused by the loader (deviation D3)
+//
+// There is deliberately NO periodic state renormalization (deviation D5,
+// closed 2026-10-04): it was an untrained non-linearity that produced a
+// measured 14.8 % output gain step every 4096 samples.  The trapezoidal update
+// is A-stable for the clamped A <= -1, so the state stays bounded on its own.
 
 void SSMBlock::step_film_conditioning(float input) {
     if (conditioning_active_) {
@@ -150,12 +157,30 @@ void SSMBlock::step_preprocess_decay_and_dt(const float* C_ptr) {
 
     static constexpr float A_FLOOR = 1.0f;
     for (size_t h = 0; h < nheads_; ++h) {
+        // D4 (closed, documented): A is derived from the input projection and
+        // clamped here — a legitimate variant of the Mamba lineage, but NOT the
+        // paper's learned (usually negative-exponentiated) per-head parameter.
+        // Selectivity in this build lives in Δ, B and C.  Do not describe this
+        // as the paper's A parameterization in any claim or doc.
         float a_raw = dd_A_ptr[h];
         float A_t_val = -softplus(a_raw);
         if (A_t_val > -A_FLOOR) A_t_val = -A_FLOOR;
 
-        float dt_raw = dd_dt_ptr[h];
-        DT_t_[h] = softplus(dt_raw + weights_.dt_bias[h]);
+        float dt_pre = dd_dt_ptr[h] + weights_.dt_bias[h];
+
+        // D6 (closed 2026-10-04): Δ FiLM.  dt_film_proj_w maps the conditioning
+        // vector to a per-head (γ, β) pair and uses the same convention as the
+        // input FiLM path: v ↦ v * (1 + γ) + β.  Only applied when conditioning
+        // is active, so unconditioned inference is bit-identical to before.
+        if (conditioning_active_) {
+            const float* gamma_row = weights_.dt_film_proj_w[2 * h];
+            const float* beta_row  = weights_.dt_film_proj_w[2 * h + 1];
+            float gamma = simd::dot_product(gamma_row, cond_.data(), d_cond_);
+            float beta  = simd::dot_product(beta_row,  cond_.data(), d_cond_);
+            dt_pre = dt_pre * (1.0f + gamma) + beta;
+        }
+
+        DT_t_[h] = softplus(dt_pre);
         A_t_[h] = A_t_val;
     }
 }
@@ -295,33 +320,6 @@ void SSMBlock::step_out_proj_residual(const float* x_ptr, float* output) {
     simd::scale(output, out_.data(), params_.gain, d_model_);
 }
 
-void SSMBlock::step_periodic_normalization(SSMState& state) {
-    sample_count_++;
-    if (sample_count_ >= STATE_NORM_INTERVAL) {
-        sample_count_ = 0;
-        float max_h = 0.0f;
-        for (size_t h = 0; h < nheads_; ++h) {
-            for (size_t d = 0; d < headdim_; ++d) {
-                for (size_t s = 0; s < d_state_; ++s) {
-                    float v = std::fabs(state.ssm_real[h][d][s]);
-                    if (v > max_h) max_h = v;
-                }
-            }
-        }
-        if (max_h > 1.0f) {
-            float scale = 1.0f / max_h;
-            for (size_t h = 0; h < nheads_; ++h) {
-                for (size_t d = 0; d < headdim_; ++d) {
-                    for (size_t s = 0; s < d_state_; ++s) {
-                        state.ssm_real[h][d][s] *= scale;
-                        state.ssm_imag[h][d][s] *= scale;
-                    }
-                }
-            }
-        }
-    }
-}
-
 void SSMBlock::process_sample(float input, float* output, SSMState& state) {
     if (!weights_loaded_) {
         std::memset(output, 0, d_model_ * sizeof(float));
@@ -348,7 +346,7 @@ void SSMBlock::process_sample(float input, float* output, SSMState& state) {
     step_recurrence(state, x_ptr, B_norm, C_norm);
     step_silu_gate(z_ptr);
     step_out_proj_residual(x_ptr, output);
-    step_periodic_normalization(state);
+    // No periodic state renormalization here — see the header note (D5).
 }
 
 void SSMBlock::process_sample(float input, float* output) {

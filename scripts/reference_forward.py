@@ -26,7 +26,7 @@ import numpy as np
 
 WEIGHT_MAGIC = 0x4D424D41
 WEIGHT_VERSION = 2
-HEADER_FMT = '<12IQQ'
+HEADER_FMT = '<12IQII'  # 12 x uint32, uint64 wds, uint32 mimo_rank, uint32 reserved
 HEADER_SIZE = 64
 
 # Compile-time layout constants (must match C++ config.h)
@@ -75,6 +75,9 @@ class WeightFileHeader:
         self.q_metadata_size = vals[10]
         self.flags = vals[11]
         self.weight_data_size = vals[12]
+        # Deviation D3: 0 = legacy file (pre-mimo_rank field, treated as rank 1),
+        # 1 = rank-1 SISO.  The C++ runtime refuses values > 1.
+        self.mimo_rank = vals[13]
 
     def validate(self):
         assert self.magic == WEIGHT_MAGIC, f"Bad magic: {self.magic:08X}"
@@ -239,9 +242,6 @@ class ReferenceForward:
         self.cond = np.zeros(self.h.cond_dim, dtype=np.float32)
         self.conditioning_active = False
 
-        # Sample counter for state normalization
-        self.sample_count = 0
-
     def set_conditioning(self, cond_vector):
         """Set FiLM conditioning vector (like C++ set_conditioning)."""
         if cond_vector is not None and len(cond_vector) > 0:
@@ -258,7 +258,6 @@ class ReferenceForward:
         self.ssm_imag.fill(0.0)
         self.k_state.fill(0.0)
         self.angle_state.fill(0.0)
-        self.sample_count = 0
 
     def process_sample(self, input_scalar):
         """
@@ -276,7 +275,6 @@ class ReferenceForward:
         num_rope_angles = d_state // 2
         num_bc_heads = 1  # C++ MAX_NUM_BC_HEADS = 1
         A_FLOOR = 1.0
-        STATE_NORM_INTERVAL = 4096
 
         # ===== Step 0: FiLM conditioning on input =====
         u_film = np.zeros(d_model, dtype=np.float32)
@@ -335,8 +333,18 @@ class ReferenceForward:
             if A_t_val > -A_FLOOR:
                 A_t_val = -A_FLOOR
             A_t[h_idx] = A_t_val
-            dt_raw = dd_dt[h_idx]
-            DT_t[h_idx] = softplus(dt_raw + w.dt_bias[h_idx])
+
+            # D6 (closed 2026-10-04): Δ FiLM, same convention as the input FiLM
+            # path: v -> v * (1 + γ) + β, per head, only when conditioning is on.
+            dt_pre = dd_dt[h_idx] + w.dt_bias[h_idx]
+            if self.conditioning_active:
+                gamma = 0.0
+                beta = 0.0
+                for k in range(w.d_cond):
+                    gamma += w.dt_film_proj_w[2 * h_idx, k] * self.cond[k]
+                    beta += w.dt_film_proj_w[2 * h_idx + 1, k] * self.cond[k]
+                dt_pre = dt_pre * (1.0 + gamma) + beta
+            DT_t[h_idx] = softplus(dt_pre)
 
         # ===== Step 3: RMSNorm on B and C =====
         B_norm = np.zeros((nheads, mimo_rank, d_state), dtype=np.float32)
@@ -430,15 +438,9 @@ class ReferenceForward:
         # Apply gain
         out *= self.gain
 
-        # ===== Step 8: Periodic state normalization =====
-        self.sample_count += 1
-        if self.sample_count >= STATE_NORM_INTERVAL:
-            self.sample_count = 0
-            max_h = np.max(np.abs(self.ssm_real))
-            if max_h > 1.0:
-                scale = 1.0 / max_h
-                self.ssm_real *= scale
-                self.ssm_imag *= scale
+        # NOTE (deviation D5, closed 2026-10-04): no periodic state
+        # renormalization.  The trapezoidal update is A-stable for the clamped
+        # A <= -1, so the state is bounded without a non-linear guard.
 
         return out
 
