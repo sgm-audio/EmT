@@ -1,5 +1,17 @@
 # Mamba-1 → Mamba-3 Migration Plan
 
+> **⚠️ Status correction (2026-10-04).** This document records a migration *plan*
+> and the shape of the target API. It overstated what shipped. Verified state:
+> the **bilinear (Tustin) recurrence, RMSNorm+biases on B/C, and the data-dependent
+> rotation of B/C are implemented**, but the
+> **complex-valued state update and rank-R MIMO coupling are NOT active in the
+> forward pass** (`ssm_imag` is never written; the recurrence indexes rank 0 and
+> never touches `mimo_o`), and the paper's **exponential-trapezoidal three-term
+> recurrence is not implemented** (what is implemented is the classical trapezoidal
+> rule on a real pole). See [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md)
+> for the deviation register and tests. Passing statements below should be read as
+> "API/format reserved for", not "runtime implemented".
+
 **Date:** 2026-06-14  
 **Last updated:** 2026-06-15 — **Phases 1-4 complete, core + CLAP builds**
 **Reference implementation:** `/home/sgm/Desktop/Dev/mamba3/model.py` (PerTrackProcessor, Mamba3MIMOLayer)  
@@ -18,7 +30,7 @@
 | 6 | Tests (6 files) | ✅ **DONE** — 40/40 passing |
 | 7 | ss_block.cpp `process_sample()` Mamba-3 forward pass | ✅ **DONE** |
 
-**Build status:** Core library + CLAP plugin (`mamba_synth`) compiles and links. **40/40 tests pass.** Benchmark: 1.79 us/sample single-layer, 3.73 us/sample 2-layer.
+**Build status:** Core library + CLAP plugin (`mamba_synth`) compiles and links. **40/40 tests pass** (the suite has since grown to 64). The 1.79 us/sample single-layer / 3.73 us/sample 2-layer figures were measured on the *toy* benchmark shape (d_state 16, d_model 16, d_inner 32, 2 heads); the shapes this repo's own training configs produce cost 4.3 us (laptop config) to ~19 us (RunPod L4 config) per sample per layer. Use `tests/benchmark_ssm_block.cpp` and quote its JSON.
 
 ---
 
@@ -37,12 +49,14 @@ This project implements Mamba-1 (arxiv 2312.00752):
 ## The Target: Mamba-3
 
 Mamba-3 eliminates every Mamba-1 limitation:
-- **No conv1d** — 0 samples latency
-- **Exponential-trapezoidal discretization** — 2nd-order bilinear-like, preserves frequency response better than ZOH at audio rates
+- **No conv1d** — removes the stateful delay line; note Mamba-1/2's causal conv is *already* zero-look-ahead in streaming form, so this is a compute/simplification win rather than a latency win
+- **Caveat:** the shipped recurrence is two-term bilinear, not the paper's exponential-trapezoidal form
+- **(paper feature — NOT implemented)** exponential-trapezoidal discretization; the shipped rule is the classical two-term trapezoidal/bilinear update above, which is stable and cheap but carries no input-history (β) term
 - **A, B, C all input-dependent** — via single `in_proj` layer
 - **Multi-head SSM** — H heads, each a resonant complex pole
-- **Complex-valued state** — RoPE rotary embedding, complex-plane poles = bandpass filter behavior per head
-- **MIMO** — B and C are rank-R matrices coupling multi-dim input to N-dim state
+- **Data-dependent rotation of B/C** — implemented (`step_rope_bc`); the *state* itself stays real
+- **(not implemented)** complex-valued state / complex-plane poles per head — `ssm_imag` is allocated but never written
+- **(format only)** MIMO — the weight format and exporter reserve rank R, but the inference path uses rank 0 and never applies `mimo_o`
 - **FiLM conditioning** — Feature-wise Linear Modulation from cross-track semantic + f0 + loudness context
 - **RMSNorm** on B and C for stable training/inference
 
@@ -67,15 +81,20 @@ Input: u ∈ ℝ^d_model
 
 3. RoPE (rotary position embedding) on B, C:
    Apply sin/cos rotation using angle_state and angles projection
-   This effectively gives complex-valued B and C
+   This rotates B and C in the complex plane (the paper's efficient real
+   realisation of a *complex state*). In this repo the rotation is applied to
+   the B/C vectors, but the carried state `h` stays real - `ssm_imag` is never
+   written. See ARCHITECTURE_FIDELITY.md D2.
 
 4. SSM recurrence (per head, per d_state dimension):
    h_t = A_t · h_{t-1} + B_t · x_t    (MIMO: B_t ∈ ℝ^[R, headdim, d_state])
    y_t = C_t^T · h_t                    (MIMO: C_t ∈ ℝ^[R, headdim, d_state])
 
-5. MIMO combine:
+5. MIMO combine (PAPER FORM — not executed by this repo):
    y = einsum("h r p, h r p -> h p", y, mimo_o)    — rank-R → headdim
    z = einsum("h r p, h r p -> h r p", z, mimo_z)   — MIMO z projection
+   The shipped recurrence indexes rank 0 only and never applies mimo_o/mimo_z,
+   so mimo_rank > 1 is silently rank-1 at inference (ARCHITECTURE_FIDELITY.md D3).
 
 6. Output projection + residual:
    out = out_proj(concat_head(y))
@@ -83,6 +102,11 @@ Input: u ∈ ℝ^d_model
 ```
 
 ### Trapezoidal vs ZOH
+
+> Scope note: this section describes the *paper's* discretization. What the repo
+> implements is the two-term bilinear form, i.e. the trapezoidal rule applied to
+> a real pole without the input-history term; the numerical-stability argument
+> carries over, the second-order accuracy argument does not.
 
 | | ZOH (Mamba-1) | Trapezoidal (Mamba-3) |
 |---|---|---|

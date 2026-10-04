@@ -29,9 +29,13 @@ if(MSVC)
 endif()
 gtest_discover_tests(test_conditioning)
 
-# MSVC uses /O2 for Release; on other compilers we already have -O3 via
-# CMAKE_CXX_FLAGS_RELEASE.  The benchmark wants the most aggressive
-# optimization the compiler can offer, so add an extra one if available.
+# Optimization level for the benchmark translation unit.  The root
+# CMakeLists already sets -O3 -mavx2 -mfma (or /O2 /arch:AVX2) in the Release
+# flags, and target_compile_options appends *after* those - so this is a
+# deliberate belt-and-braces repeat of the optimization level, not an
+# override of the ISA flags (which are not optimization-level flags and
+# cannot be cancelled by a later -O3).  The measured cost lives in `core`,
+# which is compiled with the Release flags above.
 if(MSVC)
     set(_MAMBA_BENCH_OPT_FLAGS /O2)
 else()

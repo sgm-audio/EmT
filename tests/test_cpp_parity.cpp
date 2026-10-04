@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 #include <memory>
 #include <filesystem>
@@ -195,8 +196,14 @@ TEST(CppParity, OutputMatchesPythonReference) {
     std::string weight_path = resolve_test_file("parity_test_weights.bin");
     std::string expect_path = resolve_test_file("parity_expected.bin");
 
-    // Check files exist
+    // Check files exist. A missing vector file must never look like a pass, so
+    // CI sets MAMBA_REQUIRE_PARITY=1 to turn the skip into a failure.
     if (weight_path.empty() || expect_path.empty()) {
+        const char* require = std::getenv("MAMBA_REQUIRE_PARITY");
+        if (require && require[0] != '\0' && require[0] != '0') {
+            FAIL() << "MAMBA_REQUIRE_PARITY is set but the parity vectors were not found; "
+                   << "run: python scripts/reference_mamba3.py --generate";
+        }
         GTEST_SKIP() << "Test vectors not generated or found (parity_test_weights.bin / parity_expected.bin). "
                      << "Run: python scripts/reference_mamba3.py --generate";
     }

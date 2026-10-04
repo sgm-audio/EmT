@@ -2,6 +2,100 @@
 
 All notable changes to the EmT CLAP/ARA Plugin Suite (EmT).
 
+## [Unreleased] - 2026-10-04
+
+Verification-driven fixes. Context: [`CLAIMS_VERIFICATION.md`](CLAIMS_VERIFICATION.md)
+and the new [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md).
+
+### Fixed
+- **The plugin rejected every multi-layer weight file.** `load_weights()` checked
+  the header with `validate_dimensions(hdr…, core_cfg.num_layers)`, and that
+  function compares for *equality* against the shape it is given. At that point
+  `core_cfg.num_layers` is still the constructor's `1` placeholder, so **any model
+  the training configs produce (3 layers by default) failed to load** — the
+  exported `.bin` was silently refused. Both plugins now call
+  `WeightLoader::fits_in_static_weights_with(hdr)`, which performs the intended
+  `<=` comparison against the compiled `MAX_*` limits. `WeightLoader::fits_in_static_weights()`
+  had the same equality bug (it returned `false` for files that plainly fit) and
+  now forwards to that predicate. Verified end-to-end: a 3-layer model trained by
+  `training/train.py` loads through the FX plugin's real `fx_load_weights()` path
+  and processes an audio block.
+- **`FxRejectsWeightsExceedingCompiledLimits`**: a header claiming
+  `d_state = MAX_D_STATE + 1` is refused, so the new acceptance path cannot be
+  widened into "anything loads".
+- **Segfault in the FX plugin constructor (`FxState.core_storage`)**:
+  the placement-new buffer followed a pointer member without its own alignment
+  specifier, so `SSMInferenceCore` (64-byte aligned) was constructed 8 bytes off a
+  64-byte boundary. `RealtimeSafety.FxStateSaveLoadRoundtrip` crashed the process;
+  it now passes. Replaced the raw byte array with
+  `mamba::AlignedStorage<T, N>` (`src/common/aligned_storage.h`) in both the synth
+  and FX state structs so the requirement lives on the member and cannot drift.
+- **Silent no-op training**: `training/train.py` skipped undecodable files with a
+  warning and then exported untrained weights if nothing loaded. It now raises
+  ("refusing to export untrained weights") when zero optimisation steps ran, and
+  the empty-training guard is exercised in the CI workflow (see the Actions
+  known issue below).
+
+### Added
+- **`ARCHITECTURE_FIDELITY.md`** - implemented-vs-paper ledger, deviation register
+  (D1-D6) with `file:line` evidence and measured effects, path to compliance
+  (F1-F5), and a claim policy for docs/demos/posts.
+- **Task-matched objectives (`training/losses.py`)**: pre-emphasis L1, SI-SDR
+  (with silent-target handling), multi-resolution STFT, and a `hybrid` composite;
+  selectable via `--loss` / the `loss:` config key. Includes a runnable self-test
+  (`python3 training/losses.py`) covering SI-SDR properties (including the
+  noisy-reference caveat) and gradient flow for every variant.
+- **Paired dry/wet training**: a `dry/` + `wet/` dataset layout (or `--paired`)
+  trains the effect mapping an FX plugin actually has to perform, instead of
+  next-sample prediction.
+- **Dependency-light audio decoding**: `soundfile` -> `torchaudio` -> stdlib
+  `wave` fallback, because recent torchaudio releases require TorchCodec.
+- **Gating benchmark** (`tests/benchmark_ssm_block.cpp`, rewritten): reports
+  microseconds per sample *and* percent of one core, takes `--config`, `--layers`,
+  `--sample-rate(s)`, `--blocks`, `--budget-pct`, `--repeats`, `--json`, and
+  **exits non-zero when a configuration misses the budget**. Adds `train4070` and
+  `trainl4` shapes mirroring the training configs and a `max` stress shape.
+- **CI**: parity vectors are generated before `ctest` (the C++/Python parity test
+  previously skipped silently), the benchmark gate is invoked on every push, the
+  training-shape benchmark is published as an artifact, and the objective
+  self-test + trainer smoke test were added.
+
+### Known issue (not fixable from the workflow file)
+- **GitHub Actions does not start for this repository.** Every run since
+  2026-10-02 is a `startup_failure` with no jobs, attributed to GitHub's
+  `BuildFailed` placeholder workflow — including a push to `main` whose
+  `ci.yml` is byte-identical to the version that ran on 2026-09-14, and the
+  GitHub-managed `Dependency Graph` workflow. Both files validate against the
+  official workflow schema (`check-jsonschema --builtin-schema
+  github-workflows`). This is an account/repository-level Actions problem
+  (billing/spending limit or Actions disabled) that needs an admin. Until it is
+  resolved the gates are **wired, not enforced**; `ARCHITECTURE_FIDELITY.md` §4b
+  records the evidence and the local equivalent of every CI step.
+
+### Changed
+- **Test suite: 67 tests, 0 failures** (was 62 + a segfaulting FX state test + a
+  parity test that skipped without vectors). New coverage:
+  `RealtimeSafety.FxAcceptsMultiLayerWeightsWithinLimits`,
+  `RealtimeSafety.FxRejectsWeightsExceedingCompiledLimits`,
+  `WeightLoaderPath.MultiLayerModelIsLoadable`.
+- **`CppParity` can no longer skip silently**: setting `MAMBA_REQUIRE_PARITY=1`
+  turns a missing vector file into a failure, and CI generates the vectors and a
+  2-layer test export *before* `ctest` and points `MAMBA_TEST_WEIGHTS` at it.
+- **`--steps` is now a global optimisation-step cap** (it defaulted to "only with
+  `--smoke-test`", so `train.py --steps 20` silently ran all 20 epochs).
+- **Correction to the 0.3.0 entry below.** That entry claims "AVX2 and SSE2
+  vectorized operations for SSM recurrence update". SIMD is used for the FiLM
+  projections, the `in_proj` dot products and the output projection
+  (`src/core/ssm_block.cpp:112-131, 288-295`), but the **recurrence loop over
+  `d_state` is still scalar** (`:245-273`) and `process_block()` remains a
+  per-sample loop. Measured cost reflects that: see `ARCHITECTURE_FIDELITY.md` §3.
+- **Documentation corrected to match the code.** README, `MIGRATION_TO_MAMBA3.md`,
+  `TRAINING_PLAN.md` and the LoRA companion README no longer claim the
+  exponential-trapezoidal recurrence, complex-valued state, active MIMO, "zero
+  latency because conv1d was removed", or runtime LoRA. Measured CPU numbers
+  replace the toy-shape 1.79 us/sample headline, and `TRAINING_PLAN.md` now warns
+  that the RunPod L4 config is not real-time (~90 % of one core per layer).
+
 ## [0.3.0] - 2026-09-13
 
 ### Added

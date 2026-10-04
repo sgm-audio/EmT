@@ -2,7 +2,14 @@
 
 **Monorepo Location**: `apps/emt` (EmT — Distinct from CLARA)  
 **Status**: Real-time C++ CLAP Audio Plugin (Synth & FX) with ARA 2.0 Architectural Foundation  
-**Baseline**: MSVC C++20 Release build passes cleanly (0 errors, 0 warnings), 64/64 CTest unit & stability tests passing (100%).
+**Baseline**: 67 tests passing across 7 suites.
+
+> **⚠️ Several items below are marked 100% COMPLETED that are not, in the
+> shipped inference path** — most notably vectorized *recurrence* block
+> processing (the recurrence is still a scalar per-sample loop; SIMD is used
+> for the FiLM/in_proj/output dot products only). See
+> [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md) §1-§2 for the
+> implemented-vs-claimed ledger and §5 for the path to closing each gap.
 
 ---
 

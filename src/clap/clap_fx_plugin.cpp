@@ -57,7 +57,7 @@ static bool fx_init(const clap_plugin_t* plugin) {
     auto* f = get_fx(plugin);
     f->core_cfg = MambaConfig::max_config();
     f->core_cfg.num_layers = 1;
-    f->core = new (f->core_storage) SSMInferenceCore(f->core_cfg);
+    f->core = new (f->core_storage.data) SSMInferenceCore(f->core_cfg);
     f->sample_rate = 48000.0;
     f->block_size = 512;
     f->is_active = false;
@@ -227,15 +227,16 @@ static const clap_plugin_tail_t s_fx_tail = {fx_tail_get};
 
 // Shared stream serialization helpers provided by clap/clap_common_utils.h
 
-static bool fx_load_weights(FxState* f, const char* path) {
+bool fx_load_weights(FxState* f, const char* path) {
     if (!path || path[0] == '\0') return false;
     if (f->weight_loader.load(path) != 0) return false;
 
     const auto& hdr = f->weight_loader.header();
-    if (!f->weight_loader.validate_dimensions(
-            hdr.d_state, hdr.d_model, hdr.d_inner,
-            hdr.nheads, hdr.headdim,
-            static_cast<uint32_t>(f->core_cfg.num_layers))) {
+    // Same rule as the synth: accept any shape that fits the compiled limits.
+    // (The previous comparison was against core_cfg.num_layers, which is
+    // still the constructor's 1-layer placeholder here - it rejected every
+    // multi-layer model, including those from training/configs/*.yaml.)
+    if (!WeightLoader::fits_in_static_weights_with(hdr)) {
         f->weight_loader.unload();
         return false;
     }
