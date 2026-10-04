@@ -16,7 +16,7 @@ import os
 import sys
 import numpy as np
 
-HEADER_FMT = '<12IQQ'
+HEADER_FMT = '<12IQII'  # 12 x uint32, uint64 wds, uint32 mimo_rank, uint32 reserved
 HEADER_SIZE = 64
 WEIGHT_MAGIC = 0x4D424D41
 WEIGHT_VERSION = 2
@@ -45,13 +45,13 @@ def mamba3_process_sample(
     D_proj: np.ndarray,             # [nheads]
     out_proj_w: np.ndarray,         # [d_model, d_inner]
     film_proj_w: np.ndarray,        # [2*d_model, d_cond]
+    dt_film_proj_w: np.ndarray,     # [2*nheads, d_cond]
     # State (mutated)
     ssm_real: np.ndarray,           # [nheads, headdim, d_state]
     angle_state: np.ndarray,        # [nheads, num_rope_angles]
     # Conditioning
     cond: np.ndarray,               # [d_cond]
     conditioning_active: bool,
-    sample_count: int,
 ):
     num_rope_angles = d_state // 2
     bc_size = nheads * mimo_rank * d_state
@@ -103,6 +103,8 @@ def mamba3_process_sample(
                 C[h, r, s] = C_flat[flat_idx]
 
     # === Step 2: Preprocess A and Δ ===
+    # D4 (documented): A comes from the input projection and is clamped - a
+    # variant of the paper's learned per-head A, not the paper parameterization.
     A_FLOOR = 1.0  # clamp: A_t ∈ (-∞, -A_FLOOR]
     A_t = np.zeros(nheads, dtype=np.float32)
     DT_t = np.zeros(nheads, dtype=np.float32)
@@ -112,8 +114,19 @@ def mamba3_process_sample(
         if A_t_val > -A_FLOOR:
             A_t_val = -A_FLOOR
         A_t[h] = A_t_val
-        dt_raw = dd_dt[h]
-        DT_t[h] = softplus(np.array([dt_raw + dt_bias[h]]))[0]
+
+        # D6 (closed 2026-10-04): Δ FiLM, same convention as the input FiLM
+        # path: v -> v * (1 + γ) + β, per head, only when conditioning is active.
+        dt_pre = dd_dt[h] + dt_bias[h]
+        if conditioning_active:
+            gamma = 0.0
+            beta = 0.0
+            for k in range(d_cond):
+                gamma += dt_film_proj_w[2 * h, k] * cond[k]
+                beta += dt_film_proj_w[2 * h + 1, k] * cond[k]
+            dt_pre = dt_pre * (1.0 + gamma) + beta
+
+        DT_t[h] = softplus(np.array([dt_pre]))[0]
 
     # === Step 3: RMSNorm on B and C ===
     B_norm = np.zeros((nheads, mimo_rank, d_state), dtype=np.float32)
@@ -206,16 +219,12 @@ def mamba3_process_sample(
         s += u_film[j]
         out[j] = s
 
-    # === Step 8: State norm (simplified — caller handles) ===
-    sample_count += 1
-    STATE_NORM_INTERVAL = 4096
-    if sample_count >= STATE_NORM_INTERVAL:
-        sample_count = 0
-        max_h = max(abs(ssm_real).max(), 1e-10)
-        if max_h > 1.0:
-            ssm_real /= max_h
+    # NOTE (deviation D5, closed 2026-10-04): there is no periodic state
+    # renormalization.  The trapezoidal update is A-stable for the clamped
+    # A <= -1, so the state is bounded without mutating it.  The old 4096-sample
+    # guard produced a measured 14.8 % output gain step at each boundary.
 
-    return out, ssm_real, angle_state, sample_count
+    return out, ssm_real, angle_state
 
 
 # === Test vector generation ===
@@ -247,6 +256,8 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
     D_proj = rng.randn(nheads).astype(np.float32) * 0.1
     out_proj_w = rng.randn(d_model, d_inner).astype(np.float32) * 0.1
     film_proj_w = rng.randn(2 * d_model, d_cond).astype(np.float32) * 0.01
+    # Non-zero so the parity test actually exercises the Δ-FiLM path (D6).
+    dt_film_proj_w = rng.randn(2 * nheads, d_cond).astype(np.float32) * 0.01
 
     # For weight file layout, expand B_bias, C_bias, mimo_x/z/o to MAX_MIMO_RANK
     # (C++ expects MAX_MIMO_RANK slots; we only use rank 0 in forward pass)
@@ -257,7 +268,6 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
     mimo_x = np.zeros((nheads, MAX_MIMO_RANK, headdim), dtype=np.float32)
     mimo_z = np.zeros((nheads, MAX_MIMO_RANK, headdim), dtype=np.float32)
     mimo_o = np.zeros((nheads, MAX_MIMO_RANK, headdim), dtype=np.float32)
-    dt_film_proj_w = np.zeros((2 * nheads, d_cond), dtype=np.float32)
 
     # Write weight file (with MAX_MIMO_RANK layout)
     os.makedirs(output_dir, exist_ok=True)
@@ -306,12 +316,13 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
     in_proj_w_file[angles_start_new:angles_start_new + angles_size, :] = in_proj_w[angles_start_old:angles_start_old + angles_size, :]
 
     with open(weight_path, 'wb') as f:
-        # Header: 12 uint32 + 2 uint64
+        # Header: 12 uint32 + uint64 (weight_data_size) + uint32 mimo_rank
+        # + uint32 reserved = 64 bytes.  mimo_rank is 1 for the parity vectors.
         hdr = struct.pack(HEADER_FMT,
                           WEIGHT_MAGIC, WEIGHT_VERSION,
                           d_state, d_model, d_inner, nheads, 1, headdim,
                           d_cond, 0, 0, 0,  # magic, version, d_state, d_model, d_inner, nheads, num_layers, headdim, cond_dim, quantization, q_metadata_size, flags
-                          fpl * 4, 0)  # weight_data_size, reserved
+                          fpl * 4, mimo_rank, 0)  # weight_data_size, mimo_rank, reserved
         f.write(hdr)
         assert len(hdr) == HEADER_SIZE
 
@@ -341,7 +352,6 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
     cond = np.zeros(d_cond, dtype=np.float32)
     cond[0] = 0.5  # non-zero conditioning
     cond[1] = -0.25
-    sample_count = 0
 
     # Test inputs: [0.0, 1.0, -1.0, 0.5, -0.5, ...]
     test_inputs = [0.0, 1.0, -1.0, 0.5, -0.5, 0.25, -0.25, 0.75,
@@ -349,11 +359,11 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
 
     results = {}
     for i, val in enumerate(test_inputs):
-        out, ssm_real, angle_state, sample_count = mamba3_process_sample(
+        out, ssm_real, angle_state = mamba3_process_sample(
             val, d_state, d_model, d_inner, nheads, headdim, mimo_rank,
             num_bc_heads, d_cond, in_proj_w, dt_bias, B_bias, C_bias,
             B_norm_weight, C_norm_weight, D_proj, out_proj_w, film_proj_w,
-            ssm_real, angle_state, cond, True, sample_count)
+            dt_film_proj_w, ssm_real, angle_state, cond, True)
         results[f'out_{i}'] = out.astype(np.float32)
 
     # Write expected outputs

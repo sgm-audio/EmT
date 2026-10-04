@@ -7,6 +7,7 @@ This directory contains a complete hierarchy of system prompts designed to guide
 ```
 Prompts/
 ├── MASTER_SYSTEM_PROMPT.md              # T1 - System Architect
+├── DEVIATION_RESOLUTION/                # T1-D/T3-D - deviation register (see below)
 ├── INTEGRATION_CONTRACT_PROMPT.md       # T1.5 - Memory Schemas & Thread Boundaries
 ├── T2A_SSM_INFERENCE_CORE.md            # T2a - SSM C++ Inference Core
 ├── T2B_CLAP_ARA_HOST_INTEGRATION.md     # T2b - CLAP/ARA Host Integration
@@ -66,6 +67,21 @@ T2A_SSM_INFERENCE_CORE  T2B_CLAP_ARA_HOST_INTEGRATION  T2C_ML_EXPORT_WEIGHT_PIPE
         ↓                   ↓                   ↓                   ↓
     T3A_CORE_SSM_BLOCK   T3B_CLAP_NOTE_PORTS   T3C_ML_EXPORT_PIPELINE  (UI tasks based on T2D)
 ```
+
+## Deviation Resolution Prompts (T1-D … T3-D)
+
+`Prompts/DEVIATION_RESOLUTION/` covers the ledger in `ARCHITECTURE_FIDELITY.md`
+§2 (the places where this build differs from the Mamba-3 paper).  Read
+`DEVIATION_RESOLUTION/README.md` for the status table; each prompt names the
+automated check that must flip when it lands:
+
+```bash
+python3 scripts/verify_deviations.py       # one status line per deviation (D1-D6)
+```
+
+Status at 2026-10-04: D3/D4/D5/D6 closed with regression guards; D1 (three-term
+exponential-trapezoidal recurrence) and D2 (live 2×2/complex state) remain open
+and are scoped in `DEVIATION_RESOLUTION/D1_D2_TRAPEZOIDAL_COMPLEX_STATE.md`.
 
 ## Next Steps After These Prompts
 

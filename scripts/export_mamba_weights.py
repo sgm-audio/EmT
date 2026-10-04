@@ -100,7 +100,8 @@ class Mamba3Block(nn.Module):
         device = x.device
 
         # Step 0: FiLM conditioning
-        if cond is not None and cond.any():
+        cond_active = cond is not None and bool(cond.any())
+        if cond_active:
             # film_proj: (d_cond, 2*d_model) → cond @ film_proj^T → (batch, 2*d_model)
             film_out = F.linear(cond, self.film_proj.weight, None)  # (B, 2*d_model)
             gamma = film_out[:, 0::2]  # (B, d_model)
@@ -131,10 +132,23 @@ class Mamba3Block(nn.Module):
         C = C_raw.view(batch, seq_len, self.nheads, self.mimo_rank, self.d_state).clone()
 
         # Step 2: Preprocess A and dt (with A clamping)
+        # D4 (documented): A is input-derived and clamped here, not the paper's
+        # learned per-head parameter.
         A_floor = 1.0
         A_t = -F.softplus(dd_A)  # (B, S, nheads)
         A_t = torch.clamp(A_t, max=-A_floor)  # C++: clamp max to -A_floor
-        dt = F.softplus(dd_dt + self.dt_bias)  # (B, S, nheads)
+
+        # D6 (closed 2026-10-04): Δ FiLM. dt_film_proj maps the conditioning
+        # vector to a per-head (γ, β) pair with the same convention as the input
+        # FiLM path: v ↦ v * (1 + γ) + β.  Must match SSMBlock::step_preprocess_decay_and_dt.
+        dt_pre = dd_dt + self.dt_bias  # (B, S, nheads)
+        if cond_active:
+            dt_gb = F.linear(cond, self.dt_film_proj.weight, None)  # (B, 2*nheads)
+            dt_gamma = dt_gb[:, 0::2]  # (B, nheads)
+            dt_beta = dt_gb[:, 1::2]   # (B, nheads)
+            dt_pre = (dt_pre * (1.0 + dt_gamma.unsqueeze(1))
+                      + dt_beta.unsqueeze(1))
+        dt = F.softplus(dt_pre)  # (B, S, nheads)
 
         # Step 3: RMSNorm on B and C
         B_rms = B.pow(2).mean(dim=-1, keepdim=True).add(1e-5).rsqrt()
@@ -252,7 +266,7 @@ class Mamba3Model(nn.Module):
 
 WEIGHT_MAGIC = 0x4D424D41
 WEIGHT_VERSION = 2  # Mamba-3 format
-HEADER_FMT = '<12IQQ'
+HEADER_FMT = '<12IQII'  # 12 x uint32, uint64 wds, uint32 mimo_rank, uint32 reserved
 HEADER_SIZE = 64
 
 # Compile-time layout constants (must match C++ config.h).
@@ -282,13 +296,17 @@ def floats_per_layer(ds: int, dm: int, di: int, nh: int, mr: int,
 
 
 def make_header(ds: int, dm: int, di: int, nh: int, hd: int,
-                nl: int, cd: int, wds: int) -> bytes:
-    """Build 64-byte WeightFileHeader (version 2, 12IQQ layout)."""
+                nl: int, cd: int, wds: int, mr: int = 1) -> bytes:
+    """Build 64-byte WeightFileHeader (version 2, 12I Q I I layout).
+
+    `mr` (mimo_rank) is read by WeightLoader::load(): values > 1 are refused
+    because the forward pass implements rank-1 SISO only (deviation D3).
+    """
     data = struct.pack(HEADER_FMT,
                        WEIGHT_MAGIC, WEIGHT_VERSION,
                        ds, dm, di, nh, nl, hd, cd,
-                       0, 0, 0,  # quantization, q_metadata_size, flags
-                       wds, 0)   # weight_data_size, reserved
+                       0, 0, 0,        # quantization, q_metadata_size, flags
+                       wds, mr, 0)     # weight_data_size, mimo_rank, reserved
     assert len(data) == HEADER_SIZE
     return data
 
@@ -383,6 +401,17 @@ def export_model(model: Mamba3Model, output_path: str,
     nh, mr, hd = b.nheads, b.mimo_rank, b.headdim
     nl = len(model.layers)
 
+    # Deviation D3: the file format reserves slot for rank-R MIMO but the C++
+    # forward pass implements rank-1 SISO per head only.  Fail fast here instead
+    # of exporting a file the plugin would have to refuse (or, worse, silently
+    # run as rank 1).
+    if mr != 1:
+        raise SystemExit(
+            f"mimo_rank={mr} is not supported: the runtime implements rank-1 "
+            "SISO per head (deviation D3 in ARCHITECTURE_FIDELITY.md). "
+            "Set mimo_rank: 1 in the training config, or implement the rank-R "
+            "reduction (see Prompts/DEVIATION_RESOLUTION/D3_MIMO_RANK.md).")
+
     if random_init:
         _random_init(model)
 
@@ -391,7 +420,7 @@ def export_model(model: Mamba3Model, output_path: str,
 
     os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
     with open(output_path, 'wb') as f:
-        f.write(make_header(ds, dm, di, nh, hd, nl, cond_dim, wds))
+        f.write(make_header(ds, dm, di, nh, hd, nl, cond_dim, wds, mr))
         for layer in model.layers:
             f.write(extract_layer_weights(layer))
 
@@ -437,7 +466,9 @@ def generate_config_h(ds: int, dm: int, di: int, nh: int, hd: int,
 #define MAX_BLOCK_SIZE 512
 #define MAX_PARAM_ATOMS 256
 #define COND_DIM {cd}
-#define SSM_STATE_NORM_INTERVAL 4096
+
+// Deviation D5 (closed 2026-10-04): no periodic state renormalization.
+// Stability comes from the A-stable trapezoidal update, not a state guard.
 
 #define VERSION_MAJOR 0
 #define VERSION_MINOR 3
@@ -463,6 +494,9 @@ def main():
     p.add_argument('--headdim', type=int, default=None)
     p.add_argument('--layers', type=int, default=1)
     p.add_argument('--cond-dim', type=int, default=128)
+    p.add_argument('--mimo-rank', type=int, default=1,
+                   help='MIMO rank (deviation D3: only 1 is implemented; '
+                        'values > 1 are refused at export and at load)')
     p.add_argument('--output', default='models/test_model.bin')
     p.add_argument('--config-h', default=None)
     p.add_argument('--load-checkpoint', default=None)
@@ -477,7 +511,8 @@ def main():
 
     model = Mamba3Model(args.state_dim, args.model_dim,
                         args.inner_dim, args.nheads, headdim,
-                        args.layers, cond_dim=args.cond_dim)
+                        args.layers, mimo_rank=args.mimo_rank,
+                        cond_dim=args.cond_dim)
 
     if args.load_checkpoint and os.path.exists(args.load_checkpoint):
         model.load_state_dict(torch.load(args.load_checkpoint,
