@@ -23,7 +23,7 @@ const std::array<FactoryPreset, kFactoryPresetCount> kFactoryPresets = {{
     {
         "01 - Mamba Default",
         "Default",
-        { 1.0, 0.100, 0.300, 1.0, 0.0 },
+        make_synth_preset_values(1.0, 0.100, 0.300, 1.0, 0.0),
         false,
         0.0f,
         ""
@@ -31,7 +31,7 @@ const std::array<FactoryPreset, kFactoryPresetCount> kFactoryPresets = {{
     {
         "02 - Dark Lead",
         "Lead",
-        { 1.2, 0.015, 0.400, 0.85, 0.0 },
+        make_synth_preset_values(1.2, 0.015, 0.400, 0.85, 0.0),
         false,
         0.0f,
         ""
@@ -39,7 +39,7 @@ const std::array<FactoryPreset, kFactoryPresetCount> kFactoryPresets = {{
     {
         "03 - Lush Pad",
         "Pad",
-        { 0.9, 0.600, 1.500, 1.0, 0.0 },
+        make_synth_preset_values(0.9, 0.600, 1.500, 1.0, 0.0),
         false,
         0.0f,
         ""
@@ -47,7 +47,7 @@ const std::array<FactoryPreset, kFactoryPresetCount> kFactoryPresets = {{
     {
         "04 - Resonant Sub",
         "Bass",
-        { 1.4, 0.005, 0.250, 1.0, 0.0 },
+        make_synth_preset_values(1.4, 0.005, 0.250, 1.0, 0.0),
         false,
         0.0f,
         ""
@@ -55,7 +55,7 @@ const std::array<FactoryPreset, kFactoryPresetCount> kFactoryPresets = {{
     {
         "05 - Fast Perc",
         "Percussion",
-        { 1.1, 0.001, 0.050, 1.0, 0.0 },
+        make_synth_preset_values(1.1, 0.001, 0.050, 1.0, 0.0),
         false,
         0.0f,
         ""
@@ -63,7 +63,7 @@ const std::array<FactoryPreset, kFactoryPresetCount> kFactoryPresets = {{
     {
         "06 - Neural Delay",
         "FX",
-        { 0.85, 0.050, 0.800, 0.5, 0.0 },
+        make_synth_preset_values(0.85, 0.050, 0.800, 0.5, 0.0),
         false,
         0.0f,
         ""

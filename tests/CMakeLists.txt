@@ -34,6 +34,12 @@ target_link_libraries(test_conditioning PRIVATE Threads::Threads)
 target_include_directories(test_conditioning PRIVATE
     ${PROJECT_SOURCE_DIR}/extern/clap/include)
 
+emt_add_test(test_param_table
+    test_param_table.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/param_table.cpp)
+target_include_directories(test_param_table PRIVATE
+    ${PROJECT_SOURCE_DIR}/extern/clap/include)
+
 # Optimization level for the benchmark translation unit.  The root
 # CMakeLists already sets -O3 -mavx2 -mfma (or /O2 /arch:AVX2) in the Release
 # flags, and target_compile_options appends *after* those - so this is a
@@ -60,6 +66,7 @@ emt_add_test(test_stability test_stability.cpp)
 emt_add_test(test_realtime_safety
     test_realtime_safety.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/clap_fx_plugin.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/param_table.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/clap_audio_ports.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/clap_latency.cpp)
 target_include_directories(test_realtime_safety PRIVATE

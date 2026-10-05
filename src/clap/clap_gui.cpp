@@ -2,6 +2,7 @@
 #include "clap/ext/params.h"
 #include "clap/ext/timer-support.h"
 #include "clap/clap_plugin.h"
+#include "clap/param_table.h"
 #include "clap/clap_presets.h"
 #include <clap/clap.h>
 #include <algorithm>
@@ -145,12 +146,13 @@ struct SliderItem {
     const char* label;
 };
 
+// Slider labels come from the shared param table (same strings as get_info).
 static const SliderItem kSliders[] = {
-    { PARAM_GAIN,    "Gain" },
-    { PARAM_MIX,     "Mix" },
-    { PARAM_BYPASS,  "Bypass" },
-    { PARAM_ATTACK,  "Attack" },
-    { PARAM_RELEASE, "Release" },
+    { PARAM_GAIN,    kSynthParamTable[PARAM_GAIN].name },
+    { PARAM_MIX,     kSynthParamTable[PARAM_MIX].name },
+    { PARAM_BYPASS,  kSynthParamTable[PARAM_BYPASS].name },
+    { PARAM_ATTACK,  kSynthParamTable[PARAM_ATTACK].name },
+    { PARAM_RELEASE, kSynthParamTable[PARAM_RELEASE].name },
 };
 static constexpr int kNumSliders = static_cast<int>(sizeof(kSliders) / sizeof(kSliders[0]));
 

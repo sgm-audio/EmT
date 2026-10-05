@@ -28,14 +28,14 @@ ctest --test-dir build --output-on-failure        # 72/72
 python3 scripts/verify_deviations.py --build-dir build  # 4 closed, 2 open, 0 failing
 ```
 
-## Phase 1 — structural, still behavior-preserving (⬜ planned)
+## Phase 1 — structural, still behavior-preserving (🔵 #2 done, rest planned)
 
 Do in this order: #2 before #3 (presets index by `ParamIds`); #8 before #1
 (shared DSP helpers shrink the plugin-core merge).
 
 | # | Item | Approach | Impact |
 |---|---|---|---|
-| 2 | Data-driven parameter table | One `constexpr ParamDesc PARAM_TABLE[]` (id, name, min/max/default, curve, smooth time, flags) consumed by the params extension, `init_param_metadata`, and preset validation; `static_assert` preset width vs `PARAM_COUNT` | Adding a parameter becomes a one-line table entry; kills metadata/init/preset drift |
+| 2 | ✅ Data-driven parameter table | Shipped (`5c89763`: `src/clap/param_table.h/.cpp`): `constexpr ParamDesc` tables (id, name, module, min/max/default, curve, smooth time, flags, `ParamFormat` tag) consumed by both params extensions, all three `init_param_metadata` copies, GUI labels, and preset validation; `static_assert` id alignment + defaults-in-range + FX row count; arity-checked `make_synth_preset_values()` | Adding a parameter is one table row; per-plugin text quirks preserved as format tags (O7); 90/90 ctest (18 new pins) |
 | 3 | Split the presets monolith | `clap_presets.cpp` (984 L, biggest TU) → `preset_bank.cpp` (factory data) + `preset_codec.cpp` (JSON/binary on plain structs) + `preset_paths.cpp` (platform dirs) | Faster incremental builds; codecs gain direct unit tests (today: only indirect coverage via state round-trip) |
 | 4 | Split GUI by platform backend | `clap_gui.cpp` (861 L, ~15 Win32/X11 `#if`s) → `gui_common.cpp` + `gui_win32.cpp` + `gui_x11.cpp` behind an `IGuiBackend` seam; graceful Cocoa stub for macOS (currently silent `false`) | Backends build/reason independently; macOS support becomes additive |
 | 8 | Extract RT DSP helpers | Header-only `src/dsp/`: `param_smoother.h`, `bypass_fader.h`, `voice_envelope.h`, each with a no-alloc contract + regression vectors | Synth and FX provably share smoothing/bypass behavior; reusable for the ARA offline renderer |
@@ -59,13 +59,14 @@ automation-heavy sessions, testable without a CLAP host.
 
 ## Observations (found during Phase 0, not yet scheduled)
 
-- **O1 — `clap_fx_plugin.cpp` param text conversions** (`-Wmisleading-indentation`,
-  lines ~144–152): single-line `else …; return true;` chains. Functionally
-  correct (both paths return true) but misleading; reformat when #1 or #2
-  touches the file.
-- **O2 — dead helpers in `clap_params.cpp`**: `log_knob_to_value` /
-  `log_curve_to_knob` are defined but unused (`-Wunused-function`). Delete or
-  wire up during #2.
+- **O1 — `clap_fx_plugin.cpp` param one-liners** ✅ resolved in #2: the
+  `value_to_text`/`text_to_value` chains became table-dispatched calls and the
+  sibling `fx_params_flush` one-liner was split; `-Wmisleading-indentation`
+  is gone.
+- **O2 — dead helpers in `clap_params.cpp`** ✅ resolved in #2:
+  `log_knob_to_value` / `log_curve_to_knob` deleted (were `-Wunused-function`
+  dead code); `PARAMETER_REFERENCE.md` §3.4 rewritten to describe the actual
+  host-side knob mapping instead of the dead helpers' math.
 - **O3 — `mamba_getpid` still duplicated** in `tests/test_conditioning.cpp`.
   Migrate it (and later suites) to `tests/fixtures/weight_fixture.h`.
 - **O4 — CRLF sources**: 6 files under `src/` still use CRLF
@@ -80,3 +81,15 @@ automation-heavy sessions, testable without a CLAP host.
   now returns the underlying accessor code instead of collapsing to `-3`/`-4`.
   Undocumented values, tests only asserted `0`/non-`0` — safe, but noted here
   for the record.
+- **O7 — `text_to_value` quirks (found in #2, pinned, not fixed)**: FX bypass
+  parsing is case-sensitive and never fails (`BypassFx` tag); FX gain/mix
+  parse plain decimals with no suffix handling and no clamping; the synth
+  bypass display uses strict `>` while FX uses `>=`; synth parsers have no
+  `isfinite` validation (`"nan"` parses successfully); bare attack/release
+  numbers mean milliseconds. All pinned by `tests/test_param_table.cpp`;
+  unify deliberately in a behavior-change release.
+- **O8 — FX `module` strings empty as-shipped** (found in #2): the FX
+  `get_info` never sets `info->module`, so FX Gain/Mix report `""` where the
+  synth reports `"SSM"`. Preserved verbatim; `PARAMETER_REFERENCE.md` now
+  documents the shipped behavior. If a host-visible regrouping is acceptable,
+  set the two FX table modules to `"SSM"` and revert the doc note.
