@@ -3,6 +3,10 @@ if(MSVC)
     set(_MAMBA_TEST_STACK /STACK:16777216)
 endif()
 
+# Shared test helpers (tests/fixtures/*). Header-only, no GTest dependency.
+add_library(test_fixtures INTERFACE)
+target_include_directories(test_fixtures INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+
 add_executable(test_ssm_block test_ssm_block.cpp)
 target_link_libraries(test_ssm_block PRIVATE core common GTest::gtest GTest::gtest_main)
 if(MSVC)
@@ -16,7 +20,7 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
 add_executable(test_weight_loader test_weight_loader.cpp)
-target_link_libraries(test_weight_loader PRIVATE core common GTest::gtest GTest::gtest_main)
+target_link_libraries(test_weight_loader PRIVATE core common test_fixtures GTest::gtest GTest::gtest_main)
 if(MSVC)
     target_link_options(test_weight_loader PRIVATE "/STACK:16777216")
 endif()
