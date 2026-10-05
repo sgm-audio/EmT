@@ -180,22 +180,37 @@ When loading weights at runtime, the plugin resolves candidates in strict preced
 
 ## 8. Validation Rules & Error Codes
 
-The loader returns explicit negative error codes upon validation failure:
+The loader reports failures with `LoadError` (`src/core/weight_loader.h`), an
+`enum class` whose `load()` values are locked by `static_assert` and must stay
+in sync with this table. `load_error_string()` renders them for host logs:
 
-| Return Code | Cause | Description |
-|:---:|:---|:---|
-| `0` | Success | File mapped, validated, and layer pointers established. |
-| `-1` | File Open Failure | Path does not exist or insufficient OS read permissions. |
-| `-10` | Header Truncation | File size is smaller than `sizeof(WeightFileHeader)` (64 bytes). |
-| `-11` | Invalid Magic | Header `magic != 0x4D424D41`. |
-| `-12` | Version Incompatible | Header `version` is neither `1` (legacy) nor `2`. |
-| `-13` | Corrupt Payload Size | File size does not match $64 + q\_metadata\_size + weight\_data\_size$, or weight data does not equal $L 	imes 	ext{bytes\_per\_layer}$. |
-| `-14` | Dimension Overflow | One or more dimensions exceed the compile-time limits in `config.h`. |
-| `-15` | Unsupported Quantization | `quantization > QuantFormat::FP16`. |
-| `-16` | Unsupported MIMO Rank | Header `version >= 2` and `mimo_rank > 1`: rank-R MIMO is reserved in the format but not implemented by the forward pass (deviation D3). |
-| `-17` | Invalid Metadata Size | *Documented but not implemented* — `q_metadata_size` is bounds-checked against the file size instead. |
+| Return Code | `LoadError` | Cause | Description |
+|:---:|:---|:---|:---|
+| `0` | `Ok` | Success | File mapped, validated, and layer pointers established. |
+| `-1` | `OpenFailed` | File Open Failure | Path does not exist or insufficient OS read permissions. |
+| `-2` | `StatFailed` | File Stat Failure | `fstat` / `GetFileSizeEx` failed. |
+| `-3` | `MapFailed` | Mapping Failure | `mmap` / `CreateFileMapping` failed. |
+| `-4` | `MapViewFailed` | Map View Failure | `MapViewOfFile` failed (Windows only). |
+| `-10` | `FileTooSmall` | Header Truncation | File size is smaller than `sizeof(WeightFileHeader)` (64 bytes). |
+| `-11` | `BadMagic` | Invalid Magic | Header `magic != 0x4D424D41`. |
+| `-12` | `BadVersion` | Version Incompatible | Header `version` is neither `1` (legacy) nor `2`. |
+| `-13` | `TruncatedData` | Corrupt Payload Size | File size does not match $64 + q\_metadata\_size + weight\_data\_size$, or weight data does not equal $L 	imes 	ext{bytes\_per\_layer}$. |
+| `-14` | `DimsExceedLimits` | Dimension Overflow | One or more dimensions exceed the compile-time limits in `config.h`. |
+| `-15` | `BadQuantFormat` | Unsupported Quantization | `quantization > QuantFormat::FP16`. |
+| `-16` | `MimoRankRefused` | Unsupported MIMO Rank | Header `version >= 2` and `mimo_rank > 1`: rank-R MIMO is reserved in the format but not implemented by the forward pass (deviation D3). |
+| `-17` | — | Invalid Metadata Size | *Documented but not implemented* — `q_metadata_size` is bounds-checked against the file size instead. |
 
 Code that is documented above but not implemented in `WeightLoader::load()` today:
 the `flags`/`reserved` zero checks (writers emit 0; readers ignore the values)
-and `-17`.  The implemented set is `0`, `-1`, `-10` … `-16`; keep this table and
+and `-17`.
+
+The layer/qparam accessors (`get_layer_pointers*`, `get_*_qparam`,
+`dequantize_layer_to`) use a separate `-20`… range so a code is never
+ambiguous about which call produced it: `NotLoaded` (`-20`),
+`WrongQuantFormat` (`-21`), `LayerOutOfRange` (`-22`),
+`QMetadataTooSmall` (`-23`), `InternalError` (`-100`).
+`dequantize_layer_to()` propagates the underlying accessor error.
+
+The implemented set is `0`, `-1` … `-4`, `-10` … `-16` for `load()`
+plus the accessor range above; keep this table and
 `src/core/weight_loader.h` in sync when adding a code.

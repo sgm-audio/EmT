@@ -120,14 +120,14 @@ static std::unique_ptr<SSMBlock> load_parity_block(const char* weight_path,
                                                     size_t /*d_inner*/, size_t /*nheads*/,
                                                     size_t /*headdim*/, size_t /*d_cond*/) {
     WeightLoader loader;
-    int rc = loader.load(weight_path);
-    if (rc != 0) {
-        fprintf(stderr, "Failed to load weights: %s (rc=%d)\n", weight_path, rc);
+    LoadError rc = loader.load(weight_path);
+    if (rc != LoadError::Ok) {
+        fprintf(stderr, "Failed to load weights: %s (rc=%d)\n", weight_path, static_cast<int>(rc));
         return nullptr;
     }
 
     WeightLayerPointers ptrs;
-    if (loader.get_layer_pointers(0, ptrs) != 0) {
+    if (loader.get_layer_pointers(0, ptrs) != LoadError::Ok) {
         fprintf(stderr, "Failed to get layer 0 pointers\n");
         return nullptr;
     }

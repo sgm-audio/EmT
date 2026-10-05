@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <ostream>
 
 namespace mamba {
 
@@ -50,6 +51,81 @@ enum class QuantFormat : uint32_t {
     Int8PerLayer  = 2,
     FP16          = 3,
 };
+
+// ---------------------------------------------------------------------------
+// LoadError — return codes for WeightLoader::load() and the layer accessors
+// ---------------------------------------------------------------------------
+//
+// load() values are STABLE and documented in WEIGHT_FORMAT_SPEC.md §8:
+// renumbering one breaks the spec, the Python tooling's expectations, and
+// the deviation tripwire (scripts/verify_deviations.py check_d3).
+// Accessor failures live in their own -20… range so a code is never
+// ambiguous about which call produced it.
+enum class LoadError : int {
+    Ok = 0,
+
+    // load(): file access / mapping failures.
+    OpenFailed    = -1,  // path missing or unreadable
+    StatFailed    = -2,  // fstat / GetFileSizeEx failed
+    MapFailed     = -3,  // mmap / CreateFileMapping failed
+    MapViewFailed = -4,  // MapViewOfFile failed (Windows only)
+
+    // load(): header/content validation failures (WEIGHT_FORMAT_SPEC.md §8).
+    FileTooSmall     = -10, // smaller than the 64-byte header
+    BadMagic         = -11,
+    BadVersion       = -12, // neither 1 (legacy) nor 2
+    TruncatedData    = -13, // file smaller than header + q-meta + payload
+    DimsExceedLimits = -14, // a dim exceeds the compiled MAX_* limits
+    BadQuantFormat   = -15, // quantization > QuantFormat::FP16
+    MimoRankRefused  = -16, // version >= 2 && mimo_rank > 1 (deviation D3)
+
+    // Layer/qparam accessors (stable within this domain).
+    NotLoaded         = -20, // no file mapped
+    WrongQuantFormat  = -21, // accessor does not match the file's format
+    LayerOutOfRange   = -22,
+    QMetadataTooSmall = -23, // q_metadata_size smaller than the params read
+    InternalError     = -100, // unreachable defensive path (logic error)
+};
+
+// Lock the documented load() values: the spec, tests, and tripwire rely on
+// these exact integers.
+static_assert(static_cast<int>(LoadError::Ok) == 0, "Ok must be 0");
+static_assert(static_cast<int>(LoadError::OpenFailed) == -1, "OpenFailed must be -1");
+static_assert(static_cast<int>(LoadError::FileTooSmall) == -10, "FileTooSmall must be -10");
+static_assert(static_cast<int>(LoadError::BadMagic) == -11, "BadMagic must be -11");
+static_assert(static_cast<int>(LoadError::BadVersion) == -12, "BadVersion must be -12");
+static_assert(static_cast<int>(LoadError::TruncatedData) == -13, "TruncatedData must be -13");
+static_assert(static_cast<int>(LoadError::DimsExceedLimits) == -14, "DimsExceedLimits must be -14");
+static_assert(static_cast<int>(LoadError::BadQuantFormat) == -15, "BadQuantFormat must be -15");
+static_assert(static_cast<int>(LoadError::MimoRankRefused) == -16, "MimoRankRefused must be -16");
+
+constexpr const char* load_error_string(LoadError e) {
+    switch (e) {
+        case LoadError::Ok:               return "ok";
+        case LoadError::OpenFailed:       return "file open failed";
+        case LoadError::StatFailed:       return "file stat failed";
+        case LoadError::MapFailed:        return "file mapping failed";
+        case LoadError::MapViewFailed:    return "map view failed";
+        case LoadError::FileTooSmall:     return "file smaller than header";
+        case LoadError::BadMagic:         return "bad magic";
+        case LoadError::BadVersion:       return "unsupported version";
+        case LoadError::TruncatedData:    return "truncated weight data";
+        case LoadError::DimsExceedLimits: return "dimensions exceed compiled MAX_* limits";
+        case LoadError::BadQuantFormat:   return "unsupported quantization format";
+        case LoadError::MimoRankRefused:  return "mimo_rank > 1 refused (deviation D3)";
+        case LoadError::NotLoaded:        return "no weight file loaded";
+        case LoadError::WrongQuantFormat: return "accessor/format mismatch";
+        case LoadError::LayerOutOfRange:  return "layer index out of range";
+        case LoadError::QMetadataTooSmall: return "quantization metadata too small";
+        case LoadError::InternalError:    return "internal loader error";
+    }
+    return "unknown load error"; // unreachable; keeps -Wreturn-type quiet
+}
+
+// Readable GTest failure messages for EXPECT_EQ(rc, LoadError::...).
+inline std::ostream& operator<<(std::ostream& os, LoadError e) {
+    return os << load_error_string(e) << " (" << static_cast<int>(e) << ")";
+}
 
 // ---------------------------------------------------------------------------
 // Layer weight views (zero-copy pointers into the mmap region)
@@ -127,7 +203,7 @@ public:
     WeightLoader(const WeightLoader&) = delete;
     WeightLoader& operator=(const WeightLoader&) = delete;
 
-    int load(const char* path = nullptr);
+    LoadError load(const char* path = nullptr);
     void unload();
 
     bool is_loaded() const { return mapped_data_ != nullptr; }
@@ -140,15 +216,9 @@ public:
 
     bool fits_in_static_weights() const;
 
-    // Return codes from load():
-    //    0  ok
-    //  -10  file smaller than the header
-    //  -11  bad magic
-    //  -12  unsupported version
-    //  -13  truncated / undersized weight data
-    //  -14  dimension exceeds the compiled MAX_* limits
-    //  -15  unsupported quantization format
-    //  -16  mimo_rank > 1 (deviation D3: reserved in the format, not implemented)
+    // load() reports failures with LoadError (see above); the -10…-16
+    // values are locked by static_assert and documented in
+    // WEIGHT_FORMAT_SPEC.md §8.
     static bool fits_in_static_weights_with(const WeightFileHeader& hdr) {
         return hdr.d_state    > 0 && hdr.d_state    <= MAX_D_STATE  &&
                hdr.d_model    > 0 && hdr.d_model    <= MAX_D_MODEL  &&
@@ -165,14 +235,14 @@ public:
                              uint32_t d_inner, uint32_t nheads,
                              uint32_t headdim, uint32_t num_layers) const;
 
-    int get_layer_pointers(uint32_t layer, WeightLayerPointers& out) const;
-    int get_layer_pointers_i8(uint32_t layer, WeightLayerPointersI8& out) const;
-    int get_layer_pointers_f16(uint32_t layer, WeightLayerPointersF16& out) const;
+    LoadError get_layer_pointers(uint32_t layer, WeightLayerPointers& out) const;
+    LoadError get_layer_pointers_i8(uint32_t layer, WeightLayerPointersI8& out) const;
+    LoadError get_layer_pointers_f16(uint32_t layer, WeightLayerPointersF16& out) const;
 
-    int get_tensor_qparam(TensorQParam& out) const;
-    int get_layer_qparam(uint32_t layer, LayerQParam& out) const;
+    LoadError get_tensor_qparam(TensorQParam& out) const;
+    LoadError get_layer_qparam(uint32_t layer, LayerQParam& out) const;
 
-    int dequantize_layer_to(uint32_t layer, SSMWeights& out_f32) const;
+    LoadError dequantize_layer_to(uint32_t layer, SSMWeights& out_f32) const;
 
     uint32_t get_num_layers() const {
         return header_ ? header_->num_layers : 0;
