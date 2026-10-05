@@ -41,7 +41,7 @@ Everything in `namespace mamba`. Core types:
 
 ## config.h — Compile-Time Dimension Limits
 
-`src/config.h` defines `MAX_*` constants that **must be >= the actual model dimensions** stored in the weight file header, or `WeightLoader::load()` rejects with error `-14`. The export script's `--config-h` flag regenerates this file.
+`src/config.h` defines `MAX_*` constants that **must be >= the actual model dimensions** stored in the weight file header, or `WeightLoader::load()` rejects with `LoadError::DimsExceedLimits` (`-14`, locked by `static_assert`). The export script's `--config-h` flag regenerates this file.
 
 Current values:
 ```
@@ -66,7 +66,7 @@ Mamba-3 has **no conv1d** — 0-sample algorithmic latency. `MAX_D_CONV` does no
   u32 `reserved` (Python format string `'<12IQII'`)
 - `mimo_rank`: `1` is the only rank this runtime executes; `0` = legacy file
   written before the field existed (treated as 1); **`> 1` is refused by
-  `WeightLoader::load()` with error `-16`** (deviation D3). `fits_in_static_weights_with()`
+  `WeightLoader::load()` with `LoadError::MimoRankRefused` (`-16`)** (deviation D3). `fits_in_static_weights_with()`
   rejects such headers too.
 - mmap read-only (`PROT_READ`, `MAP_PRIVATE` on POSIX; `PAGE_READONLY` + `MapViewOfFile` on Windows)
 - Weights never copied into writable memory; `dequantize_layer_to()` is the only exception (INT8/FP16 → float32)

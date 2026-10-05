@@ -627,7 +627,7 @@ static const clap_plugin_t s_plugin_class = {
 
 bool MambaSynth::load_weights(const char* path) {
     if (!path || path[0] == '\0') return false;
-    if (weight_loader.load(path) != 0) return false;
+    if (weight_loader.load(path) != LoadError::Ok) return false;
 
     // Validate dimensions against the loaded header
     const auto& hdr = weight_loader.header();
@@ -656,7 +656,7 @@ bool MambaSynth::load_weights(const char* path) {
     // Load weights: 13 arrays per layer (Mamba-3 layout)
     for (uint32_t layer = 0; layer < core_cfg.num_layers; ++layer) {
         WeightLayerPointers ptrs;
-        if (weight_loader.get_layer_pointers(layer, ptrs) != 0) {
+        if (weight_loader.get_layer_pointers(layer, ptrs) != LoadError::Ok) {
             weight_loader.unload();
             return false;
         }

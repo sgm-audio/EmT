@@ -97,8 +97,8 @@ TEST_F(WeightLoaderTest, LoadValidFile) {
     ASSERT_TRUE(create_valid_weight_file());
 
     WeightLoader loader;
-    int rc = loader.load(tmp_path_);
-    EXPECT_EQ(rc, 0);
+    LoadError rc = loader.load(tmp_path_);
+    EXPECT_EQ(rc, LoadError::Ok);
     EXPECT_TRUE(loader.is_loaded());
     EXPECT_EQ(loader.get_num_layers(), 1u);
 
@@ -113,8 +113,8 @@ TEST_F(WeightLoaderTest, RejectsUnimplementedMimoRank) {
     ASSERT_TRUE(create_valid_weight_file(/*num_layers=*/1, /*mimo_rank=*/2));
 
     WeightLoader loader;
-    int rc = loader.load(tmp_path_);
-    EXPECT_EQ(rc, -16) << "rank-2 MIMO file must be refused with the dedicated "
+    LoadError rc = loader.load(tmp_path_);
+    EXPECT_EQ(rc, LoadError::MimoRankRefused) << "rank-2 MIMO file must be refused with the dedicated "
                           "error code, not loaded";
     EXPECT_FALSE(loader.is_loaded());
     EXPECT_FALSE(loader.fits_in_static_weights());
@@ -126,7 +126,7 @@ TEST_F(WeightLoaderTest, LegacyHeaderWithoutMimoFieldIsRankOne) {
     ASSERT_TRUE(create_valid_weight_file(/*num_layers=*/1, /*mimo_rank=*/0));
 
     WeightLoader loader;
-    EXPECT_EQ(loader.load(tmp_path_), 0);
+    EXPECT_EQ(loader.load(tmp_path_), LoadError::Ok);
     EXPECT_TRUE(loader.is_loaded());
     EXPECT_EQ(loader.header().mimo_rank, 0u);
     EXPECT_TRUE(loader.fits_in_static_weights());
@@ -134,8 +134,8 @@ TEST_F(WeightLoaderTest, LegacyHeaderWithoutMimoFieldIsRankOne) {
 
 TEST_F(WeightLoaderTest, LoadNonexistentFile) {
     WeightLoader loader;
-    int rc = loader.load("/tmp/mamba3_nonexistent_weights.bin");
-    EXPECT_NE(rc, 0);
+    LoadError rc = loader.load("/tmp/mamba3_nonexistent_weights.bin");
+    EXPECT_NE(rc, LoadError::Ok);
     EXPECT_FALSE(loader.is_loaded());
 }
 
@@ -143,7 +143,7 @@ TEST_F(WeightLoaderTest, ValidateDimensions) {
     ASSERT_TRUE(create_valid_weight_file());
 
     WeightLoader loader;
-    ASSERT_EQ(loader.load(tmp_path_), 0);
+    ASSERT_EQ(loader.load(tmp_path_), LoadError::Ok);
 
     const auto& hdr = loader.header();
     EXPECT_TRUE(loader.validate_dimensions(
@@ -160,11 +160,11 @@ TEST_F(WeightLoaderTest, GetLayerPointers) {
     ASSERT_TRUE(create_valid_weight_file());
 
     WeightLoader loader;
-    ASSERT_EQ(loader.load(tmp_path_), 0);
+    ASSERT_EQ(loader.load(tmp_path_), LoadError::Ok);
 
     WeightLayerPointers ptrs;
-    int rc = loader.get_layer_pointers(0, ptrs);
-    EXPECT_EQ(rc, 0);
+    LoadError rc = loader.get_layer_pointers(0, ptrs);
+    EXPECT_EQ(rc, LoadError::Ok);
     EXPECT_NE(ptrs.in_proj_w, nullptr);
     EXPECT_NE(ptrs.dt_bias, nullptr);
     EXPECT_NE(ptrs.B_bias, nullptr);
@@ -182,7 +182,7 @@ TEST_F(WeightLoaderTest, GetLayerPointers) {
     EXPECT_FLOAT_EQ(ptrs.in_proj_w[0], -1.0f);
 
     rc = loader.get_layer_pointers(1, ptrs);
-    EXPECT_NE(rc, 0);
+    EXPECT_NE(rc, LoadError::Ok);
 
     loader.unload();
 }
@@ -193,14 +193,14 @@ TEST_F(WeightLoaderTest, LoadMultiLayer) {
     ASSERT_TRUE(create_valid_weight_file(kNumLayers));
 
     WeightLoader loader;
-    ASSERT_EQ(loader.load(tmp_path_), 0);
+    ASSERT_EQ(loader.load(tmp_path_), LoadError::Ok);
     EXPECT_EQ(loader.get_num_layers(), kNumLayers);
 
     WeightLayerPointers ptrs;
     for (uint32_t i = 0; i < kNumLayers; ++i) {
-        EXPECT_EQ(loader.get_layer_pointers(i, ptrs), 0);
+        EXPECT_EQ(loader.get_layer_pointers(i, ptrs), LoadError::Ok);
     }
-    EXPECT_NE(loader.get_layer_pointers(kNumLayers, ptrs), 0);
+    EXPECT_NE(loader.get_layer_pointers(kNumLayers, ptrs), LoadError::Ok);
 
     loader.unload();
 }
@@ -217,7 +217,7 @@ TEST_F(WeightLoaderTest, BadMagic) {
     fclose(f);
 
     WeightLoader loader;
-    EXPECT_EQ(loader.load(tmp_path_), -11);
+    EXPECT_EQ(loader.load(tmp_path_), LoadError::BadMagic);
 }
 
 TEST_F(WeightLoaderTest, BadVersion) {
@@ -232,7 +232,7 @@ TEST_F(WeightLoaderTest, BadVersion) {
     fclose(f);
 
     WeightLoader loader;
-    EXPECT_EQ(loader.load(tmp_path_), -12);
+    EXPECT_EQ(loader.load(tmp_path_), LoadError::BadVersion);
 }
 
 TEST_F(WeightLoaderTest, FileTooSmall) {
@@ -243,7 +243,7 @@ TEST_F(WeightLoaderTest, FileTooSmall) {
     fclose(f);
 
     WeightLoader loader;
-    EXPECT_EQ(loader.load(tmp_path_), -10);
+    EXPECT_EQ(loader.load(tmp_path_), LoadError::FileTooSmall);
 }
 
 TEST(WeightIntegration, LoadWeightsThenProcessNonZero) {
@@ -280,7 +280,7 @@ TEST(WeightIntegration, LoadWeightsThenProcessNonZero) {
     fclose(f);
 
     WeightLoader loader;
-    ASSERT_EQ(loader.load(tmp_path), 0);
+    ASSERT_EQ(loader.load(tmp_path), LoadError::Ok);
 
     const auto& lhdr = loader.header();
     ASSERT_TRUE(loader.validate_dimensions(
@@ -295,7 +295,7 @@ TEST(WeightIntegration, LoadWeightsThenProcessNonZero) {
 
     for (uint32_t layer = 0; layer < 2; ++layer) {
         WeightLayerPointers ptrs;
-        ASSERT_EQ(loader.get_layer_pointers(layer, ptrs), 0);
+        ASSERT_EQ(loader.get_layer_pointers(layer, ptrs), LoadError::Ok);
 
         SSMWeights w{};
         std::memcpy(w.in_proj_w, ptrs.in_proj_w, in_proj_out * dm * sizeof(float));
@@ -421,16 +421,16 @@ QFile make_i8_per_layer_file(float scale, int32_t zp) {
 TEST(WeightQuantization, Int8PerLayerRoundTrip) {
     QFile qf = make_i8_per_layer_file(0.01f, 0);
     WeightLoader loader;
-    ASSERT_EQ(loader.load(qf.path), 0);
+    ASSERT_EQ(loader.load(qf.path), LoadError::Ok);
     ASSERT_EQ(loader.quant_format(), QuantFormat::Int8PerLayer);
 
     LayerQParam qp;
-    ASSERT_EQ(loader.get_layer_qparam(0, qp), 0);
+    ASSERT_EQ(loader.get_layer_qparam(0, qp), LoadError::Ok);
     EXPECT_FLOAT_EQ(qp.scale, 0.01f);
     EXPECT_EQ(qp.zero_point, 0);
 
     SSMWeights w{};
-    ASSERT_EQ(loader.dequantize_layer_to(0, w), 0);
+    ASSERT_EQ(loader.dequantize_layer_to(0, w), LoadError::Ok);
 
     EXPECT_NEAR(w.in_proj_w[0][0], 0.0f, 1e-6f);  // data[0]=0, out = 0.01*(0-0)=0
     EXPECT_NEAR(w.in_proj_w[0][1], 0.01f, 1e-6f); // data[1]=1, out = 0.01*(1-0)=0.01
@@ -441,10 +441,10 @@ TEST(WeightQuantization, Int8PerLayerRoundTrip) {
 TEST(WeightQuantization, Int8PerLayerOffsetAndScale) {
     QFile qf = make_i8_per_layer_file(0.5f, 10);
     WeightLoader loader;
-    ASSERT_EQ(loader.load(qf.path), 0);
+    ASSERT_EQ(loader.load(qf.path), LoadError::Ok);
 
     SSMWeights w{};
-    ASSERT_EQ(loader.dequantize_layer_to(0, w), 0);
+    ASSERT_EQ(loader.dequantize_layer_to(0, w), LoadError::Ok);
     EXPECT_NEAR(w.in_proj_w[0][0], 0.0f, 1e-6f);  // data[0]=10, out=0.5*(10-10)=0
     EXPECT_NEAR(w.in_proj_w[0][1], 0.5f, 1e-6f);  // data[1]=11, out=0.5*(11-10)=0.5
     loader.unload();
@@ -453,14 +453,14 @@ TEST(WeightQuantization, Int8PerLayerOffsetAndScale) {
 TEST(WeightQuantization, RejectsWrongFormatAccess) {
     QFile qf = make_i8_per_layer_file(0.01f, 0);
     WeightLoader loader;
-    ASSERT_EQ(loader.load(qf.path), 0);
+    ASSERT_EQ(loader.load(qf.path), LoadError::Ok);
 
     WeightLayerPointers fp;
-    EXPECT_NE(loader.get_layer_pointers(0, fp), 0);
+    EXPECT_NE(loader.get_layer_pointers(0, fp), LoadError::Ok);
     WeightLayerPointersF16 f16p;
-    EXPECT_NE(loader.get_layer_pointers_f16(0, f16p), 0);
+    EXPECT_NE(loader.get_layer_pointers_f16(0, f16p), LoadError::Ok);
     TensorQParam tqp;
-    EXPECT_NE(loader.get_tensor_qparam(tqp), 0);
+    EXPECT_NE(loader.get_tensor_qparam(tqp), LoadError::Ok);
 
     loader.unload();
 }
@@ -497,8 +497,8 @@ TEST(WeightLoaderPath, MAMBAWeightsEnvVar) {
     ::setenv("EMT_WEIGHTS", tmp_path, 1);
 #endif
     WeightLoader loader;
-    int rc = loader.load();
-    EXPECT_EQ(rc, 0);
+    LoadError rc = loader.load();
+    EXPECT_EQ(rc, LoadError::Ok);
     EXPECT_STREQ(loader.source_path(), tmp_path);
     loader.unload();
 #ifdef _WIN32
@@ -533,7 +533,7 @@ TEST(WeightLoaderPath, RejectsOutOfBoundsDimensions) {
     std::fclose(f);
 
     WeightLoader loader;
-    EXPECT_EQ(loader.load(tmp_path), -14);
+    EXPECT_EQ(loader.load(tmp_path), LoadError::DimsExceedLimits);
     mamba_unlink(tmp_path);
 }
 

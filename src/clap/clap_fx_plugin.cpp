@@ -229,7 +229,7 @@ static const clap_plugin_tail_t s_fx_tail = {fx_tail_get};
 
 bool fx_load_weights(FxState* f, const char* path) {
     if (!path || path[0] == '\0') return false;
-    if (f->weight_loader.load(path) != 0) return false;
+    if (f->weight_loader.load(path) != LoadError::Ok) return false;
 
     const auto& hdr = f->weight_loader.header();
     // Same rule as the synth: accept any shape that fits the compiled limits.
@@ -257,7 +257,7 @@ bool fx_load_weights(FxState* f, const char* path) {
 
     for (uint32_t layer = 0; layer < f->core_cfg.num_layers; ++layer) {
         WeightLayerPointers ptrs;
-        if (f->weight_loader.get_layer_pointers(layer, ptrs) != 0) {
+        if (f->weight_loader.get_layer_pointers(layer, ptrs) != LoadError::Ok) {
             f->weight_loader.unload();
             return false;
         }

@@ -153,9 +153,10 @@ def check_d3(build_dir: Path, no_build_checks: bool) -> Result:
     checks = [
         ("WeightFileHeader carries mimo_rank",
          "uint32_t mimo_rank;" in loader_h),
-        ("WeightLoader::load() refuses mimo_rank > 1 with -16",
+        ("WeightLoader::load() refuses mimo_rank > 1 with LoadError::MimoRankRefused",
          re.search(r"mimo_rank\s*>\s*1", loader_c) is not None
-         and ("-16" in loader_c or "LoadError::MimoRankRefused" in loader_c)),
+         and "LoadError::MimoRankRefused" in loader_c
+         and re.search(r"MimoRankRefused\s*=\s*-16", loader_h) is not None),
         ("fits_in_static_weights_with() rejects rank-R headers",
          "mimo_rank <= 1" in loader_h),
         ("exporter writes the field and refuses rank-R",
