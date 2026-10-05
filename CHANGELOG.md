@@ -2,6 +2,51 @@
 
 All notable changes to the EmT CLAP/ARA Plugin Suite (EmT).
 
+## [Unreleased] - Phase 0 refactoring (see REFACTORING_PLAN.md)
+
+Behavior-preserving restructuring. Verified after each step: 72/72 ctest,
+`verify_deviations.py` 4 closed / 2 open / 0 failing, benchmark gate PASS,
+parity vectors byte-identical.
+
+### Added
+- **`scripts/emt_format.py`** — single source of truth for the flat-binary
+  weight format on the Python side (header constants, `MAX_*` file-layout
+  strides, `floats_per_layer`, `make_header`, `parse_header`). The exporter,
+  validator, and both NumPy references import it instead of re-declaring the
+  layout; names stay importable from `export_mamba_weights` for compatibility.
+- **`LoadError`** (`src/core/weight_loader.h`) — `enum class` replacing the
+  undocumented magic ints. `load()` values (`-1`…`-4`, `-10`…`-16`) keep their
+  exact integers, locked by `static_assert`; accessor failures move to their
+  own `-20`… range plus `-100`, and `dequantize_layer_to()` now propagates the
+  underlying accessor error. `load_error_string()` renders codes for host
+  logs; `WEIGHT_FORMAT_SPEC.md` §8 documents the full table.
+- **`tests/fixtures/weight_fixture.h`** — shared test helpers (`TempWeightFile`
+  RAII paths, `WeightFileSpec`/`write_weight_file`, layout math mirroring
+  `emt_format.py`), exposed via a `test_fixtures` INTERFACE lib.
+  `test_weight_loader.cpp` is migrated; other suites can follow.
+- **`docs/BUILD.md`** — full build/test/offline/CI-parity guide;
+  **`docs/README.md`** — documentation index with the archive policy;
+  **`.editorconfig`** and **`.gitattributes`** (`text=auto`).
+- **`REFACTORING_PLAN.md`** — phased plan (0–2) with per-item approach, impact,
+  guardrails, and observations found along the way.
+
+### Changed
+- **CMake is per-target now.** RT flags (`-fno-exceptions -fno-rtti`,
+  MSVC `/GR-`) apply PRIVATE to `core`/`ara_plugin`/`mamba_synth` only —
+  GTest and the test executables build with normal exception support
+  (verified in `build.ninja`). No more global `include_directories()`;
+  `tests/CMakeLists.txt` uses an `emt_add_test()` helper. New
+  `-DEMT_USE_SYSTEM_GTEST=ON` option and
+  `-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=` support for offline builds.
+- **`clap-validator`** is a real ctest step and build target when the tool is
+  installed (previously an echo stub).
+- **Docs**: superseded `AUDIT_REPORT.md` / `GAP_ANALYSIS.md` moved to
+  `docs/archive/`; README points at `docs/BUILD.md` and its stale test counts
+  (64/67) are corrected to the measured 72.
+- The D3 tripwire in `verify_deviations.py` checks the header pack site in
+  `emt_format.py` and pins `LoadError::MimoRankRefused` **and** its stable
+  `-16` value.
+
 ## [Unreleased] - 2026-10-04
 
 Verification-driven fixes. Context: [`CLAIMS_VERIFICATION.md`](CLAIMS_VERIFICATION.md)
