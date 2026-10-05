@@ -428,7 +428,10 @@ python scripts/export_mamba_weights.py \
  │   │   ├── clap_gui.h/.cpp      # Dual Win32 HWND & Linux X11 native GUI
  │   │   ├── clap_params.cpp      # Parameter definitions & smoothing
  │   │   ├── clap_state.cpp       # Plugin state serialization (Schema v3)
- │   │   ├── clap_presets.h/.cpp  # Preset file save/load engine
+ │   │   ├── clap_presets.h       # Preset engine API (bank + codec + paths)
+ │   │   ├── preset_bank.cpp      # Factory preset bank data & apply
+ │   │   ├── preset_codec.cpp     # Binary/JSON preset codecs
+ │   │   ├── preset_paths.cpp     # Preset dirs & weight-path search
  │   │   ├── clap_common_utils.h  # Common CLAP conversion & validation utilities
  │   │   ├── clap_audio_ports.cpp # Stereo audio port configuration
  │   │   ├── clap_note_ports.cpp  # MIDI note input port configuration

@@ -310,7 +310,7 @@ Per the CLAP specification:
 
 ### 5.1 Parameter State Block in Presets (`.mambapreset`)
 
-When saved via `CLAP_EXT_STATE` or the standalone preset manager (`clap_presets.cpp`), parameters are serialized in little-endian binary format:
+When saved via `CLAP_EXT_STATE` or the standalone preset manager (`preset_codec.cpp`), parameters are serialized in little-endian binary format:
 
 ```
 Offset   Type     Field             Description

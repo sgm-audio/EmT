@@ -2,6 +2,25 @@
 
 All notable changes to the EmT CLAP/ARA Plugin Suite (EmT).
 
+## [Unreleased] - Phase 1, item #3 (see REFACTORING_PLAN.md)
+
+Preset TU split. Pure code motion, verified behavior-preserving: 90/90 ctest
+(0 skips with generated inputs), `verify_deviations.py` 4 closed / 2 open /
+0 failing, benchmark gate PASS. No DSP code touched.
+
+### Changed
+- **`src/clap/clap_presets.cpp` (984 lines) → three TUs**: `preset_bank.cpp`
+  (factory data + query + apply), `preset_codec.cpp` (binary/JSON codecs and
+  helpers), `preset_paths.cpp` (preset directory, scan, weight-path search).
+  Function bodies moved verbatim; `clap_presets.h` keeps the full API so no
+  consumer changed. Only the include lists are per-TU now (the unused
+  `<climits>` include was dropped). Both CMake consumers (plugin lib,
+  `test_conditioning`) compile the three TUs.
+- The direct codec round-trip tests (`BinaryPresetSaveLoadRoundTrip`,
+  `JsonPresetExportImportFileRoundTrip`, `JsonStringExportImportAndValidation`)
+  already existed and cover the split — no new tests needed.
+- Docs: README tree and `PARAMETER_REFERENCE.md` §5 point at the new filenames.
+
 ## [Unreleased] - Phase 1, item #2 (see REFACTORING_PLAN.md)
 
 Data-driven parameter table. Behavior-preserving: 90/90 ctest (18 new
