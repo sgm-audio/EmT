@@ -29,7 +29,9 @@ emt_add_test(test_weight_loader test_weight_loader.cpp)
 
 emt_add_test(test_conditioning
     test_conditioning.cpp
-    ${PROJECT_SOURCE_DIR}/src/clap/clap_presets.cpp)
+    ${PROJECT_SOURCE_DIR}/src/clap/preset_bank.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/preset_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/preset_paths.cpp)
 target_link_libraries(test_conditioning PRIVATE Threads::Threads)
 target_include_directories(test_conditioning PRIVATE
     ${PROJECT_SOURCE_DIR}/extern/clap/include)

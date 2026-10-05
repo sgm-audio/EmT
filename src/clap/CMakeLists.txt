@@ -9,7 +9,9 @@ clap_state.cpp
 clap_audio_ports.cpp
 clap_tail.cpp
 clap_latency.cpp
-clap_presets.cpp
+preset_bank.cpp
+preset_codec.cpp
+preset_paths.cpp
 clap_gui.cpp
 )
 
