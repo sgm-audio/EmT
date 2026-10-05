@@ -1,0 +1,7 @@
+# Normalize line endings to LF on commit; check out native endings.
+* text=auto
+
+# Weight files and archives are binary.
+*.bin binary
+*.zip binary
+*.png binary
