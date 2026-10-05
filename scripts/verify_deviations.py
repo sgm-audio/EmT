@@ -147,6 +147,7 @@ def check_d3(build_dir: Path, no_build_checks: bool) -> Result:
     loader_h = read(CORE / "weight_loader.h")
     loader_c = read(CORE / "weight_loader.cpp")
     exporter = read(SCRIPTS / "export_mamba_weights.py")
+    fmt = read(SCRIPTS / "emt_format.py")
     trainer = read(REPO / "training" / "train.py")
 
     checks = [
@@ -154,11 +155,11 @@ def check_d3(build_dir: Path, no_build_checks: bool) -> Result:
          "uint32_t mimo_rank;" in loader_h),
         ("WeightLoader::load() refuses mimo_rank > 1 with -16",
          re.search(r"mimo_rank\s*>\s*1", loader_c) is not None
-         and "-16" in loader_c),
+         and ("-16" in loader_c or "LoadError::MimoRankRefused" in loader_c)),
         ("fits_in_static_weights_with() rejects rank-R headers",
          "mimo_rank <= 1" in loader_h),
         ("exporter writes the field and refuses rank-R",
-         "mr, 0)" in exporter and "mimo_rank={mr} is not supported" in exporter),
+         "mr, 0)" in fmt and "mimo_rank={mr} is not supported" in exporter),
         ("trainer refuses a rank-R config up front",
          'cfg.get("mimo_rank", 1)' in trainer),
     ]
