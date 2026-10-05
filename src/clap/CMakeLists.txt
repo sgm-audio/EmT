@@ -3,6 +3,7 @@ clap_entry.cpp
 clap_fx_plugin.cpp
 clap_plugin.cpp
 clap_params.cpp
+param_table.cpp
 clap_note_ports.cpp
 clap_state.cpp
 clap_audio_ports.cpp

@@ -1,6 +1,7 @@
 #include "clap/clap_plugin.h"
 #include "clap/clap_common_utils.h"
 #include "clap/clap_gui.h"
+#include "clap/param_table.h"
 #include "config.h"
 #include <cstring>
 #include <cmath>
@@ -54,40 +55,11 @@ static void recompute_smooth_coefficients(MambaSynth* m) {
     }
 }
 
-// Initialize per-parameter metadata (range, curve, smoothing time).
-// Defaults: linear, 10ms smoothing, ranges from previous design.
+// Initialize per-parameter metadata (range, curve, smoothing time) from the
+// shared table. Array-size deduction in init_param_smooth fails to compile
+// if the smoothing array and the table ever disagree on PARAM_COUNT.
 static void init_param_metadata(MambaSynth* m) {
-    auto& p = m->params;
-
-    p[PARAM_GAIN].min_value = 0.0;
-    p[PARAM_GAIN].max_value = 2.0;
-    p[PARAM_GAIN].default_value = 1.0;
-    p[PARAM_GAIN].curve = PARAM_CURVE_LOG;
-    p[PARAM_GAIN].smooth_time_s = 0.010f;
-
-    p[PARAM_ATTACK].min_value = 0.001;
-    p[PARAM_ATTACK].max_value = 1.0;
-    p[PARAM_ATTACK].default_value = 0.1;
-    p[PARAM_ATTACK].curve = PARAM_CURVE_LOG;
-    p[PARAM_ATTACK].smooth_time_s = 0.020f;
-
-    p[PARAM_RELEASE].min_value = 0.001;
-    p[PARAM_RELEASE].max_value = 2.0;
-    p[PARAM_RELEASE].default_value = 0.3;
-    p[PARAM_RELEASE].curve = PARAM_CURVE_LOG;
-    p[PARAM_RELEASE].smooth_time_s = 0.050f;
-
-    p[PARAM_MIX].min_value = 0.0;
-    p[PARAM_MIX].max_value = 1.0;
-    p[PARAM_MIX].default_value = 1.0;
-    p[PARAM_MIX].curve = PARAM_CURVE_LINEAR;
-    p[PARAM_MIX].smooth_time_s = 0.010f;
-
-    p[PARAM_BYPASS].min_value = 0.0;
-    p[PARAM_BYPASS].max_value = 1.0;
-    p[PARAM_BYPASS].default_value = 0.0;
-    p[PARAM_BYPASS].curve = PARAM_CURVE_STEPPED;
-    p[PARAM_BYPASS].smooth_time_s = 0.0f; // no smoothing on bypass
+    init_param_smooth(m->params, kSynthParamTable);
 }
 
 static void reset_smoothing_to_targets(MambaSynth* m) {

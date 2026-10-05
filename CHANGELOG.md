@@ -2,6 +2,37 @@
 
 All notable changes to the EmT CLAP/ARA Plugin Suite (EmT).
 
+## [Unreleased] - Phase 1, item #2 (see REFACTORING_PLAN.md)
+
+Data-driven parameter table. Behavior-preserving: 90/90 ctest (18 new
+`ParamTable.*` pins), `verify_deviations.py` 4 closed / 2 open / 0 failing.
+No DSP code touched, so the benchmark gate does not apply.
+
+### Added
+- **`src/clap/param_table.h` / `param_table.cpp`** — `constexpr ParamDesc`
+  tables for the synth (5 params) and FX (3 params): id, name, module,
+  min/max/default, curve, smoothing time, CLAP flags, and a `ParamFormat`
+  text-conversion tag. `init_param_smooth()` initializes `ParamSmooth`
+  metadata from a row; `param_value_to_text()` / `param_text_to_value()`
+  implement the moved conversions. `static_assert`s pin id/index alignment,
+  defaults-in-range, and the FX row count; `make_synth_preset_values()` (in
+  `clap_presets.h`) gives factory presets arity-checked initializers.
+- **`tests/test_param_table.cpp`** — 18 tests pinning table contents against
+  `PARAMETER_REFERENCE.md`, string lengths against the CLAP buffers, and every
+  value↔text conversion including the as-shipped quirks (O7/O8).
+
+### Changed
+- `params_get_info` / `value_to_text` / `text_to_value` (synth) and their FX
+  counterparts are thin table dispatches now; the three handwritten
+  `init_param_metadata` copies (synth, FX, test fixture) are one template call
+  each; `FactoryPreset::param_values` is a `std::array` built by the checked
+  helper; GUI slider labels read the table. Deleted the dead log knob helpers
+  (O2) and split the `fx_params_flush` one-liner, clearing both build warnings
+  (O1).
+- **`PARAMETER_REFERENCE.md`** corrected to shipped behavior: FX modules are
+  empty (O8), Gain/Mix/Bypass text parsing is documented per plugin instead of
+  jointly, and §3.4 no longer claims the removed log knob mapping.
+
 ## [Unreleased] - Phase 0 refactoring (see REFACTORING_PLAN.md)
 
 Behavior-preserving restructuring. Verified after each step: 72/72 ctest,
