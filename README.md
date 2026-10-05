@@ -3,7 +3,7 @@
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![CLAP](https://img.shields.io/badge/CLAP-1.2+-purple.svg)](https://cleveraudio.org/)
 [![ARA 2](https://img.shields.io/badge/ARA-2.0-orange.svg)](https://www.celemony.com/en/ara)
-[![CTest](https://img.shields.io/badge/tests-67%20passing-brightgreen.svg)]()
+[![CTest](https://img.shields.io/badge/tests-72%20passing-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 Real-time neural audio synthesis and effect processing plugins powered by a **Mamba-3-inspired causal state-space model (SSM)**. Delivered as low-overhead, real-time safe **CLAP** plugins with optional **ARA 2.0** integration for DAW-hosted generative workflows.
@@ -249,7 +249,7 @@ scalar FiLM/RMSNorm/SiLU work — see `ARCHITECTURE_FIDELITY.md` §3.
   extension. (Reported, not asserted: verify with `clap-validator` and the host.)
 - **Audio Thread Heap Allocations**: 0 bytes (`malloc`/`free`/`new` strictly forbidden on the audio path).
 - **Denormal Prevention**: Automatic FTZ (Flush-to-Zero) and DAZ (Denormals-are-Zero) configured in MXCSR per audio block.
-- **CTest Pass Rate**: **67/67 tests** across 7 suites. The two tests that need
+- **CTest Pass Rate**: **72/72 tests** across 7 suites (see `docs/BUILD.md` for the full checklist). The two tests that need
   generated inputs — `CppParity` (parity vectors) and
   `RealtimeSafety.FxAcceptsMultiLayerWeightsWithinLimits` (an exported model) —
   are given them by CI before `ctest`, and `MAMBA_REQUIRE_PARITY=1` turns a
@@ -265,6 +265,8 @@ scalar FiLM/RMSNorm/SiLU work — see `ARCHITECTURE_FIDELITY.md` §3.
 ---
 
 ## Build Instructions
+
+> Full guide — prerequisites, offline builds, CI-parity checklist, troubleshooting: [`docs/BUILD.md`](docs/BUILD.md).
 
 ### Prerequisites
 
@@ -315,7 +317,7 @@ ctest --test-dir build --output-on-failure
 
 ### Running CTest & Benchmarks
 
-Run CTest across all 64 registered unit and stability tests:
+Run CTest across all 72 registered unit and stability tests:
 ```powershell
 ctest --test-dir build -C Release --output-on-failure
 ```
@@ -437,7 +439,7 @@ python scripts/export_mamba_weights.py \
  │       ├── ara_playback_renderer.cpp     # Timeline region playback renderer
  │       ├── ara_editor_renderer.cpp       # Editor renderer
  │       └── ara_types.h          # ARA data structures & forward declarations
- ├── tests/                       # GoogleTest verification suite (67 tests)
+ ├── tests/                       # GoogleTest verification suite (72 tests)
  │   ├── test_ssm_block.cpp       # Recurrence, multi-layer, state parity tests
  │   ├── test_weight_loader.cpp   # mmap validation, quantization, dimension checks
  │   ├── test_conditioning.cpp    # FiLM modulation, seqlock tear resistance

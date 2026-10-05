@@ -204,7 +204,7 @@ training config produces.** `runpod_l4.yaml` — the config a customer would cop
 from this repo — is not real-time at *one* layer (≈90 % of a core), and the
 `laptop_rtx4070.yaml` default of 3 layers already sits at the 40-46 % mark on this
 machine. Anything beyond 1-2 layers in that shape needs the SIMD block path
-(Gap 1 in `GAP_ANALYSIS.md`) before it can ship.
+(Gap 1 in `docs/archive/GAP_ANALYSIS.md`) before it can ship.
 
 Other measurements from the same session:
 
