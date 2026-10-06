@@ -73,6 +73,8 @@ if(MSVC)
     target_link_options(benchmark_ssm_block PRIVATE "/STACK:16777216")
 endif()
 
+emt_add_test(test_dsp_helpers test_dsp_helpers.cpp)
+
 emt_add_test(test_stability test_stability.cpp)
 
 emt_add_test(test_realtime_safety

@@ -495,20 +495,8 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
             float voice_sum = 0.0f;
             for (uint32_t v = 0; v < MAX_VOICES; ++v) {
                 Voice& voice = m->voices[v];
-                switch (voice.stage) {
-                case VOICE_IDLE: continue;
-                case VOICE_ATTACK:
-                    voice.env += voice.attack_rate;
-                    if (voice.env >= 1.0f) { voice.env = 1.0f; voice.stage = VOICE_SUSTAIN; }
-                    break;
-                case VOICE_SUSTAIN: voice.env = 1.0f; break;
-                case VOICE_RELEASE:
-                    voice.env -= voice.release_rate;
-                    if (voice.env <= 0.0f) { voice.env = 0.0f; voice.stage = VOICE_SILENT; }
-                    break;
-                case VOICE_SILENT: voice.env = 0.0f; break;
-                default: voice.env = 0.0f; break;
-                }
+                if (voice.stage == VOICE_IDLE) continue;
+                voice_envelope_step(voice.env, voice.stage, voice.attack_rate, voice.release_rate);
                 m->voice_atomics[v].stage.store(voice.stage, std::memory_order_relaxed);
                 m->voice_atomics[v].env.store(voice.env, std::memory_order_relaxed);
                 if (voice.env <= 0.0f) continue;

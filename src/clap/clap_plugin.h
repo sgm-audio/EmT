@@ -16,6 +16,8 @@
 #include "common/conditioning_frame.h"
 #include "common/double_buffer_seqlock.h"
 #include "common/aligned_storage.h"
+#include "dsp/bypass_fader.h"
+#include "dsp/voice_envelope.h"
 #include "clap/clap_thread_check.h"
 #include "ara/ara_document_controller.h"
 #include "config.h"
@@ -58,20 +60,9 @@ struct alignas(64) ParamSmooth {
     double coeff{0.0};
 };
 
-enum BypassState : uint8_t {
-    BYPASS_PROCESSING    = 0,
-    BYPASS_FADING_OUT    = 1,
-    BYPASS_BYPASSED      = 2,
-    BYPASS_FADING_IN     = 3,
-};
-
-enum VoiceState : uint8_t {
-    VOICE_IDLE     = 0,
-    VOICE_ATTACK   = 1,
-    VOICE_SUSTAIN  = 2,
-    VOICE_RELEASE  = 3,
-    VOICE_SILENT   = 4,
-};
+// BypassState and VoiceState live in dsp/bypass_fader.h and
+// dsp/voice_envelope.h (included above) -- single definitions shared by the
+// synth, the FX plugin, and any future offline renderer.
 
 static constexpr uint32_t MAX_VOICES = 8;
 

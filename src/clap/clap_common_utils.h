@@ -1,78 +1,19 @@
 #ifndef MAMBA_CLAP_COMMON_UTILS_H
 #define MAMBA_CLAP_COMMON_UTILS_H
 
-#include <cmath>
 #include <algorithm>
 #include <cstdint>
 #include "clap/clap_plugin.h"
+#include "dsp/param_smoother.h"
+#include "dsp/bypass_fader.h"
 
 namespace mamba {
 
-// Compute one-pole lowpass filter smoothing coefficient
-inline double compute_one_pole_coeff(float smooth_time_s, double sample_rate) {
-    if (smooth_time_s <= 0.0f) return 1.0;
-    const double sr = (sample_rate > 1.0) ? sample_rate : 48000.0;
-    const double t = static_cast<double>(smooth_time_s) * sr;
-    return 1.0 - std::exp(-1.0 / t);
-}
-
-// Advance one-pole smoother step
-inline void advance_one_pole(double& cur, double target, double coeff) {
-    cur += coeff * (target - cur);
-}
-
-inline void advance_one_pole(float& cur, float target, float coeff) {
-    cur += coeff * (target - cur);
-}
-
-// 4-state crossfade bypass state machine transition
-template <typename StateType>
-inline void advance_bypass_machine(bool target, float& fade, StateType& state,
-                                   uint32_t frames, float fade_rate) {
-    const float step = static_cast<float>(frames) * fade_rate;
-    switch (state) {
-    case BYPASS_PROCESSING:
-        if (target) {
-            fade = std::min(1.0f, fade + step);
-            state = (fade >= 1.0f) ? BYPASS_BYPASSED : BYPASS_FADING_OUT;
-        }
-        break;
-    case BYPASS_FADING_OUT:
-        if (!target) {
-            fade = std::max(0.0f, fade - step);
-            if (fade <= 0.0f) state = BYPASS_PROCESSING;
-        } else {
-            fade = std::min(1.0f, fade + step);
-            if (fade >= 1.0f) state = BYPASS_BYPASSED;
-        }
-        break;
-    case BYPASS_BYPASSED:
-        if (!target) {
-            fade = std::max(0.0f, fade - step);
-            state = (fade <= 0.0f) ? BYPASS_PROCESSING : BYPASS_FADING_IN;
-        }
-        break;
-    case BYPASS_FADING_IN:
-        if (target) {
-            fade = std::min(1.0f, fade + step);
-            if (fade >= 1.0f) state = BYPASS_BYPASSED;
-        } else {
-            fade = std::max(0.0f, fade - step);
-            if (fade <= 0.0f) state = BYPASS_PROCESSING;
-        }
-        break;
-    default:
-        state = BYPASS_PROCESSING;
-        fade = 0.0f;
-        break;
-    }
-}
-
-// Dry/Wet mixing with bypass crossfade
-inline float compute_mixed_sample(float dry, float wet, float mix, float bypass_fade) {
-    const float mixed = dry * (1.0f - mix) + wet * mix;
-    return mixed * (1.0f - bypass_fade) + dry * bypass_fade;
-}
+// One-pole smoother, bypass state machine, and dry/wet+bypass mix primitives
+// live in dsp/param_smoother.h and dsp/bypass_fader.h (included above) --
+// single definitions shared by the synth, the FX plugin, and any future
+// offline renderer. They remain visible through this header so existing
+// call sites are unchanged.
 
 // Extract stereo/mono audio input
 inline float extract_audio_input(const clap_audio_buffer_t* in_bus, uint32_t sample_idx, float dry[2]) {
