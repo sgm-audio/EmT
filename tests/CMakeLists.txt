@@ -42,6 +42,16 @@ emt_add_test(test_param_table
 target_include_directories(test_param_table PRIVATE
     ${PROJECT_SOURCE_DIR}/extern/clap/include)
 
+# GUI dispatch pins link the fallback stub backend (no display needed) plus
+# preset_paths.cpp for get_preset_directory (referenced, never called here).
+emt_add_test(test_gui
+    test_gui.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/gui_common.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/gui_stub.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/preset_paths.cpp)
+target_include_directories(test_gui PRIVATE
+    ${PROJECT_SOURCE_DIR}/extern/clap/include)
+
 # Optimization level for the benchmark translation unit.  The root
 # CMakeLists already sets -O3 -mavx2 -mfma (or /O2 /arch:AVX2) in the Release
 # flags, and target_compile_options appends *after* those - so this is a

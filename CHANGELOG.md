@@ -2,6 +2,29 @@
 
 All notable changes to the EmT CLAP/ARA Plugin Suite (EmT).
 
+## [Unreleased] - Phase 1, item #4 (see REFACTORING_PLAN.md)
+
+GUI split by platform backend. Behavior-preserving: 101/101 ctest (11 new
+`GuiDispatch`/`GuiInstance`/`GuiHelpers` pins, 0 skips), `verify_deviations.py`
+4 closed / 2 open / 0 failing, benchmark gate PASS. No DSP code touched.
+
+### Changed
+- **`src/clap/clap_gui.cpp` (863 lines, ~15 platform `#if`s) → five files**:
+  `gui_common.cpp` (host-facing dispatch + shared helpers), `gui_x11.cpp` and
+  `gui_win32.cpp` (backends, moved verbatim), `gui_stub.cpp` (fallback that
+  reports unsupported — the macOS/Cocoa insertion point), and `gui_backend.h`
+  (the seam: `GuiInstance` + `gui_backend_*` + shared helpers). CMake compiles
+  exactly one backend per platform. Only 3 `#if`s remain, all in the header.
+- The seam is free functions + CMake selection, not a virtual `IGuiBackend`:
+  the backend is fixed at compile time, so virtual dispatch would be pure
+  overhead. Deliberate micro-changes: `win32_timer_id` is `uintptr_t`
+  (identical to `UINT_PTR`); handle types are forward-declared so the header
+  needs no system GUI headers; the Win32 `GetModuleHandleEx` anchor moved to
+  `&gui_backend_set_parent` (same module).
+- Docs: README tree + test counts (101 across 9 binaries), `AGENTS.md` known
+  limitation corrected (it claimed Windows had no GUI), new observation O9
+  (CI `startup_failure` — no signal, needs separate diagnosis).
+
 ## [Unreleased] - Phase 1, item #3 (see REFACTORING_PLAN.md)
 
 Preset TU split. Pure code motion, verified behavior-preserving: 90/90 ctest
