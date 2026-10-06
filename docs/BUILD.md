@@ -63,7 +63,7 @@ C++/Python parity test silently skips and a green run proves nothing:
 python3 scripts/reference_mamba3.py --generate --output-dir build
 ```
 
-Then run the suite (101 tests across 9 binaries, plus `clap-validator` when
+Then run the suite (125 tests across 10 binaries, plus `clap-validator` when
 the tool is installed):
 
 ```bash

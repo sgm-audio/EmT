@@ -2,6 +2,31 @@
 
 All notable changes to the EmT CLAP/ARA Plugin Suite (EmT).
 
+## [Unreleased] - Phase 1, item #8 (see REFACTORING_PLAN.md)
+
+RT DSP helpers extracted to header-only `src/dsp/`. Behavior-preserving:
+125/125 ctest (24 new `test_dsp_helpers` vectors, 0 skips),
+`verify_deviations.py` 4 closed / 2 open / 0 failing, benchmark gate PASS
+(5.5 us/sample worst vs 5.9 before -- machine noise; the benchmark covers
+the SSM core, not these paths).
+
+### Changed
+- **New `src/dsp/` (no CLAP includes, reusable for the ARA offline renderer)**:
+  `param_smoother.h` (one-pole coefficient + double/float advance),
+  `bypass_fader.h` (`BypassState` + 4-state machine + `compute_mixed_sample`),
+  `voice_envelope.h` (`VoiceState` + per-sample envelope step). Each carries a
+  no-alloc contract, enforced at runtime by a glibc heap-growth check.
+- `BypassState`/`VoiceState` moved out of `clap_plugin.h` (single definitions);
+  smoother/bypass stay visible through `clap_common_utils.h`, so the synth and
+  FX call sites are byte-identical -- both now resolve to the one tested home.
+  The voice-loop switch became a `voice_envelope_step()` call (IDLE `continue`
+  guard and `default`-branch quirk preserved verbatim).
+- Deliberately out of scope: unifying the FX inline per-sample fade with the
+  synth 4-state machine (observable behavior differs; item #1), and wiring the
+  Attack/Release knobs to the envelope rates (behavior change; new O10).
+- Docs: README tree + test counts (125 across 10 binaries), `PARAMETER_REFERENCE.md`
+  §§2.2--2.3/3.3 corrected to the shipped envelope behavior (fixed rates).
+
 ## [Unreleased] - Phase 1, item #4 (see REFACTORING_PLAN.md)
 
 GUI split by platform backend. Behavior-preserving: 101/101 ctest (11 new
