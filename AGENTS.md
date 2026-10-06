@@ -86,7 +86,7 @@ Mamba-3 has **no conv1d** — 0-sample algorithmic latency. `MAX_D_CONV` does no
 
 - `SSMBlock::process_block()` is a **per-sample loop stub** — no vectorized block path
 - ARA files are **custom stubs**, not `ARA::PlugIn` namespace — requires Celemony SDK
-- GUI implemented only for Linux/X11 (`clap_gui.cpp`); returns false on macOS/Windows
+- Native GUI for Linux/X11 (`gui_x11.cpp`) and Windows (`gui_win32.cpp`) behind the `gui_backend_*` seam (`gui_backend.h`); other platforms use `gui_stub.cpp`, which reports unsupported (macOS/Cocoa is the gap)
 - No SIMD in B/C projections (strided `[nheads][mimo_rank][d_state]` layout in `WeightLayerPointers`)
 - Process events are handled per-sample in `clap_plugin.cpp:plugin_process()` — events iterated inside the sample loop, not batched
 - Voices share one SSMInferenceCore; per-voice SSMState is save/restored each process() call

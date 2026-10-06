@@ -12,8 +12,19 @@ clap_latency.cpp
 preset_bank.cpp
 preset_codec.cpp
 preset_paths.cpp
-clap_gui.cpp
+gui_common.cpp
 )
+
+# Exactly one GUI backend implements the gui_backend_* seam declared in
+# gui_backend.h. Anything else (macOS, BSDs, ...) gets gui_stub.cpp, which
+# reports the GUI as unsupported until a native backend exists.
+if(CMAKE_SYSTEM_NAME MATCHES "Linux")
+list(APPEND CLAP_SOURCES gui_x11.cpp)
+elseif(CMAKE_SYSTEM_NAME MATCHES "Windows")
+list(APPEND CLAP_SOURCES gui_win32.cpp)
+else()
+list(APPEND CLAP_SOURCES gui_stub.cpp)
+endif()
 
 add_library(mamba_synth SHARED ${CLAP_SOURCES})
 
