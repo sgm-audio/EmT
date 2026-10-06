@@ -13,10 +13,22 @@ Usage:
 """
 
 import argparse
-import struct
 import os
 import math
+import sys
 from typing import Optional
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from emt_format import (  # noqa: E402
+    HEADER_FMT,
+    HEADER_SIZE,
+    MAX_MIMO_RANK,
+    MAX_NUM_ROPE_ANGLES,
+    WEIGHT_MAGIC,
+    WEIGHT_VERSION,
+    floats_per_layer,
+    make_header,
+)
 
 import torch
 import torch.nn as nn
@@ -263,52 +275,10 @@ class Mamba3Model(nn.Module):
 # ---------------------------------------------------------------------------
 # Flat-binary format constants (Mamba-3, version 2)
 # ---------------------------------------------------------------------------
-
-WEIGHT_MAGIC = 0x4D424D41
-WEIGHT_VERSION = 2  # Mamba-3 format
-HEADER_FMT = '<12IQII'  # 12 x uint32, uint64 wds, uint32 mimo_rank, uint32 reserved
-HEADER_SIZE = 64
-
-# Compile-time layout constants (must match C++ config.h).
-# The weight file uses these fixed-size slots regardless of actual model dims.
-MAX_MIMO_RANK = 4
-MAX_NUM_ROPE_ANGLES = 16
-
-
-def floats_per_layer(ds: int, dm: int, di: int, nh: int, mr: int,
-                     hd: int, cd: int) -> int:
-    """Compute number of float32 elements per layer (MAX_*-padded layout)."""
-    nra = MAX_NUM_ROPE_ANGLES  # padded to MAX for file layout
-    in_proj_out = di * 2 + nh * MAX_MIMO_RANK * ds * 2 + nh * 3 + nra
-    return (in_proj_out * dm +       # in_proj_w
-            nh +                      # dt_bias
-            nh * MAX_MIMO_RANK * ds + # B_bias
-            nh * MAX_MIMO_RANK * ds + # C_bias
-            ds +                      # B_norm_weight
-            ds +                      # C_norm_weight
-            nh * MAX_MIMO_RANK * hd + # mimo_x
-            nh * MAX_MIMO_RANK * hd + # mimo_z
-            nh * MAX_MIMO_RANK * hd + # mimo_o
-            nh +                      # D_proj
-            dm * di +                 # out_proj_w
-            2 * dm * cd +             # film_proj_w
-            2 * nh * cd)              # dt_film_proj_w
-
-
-def make_header(ds: int, dm: int, di: int, nh: int, hd: int,
-                nl: int, cd: int, wds: int, mr: int = 1) -> bytes:
-    """Build 64-byte WeightFileHeader (version 2, 12I Q I I layout).
-
-    `mr` (mimo_rank) is read by WeightLoader::load(): values > 1 are refused
-    because the forward pass implements rank-1 SISO only (deviation D3).
-    """
-    data = struct.pack(HEADER_FMT,
-                       WEIGHT_MAGIC, WEIGHT_VERSION,
-                       ds, dm, di, nh, nl, hd, cd,
-                       0, 0, 0,        # quantization, q_metadata_size, flags
-                       wds, mr, 0)     # weight_data_size, mimo_rank, reserved
-    assert len(data) == HEADER_SIZE
-    return data
+# Imported from emt_format.py — the single source of truth for the Python
+# side (header layout, magic/version, MAX_* file-layout strides).  The names
+# stay importable from this module for backward compatibility
+# (e.g. `from export_mamba_weights import WEIGHT_MAGIC`).
 
 
 def extract_layer_weights(block: Mamba3Block) -> bytes:
@@ -415,7 +385,7 @@ def export_model(model: Mamba3Model, output_path: str,
     if random_init:
         _random_init(model)
 
-    fpl = floats_per_layer(ds, dm, di, nh, mr, hd, cond_dim)
+    fpl = floats_per_layer(ds, dm, di, nh, hd, cond_dim)
     wds = fpl * nl * 4
 
     os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)

@@ -41,7 +41,7 @@ Everything in `namespace mamba`. Core types:
 
 ## config.h — Compile-Time Dimension Limits
 
-`src/config.h` defines `MAX_*` constants that **must be >= the actual model dimensions** stored in the weight file header, or `WeightLoader::load()` rejects with error `-14`. The export script's `--config-h` flag regenerates this file.
+`src/config.h` defines `MAX_*` constants that **must be >= the actual model dimensions** stored in the weight file header, or `WeightLoader::load()` rejects with `LoadError::DimsExceedLimits` (`-14`, locked by `static_assert`). The export script's `--config-h` flag regenerates this file.
 
 Current values:
 ```
@@ -66,7 +66,7 @@ Mamba-3 has **no conv1d** — 0-sample algorithmic latency. `MAX_D_CONV` does no
   u32 `reserved` (Python format string `'<12IQII'`)
 - `mimo_rank`: `1` is the only rank this runtime executes; `0` = legacy file
   written before the field existed (treated as 1); **`> 1` is refused by
-  `WeightLoader::load()` with error `-16`** (deviation D3). `fits_in_static_weights_with()`
+  `WeightLoader::load()` with `LoadError::MimoRankRefused` (`-16`)** (deviation D3). `fits_in_static_weights_with()`
   rejects such headers too.
 - mmap read-only (`PROT_READ`, `MAP_PRIVATE` on POSIX; `PAGE_READONLY` + `MapViewOfFile` on Windows)
 - Weights never copied into writable memory; `dequantize_layer_to()` is the only exception (INT8/FP16 → float32)
@@ -86,7 +86,7 @@ Mamba-3 has **no conv1d** — 0-sample algorithmic latency. `MAX_D_CONV` does no
 
 - `SSMBlock::process_block()` is a **per-sample loop stub** — no vectorized block path
 - ARA files are **custom stubs**, not `ARA::PlugIn` namespace — requires Celemony SDK
-- GUI implemented only for Linux/X11 (`clap_gui.cpp`); returns false on macOS/Windows
+- Native GUI for Linux/X11 (`gui_x11.cpp`) and Windows (`gui_win32.cpp`) behind the `gui_backend_*` seam (`gui_backend.h`); other platforms use `gui_stub.cpp`, which reports unsupported (macOS/Cocoa is the gap)
 - No SIMD in B/C projections (strided `[nheads][mimo_rank][d_state]` layout in `WeightLayerPointers`)
 - Process events are handled per-sample in `clap_plugin.cpp:plugin_process()` — events iterated inside the sample loop, not batched
 - Voices share one SSMInferenceCore; per-voice SSMState is save/restored each process() call

@@ -2,6 +2,7 @@
 #include "clap/clap_plugin.h"    // reuse ParamSmooth, ParamAtom, etc.
 #include "clap/clap_common_utils.h"
 #include "clap/clap_gui.h"
+#include "clap/param_table.h"
 #include "core/ssm_inference_core.h"
 #include "core/weight_loader.h"
 #include "common/ring_buffer.h"
@@ -20,6 +21,8 @@
 
 namespace mamba {
 
+static_assert(FX_PARAM_COUNT == kFxParamTableCount,
+              "FX param table row count must match FxParamId");
 
 static FxState* get_fx(const clap_plugin_t* plugin) {
     return static_cast<FxState*>(plugin->plugin_data);
@@ -31,24 +34,10 @@ static void recompute_smooth_coefficients(FxState* f) {
     }
 }
 
+// Metadata (range, curve, smoothing time) comes from the shared table; the
+// static_assert above pins the row count to FX_PARAM_COUNT.
 static void init_param_metadata(FxState* f) {
-    f->params[FX_PARAM_GAIN].min_value = 0.0;
-    f->params[FX_PARAM_GAIN].max_value = 2.0;
-    f->params[FX_PARAM_GAIN].default_value = 1.0;
-    f->params[FX_PARAM_GAIN].curve = PARAM_CURVE_LOG;
-    f->params[FX_PARAM_GAIN].smooth_time_s = 0.010f;
-
-    f->params[FX_PARAM_MIX].min_value = 0.0;
-    f->params[FX_PARAM_MIX].max_value = 1.0;
-    f->params[FX_PARAM_MIX].default_value = 1.0;
-    f->params[FX_PARAM_MIX].curve = PARAM_CURVE_LINEAR;
-    f->params[FX_PARAM_MIX].smooth_time_s = 0.010f;
-
-    f->params[FX_PARAM_BYPASS].min_value = 0.0;
-    f->params[FX_PARAM_BYPASS].max_value = 1.0;
-    f->params[FX_PARAM_BYPASS].default_value = 0.0;
-    f->params[FX_PARAM_BYPASS].curve = PARAM_CURVE_STEPPED;
-    f->params[FX_PARAM_BYPASS].smooth_time_s = 0.0f;
+    init_param_smooth(f->params, kFxParamTable);
 }
 
 // ---- CLAP plugin callbacks ----
@@ -131,12 +120,12 @@ static uint32_t fx_params_count(const clap_plugin_t*) { return FX_PARAM_COUNT; }
 static bool fx_params_get_info(const clap_plugin_t* plugin, uint32_t index, clap_param_info_t* info) {
     if (!info || index >= FX_PARAM_COUNT) return false;
     auto* f = get_fx(plugin); std::memset(info, 0, sizeof(*info));
-    info->id = index; info->cookie = &f->params[index];
-    info->min_value = f->params[index].min_value; info->max_value = f->params[index].max_value;
-    info->default_value = f->params[index].default_value; info->flags = CLAP_PARAM_IS_AUTOMATABLE;
-    if (index == FX_PARAM_BYPASS) info->flags |= CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_BYPASS;
-    const char* name = index == FX_PARAM_GAIN ? "Gain" : index == FX_PARAM_MIX ? "Mix" : "Bypass";
-    std::strncpy(info->name, name, CLAP_NAME_SIZE - 1); return true;
+    const ParamDesc& desc = kFxParamTable[index];
+    info->id = desc.id; info->cookie = &f->params[index];
+    info->min_value = desc.min_value; info->max_value = desc.max_value;
+    info->default_value = desc.default_value; info->flags = desc.clap_flags;
+    // NOTE: module intentionally left empty, as-shipped (see O8 in REFACTORING_PLAN.md).
+    std::strncpy(info->name, desc.name, CLAP_NAME_SIZE - 1); return true;
 }
 static bool fx_params_get_value(const clap_plugin_t* plugin, clap_id id, double* value) {
     if (!value || id >= FX_PARAM_COUNT) return false;
@@ -144,17 +133,16 @@ static bool fx_params_get_value(const clap_plugin_t* plugin, clap_id id, double*
 }
 static bool fx_params_value_to_text(const clap_plugin_t*, clap_id id, double value, char* out, uint32_t size) {
     if (!out || size == 0 || id >= FX_PARAM_COUNT || !std::isfinite(value)) return false;
-    if (id == FX_PARAM_BYPASS) std::snprintf(out, size, "%s", value >= 0.5 ? "On" : "Off");
-    else std::snprintf(out, size, "%.3f", value); return true;
+    return param_value_to_text(kFxParamTable[id].format, value, out, size);
 }
 static bool fx_params_text_to_value(const clap_plugin_t*, clap_id id, const char* text, double* value) {
     if (!text || !value || id >= FX_PARAM_COUNT) return false;
-    if (id == FX_PARAM_BYPASS) { *value = (!std::strcmp(text,"On") || !std::strcmp(text,"1")) ? 1.0 : 0.0; return true; }
-    char* end = nullptr; const double parsed = std::strtod(text, &end);
-    if (end == text || !std::isfinite(parsed)) return false; *value = parsed; return true;
+    const ParamDesc& desc = kFxParamTable[id];
+    return param_text_to_value(desc.format, text, desc.min_value, desc.max_value, value);
 }
 static void fx_params_flush(const clap_plugin_t* plugin, const clap_input_events_t* in, const clap_output_events_t*) {
-    if (!in) return; auto* f = get_fx(plugin);
+    if (!in) return;
+    auto* f = get_fx(plugin);
     const uint32_t count = in->size(in);
     for (uint32_t i = 0; i < count; ++i) {
         const clap_event_header_t* hdr = in->get(in, i);
@@ -229,7 +217,7 @@ static const clap_plugin_tail_t s_fx_tail = {fx_tail_get};
 
 bool fx_load_weights(FxState* f, const char* path) {
     if (!path || path[0] == '\0') return false;
-    if (f->weight_loader.load(path) != 0) return false;
+    if (f->weight_loader.load(path) != LoadError::Ok) return false;
 
     const auto& hdr = f->weight_loader.header();
     // Same rule as the synth: accept any shape that fits the compiled limits.
@@ -257,7 +245,7 @@ bool fx_load_weights(FxState* f, const char* path) {
 
     for (uint32_t layer = 0; layer < f->core_cfg.num_layers; ++layer) {
         WeightLayerPointers ptrs;
-        if (f->weight_loader.get_layer_pointers(layer, ptrs) != 0) {
+        if (f->weight_loader.get_layer_pointers(layer, ptrs) != LoadError::Ok) {
             f->weight_loader.unload();
             return false;
         }

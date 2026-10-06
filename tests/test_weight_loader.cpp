@@ -2,6 +2,7 @@
 #include "core/weight_loader.h"
 #include "core/ssm_block.h"
 #include "core/ssm_inference_core.h"
+#include "fixtures/weight_fixture.h"
 #include <cstring>
 #include <cmath>
 #include <cstdio>
@@ -9,87 +10,22 @@
 #include <string>
 #include <vector>
 #include <limits>
-#include <filesystem>
-
-#if defined(_WIN32)
-#include <windows.h>
-#include <io.h>
-static int mamba_getpid() { return static_cast<int>(GetCurrentProcessId()); }
-#define mamba_unlink _unlink
-#else
-#include <unistd.h>
-static int mamba_getpid() { return static_cast<int>(getpid()); }
-#define mamba_unlink unlink
-#endif
 
 using namespace mamba;
 
 class WeightLoaderTest : public ::testing::Test {
 protected:
-    char tmp_path_[512];
-
-    void SetUp() override {
-        std::filesystem::path p = std::filesystem::temp_directory_path() /
-            ("mamba3_test_weights_" + std::to_string(mamba_getpid()) + ".bin");
-        std::strncpy(tmp_path_, p.string().c_str(), sizeof(tmp_path_) - 1);
-        tmp_path_[sizeof(tmp_path_) - 1] = '\0';
-    }
-
-    void TearDown() override {
-        mamba_unlink(tmp_path_);
-    }
-
-    size_t floats_per_layer() const {
-        uint32_t ds = MAX_D_STATE, dm = MAX_D_MODEL, di = MAX_D_INNER;
-        uint32_t nh = MAX_NHEADS, mr = MAX_MIMO_RANK;
-        uint32_t hd = MAX_HEADDIM, cd = COND_DIM;
-        size_t in_proj_out = di * 2 + nh * mr * ds * 2 + nh * 3 + MAX_NUM_ROPE_ANGLES;
-        return in_proj_out * dm +  // in_proj_w
-               nh +                 // dt_bias
-               nh * mr * ds +       // B_bias
-               nh * mr * ds +       // C_bias
-               ds +                 // B_norm_weight
-               ds +                 // C_norm_weight
-               nh * mr * hd +       // mimo_x
-               nh * mr * hd +       // mimo_z
-               nh * mr * hd +       // mimo_o
-               nh +                 // D_proj
-               dm * di +            // out_proj_w
-               2 * dm * cd +        // film_proj_w
-               2 * nh * cd;         // dt_film_proj_w
-    }
+    // RAII temp path (unlinked on destruction); writers below share
+    // tests/fixtures/weight_fixture.h with the other suites.
+    test::TempWeightFile tmp_file_{"mamba3_test_weights_"};
 
     // `mimo_rank` defaults to 0 = legacy file written before the field existed
     // (WeightLoader treats 0 as rank 1).  Pass > 1 to exercise the D3 refusal.
     bool create_valid_weight_file(uint32_t num_layers = 1, uint32_t mimo_rank = 0) {
-        size_t fpl = floats_per_layer();
-        size_t total_floats = fpl * num_layers;
-        size_t data_size = total_floats * sizeof(float);
-
-        FILE* f = fopen(tmp_path_, "wb");
-        if (!f) return false;
-
-        WeightFileHeader hdr{};
-        hdr.magic = WEIGHT_MAGIC;
-        hdr.version = WEIGHT_VERSION;
-        hdr.d_state = MAX_D_STATE;
-        hdr.d_model = MAX_D_MODEL;
-        hdr.d_inner = MAX_D_INNER;
-        hdr.nheads = MAX_NHEADS;
-        hdr.num_layers = num_layers;
-        hdr.headdim = MAX_HEADDIM;
-        hdr.cond_dim = COND_DIM;
-        hdr.mimo_rank = mimo_rank;
-        hdr.weight_data_size = static_cast<uint64_t>(data_size);
-
-        fwrite(&hdr, sizeof(hdr), 1, f);
-
-        std::vector<float> data(total_floats, 0.1f);  // small non-zero
-        // First element set to a recognizable value
-        data[0] = -1.0f;
-        fwrite(data.data(), sizeof(float), total_floats, f);
-        fclose(f);
-        return true;
+        test::WeightFileSpec spec;
+        spec.num_layers = num_layers;
+        spec.mimo_rank = mimo_rank;
+        return test::write_weight_file(tmp_file_.path, spec);
     }
 };
 
@@ -97,8 +33,8 @@ TEST_F(WeightLoaderTest, LoadValidFile) {
     ASSERT_TRUE(create_valid_weight_file());
 
     WeightLoader loader;
-    int rc = loader.load(tmp_path_);
-    EXPECT_EQ(rc, 0);
+    LoadError rc = loader.load(tmp_file_.path);
+    EXPECT_EQ(rc, LoadError::Ok);
     EXPECT_TRUE(loader.is_loaded());
     EXPECT_EQ(loader.get_num_layers(), 1u);
 
@@ -113,8 +49,8 @@ TEST_F(WeightLoaderTest, RejectsUnimplementedMimoRank) {
     ASSERT_TRUE(create_valid_weight_file(/*num_layers=*/1, /*mimo_rank=*/2));
 
     WeightLoader loader;
-    int rc = loader.load(tmp_path_);
-    EXPECT_EQ(rc, -16) << "rank-2 MIMO file must be refused with the dedicated "
+    LoadError rc = loader.load(tmp_file_.path);
+    EXPECT_EQ(rc, LoadError::MimoRankRefused) << "rank-2 MIMO file must be refused with the dedicated "
                           "error code, not loaded";
     EXPECT_FALSE(loader.is_loaded());
     EXPECT_FALSE(loader.fits_in_static_weights());
@@ -126,7 +62,7 @@ TEST_F(WeightLoaderTest, LegacyHeaderWithoutMimoFieldIsRankOne) {
     ASSERT_TRUE(create_valid_weight_file(/*num_layers=*/1, /*mimo_rank=*/0));
 
     WeightLoader loader;
-    EXPECT_EQ(loader.load(tmp_path_), 0);
+    EXPECT_EQ(loader.load(tmp_file_.path), LoadError::Ok);
     EXPECT_TRUE(loader.is_loaded());
     EXPECT_EQ(loader.header().mimo_rank, 0u);
     EXPECT_TRUE(loader.fits_in_static_weights());
@@ -134,8 +70,8 @@ TEST_F(WeightLoaderTest, LegacyHeaderWithoutMimoFieldIsRankOne) {
 
 TEST_F(WeightLoaderTest, LoadNonexistentFile) {
     WeightLoader loader;
-    int rc = loader.load("/tmp/mamba3_nonexistent_weights.bin");
-    EXPECT_NE(rc, 0);
+    LoadError rc = loader.load("/tmp/mamba3_nonexistent_weights.bin");
+    EXPECT_NE(rc, LoadError::Ok);
     EXPECT_FALSE(loader.is_loaded());
 }
 
@@ -143,7 +79,7 @@ TEST_F(WeightLoaderTest, ValidateDimensions) {
     ASSERT_TRUE(create_valid_weight_file());
 
     WeightLoader loader;
-    ASSERT_EQ(loader.load(tmp_path_), 0);
+    ASSERT_EQ(loader.load(tmp_file_.path), LoadError::Ok);
 
     const auto& hdr = loader.header();
     EXPECT_TRUE(loader.validate_dimensions(
@@ -160,11 +96,11 @@ TEST_F(WeightLoaderTest, GetLayerPointers) {
     ASSERT_TRUE(create_valid_weight_file());
 
     WeightLoader loader;
-    ASSERT_EQ(loader.load(tmp_path_), 0);
+    ASSERT_EQ(loader.load(tmp_file_.path), LoadError::Ok);
 
     WeightLayerPointers ptrs;
-    int rc = loader.get_layer_pointers(0, ptrs);
-    EXPECT_EQ(rc, 0);
+    LoadError rc = loader.get_layer_pointers(0, ptrs);
+    EXPECT_EQ(rc, LoadError::Ok);
     EXPECT_NE(ptrs.in_proj_w, nullptr);
     EXPECT_NE(ptrs.dt_bias, nullptr);
     EXPECT_NE(ptrs.B_bias, nullptr);
@@ -182,7 +118,7 @@ TEST_F(WeightLoaderTest, GetLayerPointers) {
     EXPECT_FLOAT_EQ(ptrs.in_proj_w[0], -1.0f);
 
     rc = loader.get_layer_pointers(1, ptrs);
-    EXPECT_NE(rc, 0);
+    EXPECT_NE(rc, LoadError::Ok);
 
     loader.unload();
 }
@@ -193,20 +129,20 @@ TEST_F(WeightLoaderTest, LoadMultiLayer) {
     ASSERT_TRUE(create_valid_weight_file(kNumLayers));
 
     WeightLoader loader;
-    ASSERT_EQ(loader.load(tmp_path_), 0);
+    ASSERT_EQ(loader.load(tmp_file_.path), LoadError::Ok);
     EXPECT_EQ(loader.get_num_layers(), kNumLayers);
 
     WeightLayerPointers ptrs;
     for (uint32_t i = 0; i < kNumLayers; ++i) {
-        EXPECT_EQ(loader.get_layer_pointers(i, ptrs), 0);
+        EXPECT_EQ(loader.get_layer_pointers(i, ptrs), LoadError::Ok);
     }
-    EXPECT_NE(loader.get_layer_pointers(kNumLayers, ptrs), 0);
+    EXPECT_NE(loader.get_layer_pointers(kNumLayers, ptrs), LoadError::Ok);
 
     loader.unload();
 }
 
 TEST_F(WeightLoaderTest, BadMagic) {
-    FILE* f = fopen(tmp_path_, "wb");
+    FILE* f = fopen(tmp_file_.path, "wb");
     ASSERT_NE(f, nullptr);
     WeightFileHeader hdr{};
     hdr.magic = 0xDEADBEEF;
@@ -217,11 +153,11 @@ TEST_F(WeightLoaderTest, BadMagic) {
     fclose(f);
 
     WeightLoader loader;
-    EXPECT_EQ(loader.load(tmp_path_), -11);
+    EXPECT_EQ(loader.load(tmp_file_.path), LoadError::BadMagic);
 }
 
 TEST_F(WeightLoaderTest, BadVersion) {
-    FILE* f = fopen(tmp_path_, "wb");
+    FILE* f = fopen(tmp_file_.path, "wb");
     ASSERT_NE(f, nullptr);
     WeightFileHeader hdr{};
     hdr.magic = WEIGHT_MAGIC;
@@ -232,55 +168,36 @@ TEST_F(WeightLoaderTest, BadVersion) {
     fclose(f);
 
     WeightLoader loader;
-    EXPECT_EQ(loader.load(tmp_path_), -12);
+    EXPECT_EQ(loader.load(tmp_file_.path), LoadError::BadVersion);
 }
 
 TEST_F(WeightLoaderTest, FileTooSmall) {
-    FILE* f = fopen(tmp_path_, "wb");
+    FILE* f = fopen(tmp_file_.path, "wb");
     ASSERT_NE(f, nullptr);
     uint32_t bad = 0;
     fwrite(&bad, sizeof(bad), 1, f);
     fclose(f);
 
     WeightLoader loader;
-    EXPECT_EQ(loader.load(tmp_path_), -10);
+    EXPECT_EQ(loader.load(tmp_file_.path), LoadError::FileTooSmall);
 }
 
 TEST(WeightIntegration, LoadWeightsThenProcessNonZero) {
-    char tmp_path[512];
-    std::filesystem::path p = std::filesystem::temp_directory_path() /
-        ("mamba3_integration_" + std::to_string(mamba_getpid()) + ".bin");
-    std::strncpy(tmp_path, p.string().c_str(), sizeof(tmp_path) - 1);
-    tmp_path[sizeof(tmp_path) - 1] = '\0';
+    test::TempWeightFile tmp("mamba3_integration_");
+    const char* tmp_path = tmp.path;
 
     uint32_t ds = MAX_D_STATE, dm = MAX_D_MODEL, di = MAX_D_INNER;
     uint32_t nh = MAX_NHEADS, mr = MAX_MIMO_RANK;
-    uint32_t hd = MAX_HEADDIM, cd = COND_DIM, nra = MAX_NUM_ROPE_ANGLES;
-    size_t in_proj_out = di * 2 + nh * mr * ds * 2 + nh * 3 + nra;
+    uint32_t hd = MAX_HEADDIM;
+    size_t in_proj_out = test::in_proj_out_for(di, nh, ds);
 
-    size_t fpl = in_proj_out * dm + nh + nh * mr * ds + nh * mr * ds +
-                 ds + ds + nh * mr * hd + nh * mr * hd + nh * mr * hd +
-                 nh + dm * di + 2 * dm * cd + 2 * nh * cd;
-    size_t total_floats = fpl * 2;
-    size_t data_size = total_floats * sizeof(float);
-
-    FILE* f = fopen(tmp_path, "wb");
-    ASSERT_NE(f, nullptr);
-    WeightFileHeader hdr{};
-    hdr.magic = WEIGHT_MAGIC;
-    hdr.version = WEIGHT_VERSION;
-    hdr.d_state = ds; hdr.d_model = dm; hdr.d_inner = di;
-    hdr.nheads = nh; hdr.num_layers = 2; hdr.headdim = hd;
-    hdr.cond_dim = cd;
-    hdr.weight_data_size = static_cast<uint64_t>(data_size);
-    fwrite(&hdr, sizeof(hdr), 1, f);
-
-    std::vector<float> wdata(total_floats, 0.1f);
-    fwrite(wdata.data(), sizeof(float), total_floats, f);
-    fclose(f);
+    test::WeightFileSpec spec;
+    spec.num_layers = 2;
+    spec.mark_first = false;  // uniform 0.1f payload, as before
+    ASSERT_TRUE(test::write_weight_file(tmp_path, spec));
 
     WeightLoader loader;
-    ASSERT_EQ(loader.load(tmp_path), 0);
+    ASSERT_EQ(loader.load(tmp_path), LoadError::Ok);
 
     const auto& lhdr = loader.header();
     ASSERT_TRUE(loader.validate_dimensions(
@@ -295,7 +212,7 @@ TEST(WeightIntegration, LoadWeightsThenProcessNonZero) {
 
     for (uint32_t layer = 0; layer < 2; ++layer) {
         WeightLayerPointers ptrs;
-        ASSERT_EQ(loader.get_layer_pointers(layer, ptrs), 0);
+        ASSERT_EQ(loader.get_layer_pointers(layer, ptrs), LoadError::Ok);
 
         SSMWeights w{};
         std::memcpy(w.in_proj_w, ptrs.in_proj_w, in_proj_out * dm * sizeof(float));
@@ -319,7 +236,6 @@ TEST(WeightIntegration, LoadWeightsThenProcessNonZero) {
     EXPECT_FALSE(std::isinf(outbuf[0]));
 
     loader.unload();
-    mamba_unlink(tmp_path);
 }
 
 // FP16 tests unchanged
@@ -362,28 +278,20 @@ TEST(FP16, RoundTripKnownValues) {
 }
 
 namespace {
-struct QFile { char path[512]; ~QFile() { mamba_unlink(path); } };
+// Movable RAII temp file; callers keep using `qf.path`.
+using QFile = test::TempWeightFile;
 
 QFile make_i8_per_layer_file(float scale, int32_t zp) {
-    char tmp[512];
-    std::filesystem::path p = std::filesystem::temp_directory_path() /
-        ("mamba3_q8_" + std::to_string(mamba_getpid()) + ".bin");
-    std::strncpy(tmp, p.string().c_str(), sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
+    QFile tmp("mamba3_q8_");
 
     uint32_t ds = MAX_D_STATE, dm = MAX_D_MODEL, di = MAX_D_INNER;
-    uint32_t nh = MAX_NHEADS, mr = MAX_MIMO_RANK;
-    uint32_t hd = MAX_HEADDIM, cd = COND_DIM, nra = MAX_NUM_ROPE_ANGLES;
-    size_t in_proj_out = di * 2 + nh * mr * ds * 2 + nh * 3 + nra;
-
-    size_t elems = in_proj_out * dm + nh + nh*mr*ds + nh*mr*ds +
-                   ds + ds + nh*mr*hd + nh*mr*hd + nh*mr*hd +
-                   nh + dm*di + 2*dm*cd + 2*nh*cd;
-    size_t bytes_per_layer = elems;
+    uint32_t nh = MAX_NHEADS;
+    uint32_t hd = MAX_HEADDIM, cd = COND_DIM;
+    size_t bytes_per_layer = test::floats_per_layer_for(ds, dm, di, nh, hd, cd);
     size_t q_meta_size = sizeof(float) + sizeof(int32_t) + 8;
     size_t weight_data_size = bytes_per_layer;
 
-    std::FILE* f = std::fopen(tmp, "wb");
+    std::FILE* f = std::fopen(tmp.path, "wb");
     WeightFileHeader hdr{};
     hdr.magic = WEIGHT_MAGIC;
     hdr.version = WEIGHT_VERSION;
@@ -412,25 +320,23 @@ QFile make_i8_per_layer_file(float scale, int32_t zp) {
     std::fwrite(data.data(), 1, weight_data_size, f);
     std::fclose(f);
 
-    QFile result;
-    std::strncpy(result.path, tmp, sizeof(result.path) - 1);
-    return result;
+    return tmp;
 }
 } // namespace
 
 TEST(WeightQuantization, Int8PerLayerRoundTrip) {
     QFile qf = make_i8_per_layer_file(0.01f, 0);
     WeightLoader loader;
-    ASSERT_EQ(loader.load(qf.path), 0);
+    ASSERT_EQ(loader.load(qf.path), LoadError::Ok);
     ASSERT_EQ(loader.quant_format(), QuantFormat::Int8PerLayer);
 
     LayerQParam qp;
-    ASSERT_EQ(loader.get_layer_qparam(0, qp), 0);
+    ASSERT_EQ(loader.get_layer_qparam(0, qp), LoadError::Ok);
     EXPECT_FLOAT_EQ(qp.scale, 0.01f);
     EXPECT_EQ(qp.zero_point, 0);
 
     SSMWeights w{};
-    ASSERT_EQ(loader.dequantize_layer_to(0, w), 0);
+    ASSERT_EQ(loader.dequantize_layer_to(0, w), LoadError::Ok);
 
     EXPECT_NEAR(w.in_proj_w[0][0], 0.0f, 1e-6f);  // data[0]=0, out = 0.01*(0-0)=0
     EXPECT_NEAR(w.in_proj_w[0][1], 0.01f, 1e-6f); // data[1]=1, out = 0.01*(1-0)=0.01
@@ -441,10 +347,10 @@ TEST(WeightQuantization, Int8PerLayerRoundTrip) {
 TEST(WeightQuantization, Int8PerLayerOffsetAndScale) {
     QFile qf = make_i8_per_layer_file(0.5f, 10);
     WeightLoader loader;
-    ASSERT_EQ(loader.load(qf.path), 0);
+    ASSERT_EQ(loader.load(qf.path), LoadError::Ok);
 
     SSMWeights w{};
-    ASSERT_EQ(loader.dequantize_layer_to(0, w), 0);
+    ASSERT_EQ(loader.dequantize_layer_to(0, w), LoadError::Ok);
     EXPECT_NEAR(w.in_proj_w[0][0], 0.0f, 1e-6f);  // data[0]=10, out=0.5*(10-10)=0
     EXPECT_NEAR(w.in_proj_w[0][1], 0.5f, 1e-6f);  // data[1]=11, out=0.5*(11-10)=0.5
     loader.unload();
@@ -453,24 +359,22 @@ TEST(WeightQuantization, Int8PerLayerOffsetAndScale) {
 TEST(WeightQuantization, RejectsWrongFormatAccess) {
     QFile qf = make_i8_per_layer_file(0.01f, 0);
     WeightLoader loader;
-    ASSERT_EQ(loader.load(qf.path), 0);
+    ASSERT_EQ(loader.load(qf.path), LoadError::Ok);
 
     WeightLayerPointers fp;
-    EXPECT_NE(loader.get_layer_pointers(0, fp), 0);
+    EXPECT_NE(loader.get_layer_pointers(0, fp), LoadError::Ok);
     WeightLayerPointersF16 f16p;
-    EXPECT_NE(loader.get_layer_pointers_f16(0, f16p), 0);
+    EXPECT_NE(loader.get_layer_pointers_f16(0, f16p), LoadError::Ok);
     TensorQParam tqp;
-    EXPECT_NE(loader.get_tensor_qparam(tqp), 0);
+    EXPECT_NE(loader.get_tensor_qparam(tqp), LoadError::Ok);
 
     loader.unload();
 }
 
 // Path resolution tests
 TEST(WeightLoaderPath, MAMBAWeightsEnvVar) {
-    char tmp_path[512];
-    std::filesystem::path p = std::filesystem::temp_directory_path() /
-        ("mamba3_env_" + std::to_string(mamba_getpid()) + ".bin");
-    std::strncpy(tmp_path, p.string().c_str(), sizeof(tmp_path) - 1);
+    test::TempWeightFile tmp("mamba3_env_");
+    const char* tmp_path = tmp.path;
 
     WeightFileHeader hdr{};
     hdr.magic = WEIGHT_MAGIC;
@@ -479,11 +383,9 @@ TEST(WeightLoaderPath, MAMBAWeightsEnvVar) {
     hdr.nheads = 1; hdr.num_layers = 1; hdr.headdim = 1;
     hdr.cond_dim = 1;
     // Must match bytes_per_layer() which uses MAX_MIMO_RANK and MAX_NUM_ROPE_ANGLES
-    size_t ds = hdr.d_state, dm = hdr.d_model, di = hdr.d_inner;
-    size_t nh = hdr.nheads, hd = hdr.headdim, cd = hdr.cond_dim;
-    size_t in_proj_out = di * 2 + nh * MAX_MIMO_RANK * ds * 2 + nh * 3 + MAX_NUM_ROPE_ANGLES;
-    size_t fpl = in_proj_out * dm + nh + nh * MAX_MIMO_RANK * ds * 2 + ds * 2
-               + nh * MAX_MIMO_RANK * hd * 3 + nh + dm * di + 2 * dm * cd + 2 * nh * cd;
+    uint32_t ds = hdr.d_state, dm = hdr.d_model, di = hdr.d_inner;
+    uint32_t nh = hdr.nheads, hd = hdr.headdim, cd = hdr.cond_dim;
+    size_t fpl = test::floats_per_layer_for(ds, dm, di, nh, hd, cd);
     hdr.weight_data_size = fpl * sizeof(float);
     std::FILE* f = std::fopen(tmp_path, "wb");
     std::fwrite(&hdr, sizeof(hdr), 1, f);
@@ -497,8 +399,8 @@ TEST(WeightLoaderPath, MAMBAWeightsEnvVar) {
     ::setenv("EMT_WEIGHTS", tmp_path, 1);
 #endif
     WeightLoader loader;
-    int rc = loader.load();
-    EXPECT_EQ(rc, 0);
+    LoadError rc = loader.load();
+    EXPECT_EQ(rc, LoadError::Ok);
     EXPECT_STREQ(loader.source_path(), tmp_path);
     loader.unload();
 #ifdef _WIN32
@@ -506,14 +408,11 @@ TEST(WeightLoaderPath, MAMBAWeightsEnvVar) {
 #else
     ::unsetenv("EMT_WEIGHTS");
 #endif
-    mamba_unlink(tmp_path);
 }
 
 TEST(WeightLoaderPath, RejectsOutOfBoundsDimensions) {
-    char tmp_path[512];
-    std::filesystem::path p = std::filesystem::temp_directory_path() /
-        ("mamba3_oob_" + std::to_string(mamba_getpid()) + ".bin");
-    std::strncpy(tmp_path, p.string().c_str(), sizeof(tmp_path) - 1);
+    test::TempWeightFile tmp("mamba3_oob_");
+    const char* tmp_path = tmp.path;
 
     WeightFileHeader hdr{};
     hdr.magic = WEIGHT_MAGIC;
@@ -533,8 +432,7 @@ TEST(WeightLoaderPath, RejectsOutOfBoundsDimensions) {
     std::fclose(f);
 
     WeightLoader loader;
-    EXPECT_EQ(loader.load(tmp_path), -14);
-    mamba_unlink(tmp_path);
+    EXPECT_EQ(loader.load(tmp_path), LoadError::DimsExceedLimits);
 }
 
 TEST(WeightLoaderPath, FitsInStaticWeights) {

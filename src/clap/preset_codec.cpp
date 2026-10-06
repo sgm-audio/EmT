@@ -1,148 +1,20 @@
+// Preset file/JSON codecs: binary .mambapreset save/load and JSON
+// export/import over plain structs. Split out of clap_presets.cpp
+// (Phase 1 #3); see preset_bank.cpp (factory data) and preset_paths.cpp
+// (directories).
 #include "clap/clap_presets.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <climits>
-#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
 #include <algorithm>
 #include <cmath>
-#include <array>
 #include <utility>
 #include <memory>
 
 namespace mamba {
-
-// ---------------------------------------------------------------------------
-// Factory Preset Bank
-// ---------------------------------------------------------------------------
-
-const std::array<FactoryPreset, kFactoryPresetCount> kFactoryPresets = {{
-    {
-        "01 - Mamba Default",
-        "Default",
-        { 1.0, 0.100, 0.300, 1.0, 0.0 },
-        false,
-        0.0f,
-        ""
-    },
-    {
-        "02 - Dark Lead",
-        "Lead",
-        { 1.2, 0.015, 0.400, 0.85, 0.0 },
-        false,
-        0.0f,
-        ""
-    },
-    {
-        "03 - Lush Pad",
-        "Pad",
-        { 0.9, 0.600, 1.500, 1.0, 0.0 },
-        false,
-        0.0f,
-        ""
-    },
-    {
-        "04 - Resonant Sub",
-        "Bass",
-        { 1.4, 0.005, 0.250, 1.0, 0.0 },
-        false,
-        0.0f,
-        ""
-    },
-    {
-        "05 - Fast Perc",
-        "Percussion",
-        { 1.1, 0.001, 0.050, 1.0, 0.0 },
-        false,
-        0.0f,
-        ""
-    },
-    {
-        "06 - Neural Delay",
-        "FX",
-        { 0.85, 0.050, 0.800, 0.5, 0.0 },
-        false,
-        0.0f,
-        ""
-    }
-}};
-
-size_t get_factory_preset_count() {
-    return kFactoryPresetCount;
-}
-
-const FactoryPreset* get_factory_preset(size_t index) {
-    if (index >= kFactoryPresetCount) return nullptr;
-    return &kFactoryPresets[index];
-}
-
-const FactoryPreset* find_factory_preset(const char* name) {
-    if (!name || !name[0]) return nullptr;
-    for (size_t i = 0; i < kFactoryPresetCount; ++i) {
-        if (std::strcmp(kFactoryPresets[i].name, name) == 0) {
-            return &kFactoryPresets[i];
-        }
-    }
-    return nullptr;
-}
-
-bool apply_factory_preset(MambaSynth* m, const FactoryPreset* fp) {
-    if (!m || !fp) return false;
-
-    for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
-        double v = fp->param_values[i];
-        if (v < m->params[i].min_value) v = m->params[i].min_value;
-        if (v > m->params[i].max_value) v = m->params[i].max_value;
-        m->param_values[i].store(v, std::memory_order_release);
-        m->params[i].target.store(v, std::memory_order_release);
-        m->params[i].current.store(v, std::memory_order_release);
-    }
-    m->bypass_target.store(fp->bypass_target, std::memory_order_release);
-    m->bypass_fade.store(fp->bypass_fade, std::memory_order_relaxed);
-    m->bypass_state.store(
-        fp->bypass_target ? BYPASS_BYPASSED : BYPASS_PROCESSING,
-        std::memory_order_relaxed);
-
-    if (fp->weight_path && fp->weight_path[0]) {
-        char resolved[MambaSynth::MAX_WEIGHT_PATH]{};
-        if (resolve_weight_path(fp->weight_path, resolved, sizeof(resolved))) {
-            if (std::strcmp(resolved, m->weight_path) != 0) {
-                m->load_weights(resolved);
-            }
-        }
-    }
-
-    if (!m->is_processing) {
-        StateMirror* slot = m->state_mirror.begin_write();
-        if (slot) {
-            for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
-                slot->param_values[i] = m->param_values[i].load(std::memory_order_acquire);
-            }
-            slot->bypass_target = fp->bypass_target;
-            slot->bypass_fade = fp->bypass_fade;
-            if (fp->weight_path && fp->weight_path[0]) {
-                std::strncpy(slot->weight_path, fp->weight_path, kMaxWeightPath - 1);
-                slot->weight_path[kMaxWeightPath - 1] = '\0';
-            }
-            m->state_mirror.end_write();
-        }
-    }
-
-    return true;
-}
-
-bool apply_factory_preset(MambaSynth* m, size_t index) {
-    const FactoryPreset* fp = get_factory_preset(index);
-    return apply_factory_preset(m, fp);
-}
-
-bool apply_factory_preset(MambaSynth* m, const char* name) {
-    const FactoryPreset* fp = find_factory_preset(name);
-    return apply_factory_preset(m, fp);
-}
 
 namespace {
 
@@ -390,46 +262,6 @@ private:
 };
 
 } // namespace
-
-bool get_preset_directory(char* out, size_t out_size) {
-    // Linux: $XDG_DATA_HOME/clap/presets/com.mamba-ssm.synth/
-    const char* xdg = std::getenv("XDG_DATA_HOME");
-    std::string base;
-    if (xdg && xdg[0]) {
-        base = xdg;
-    } else {
-        const char* home = std::getenv("HOME");
-#if defined(_WIN32)
-        if (!home) home = std::getenv("USERPROFILE");
-        if (!home) home = std::getenv("APPDATA");
-#endif
-        if (!home) return false;
-        base = std::string(home) + "/.local/share";
-    }
-    std::string dir = base + "/clap/presets/com.mamba-ssm.synth";
-    std::filesystem::create_directories(dir);
-    std::strncpy(out, dir.c_str(), out_size - 1);
-    out[out_size - 1] = '\0';
-    return true;
-}
-
-int scan_presets(const char* dir, char names[][kMaxPresetName], int max_presets) {
-    int count = 0;
-    if (!dir) return 0;
-    std::error_code ec;
-    if (!std::filesystem::is_directory(dir, ec)) return 0;
-    for (auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (!entry.is_regular_file()) continue;
-        auto path = entry.path();
-        if (path.extension() != ".mambapreset" && path.extension() != ".json") continue;
-        if (count >= max_presets) break;
-        std::string stem = path.stem().string();
-        std::strncpy(names[count], stem.c_str(), kMaxPresetName - 1);
-        names[count][kMaxPresetName - 1] = '\0';
-        count++;
-    }
-    return count;
-}
 
 bool save_preset(MambaSynth* m, const char* path, const char* name) {
     if (!m || !path) return false;
@@ -924,61 +756,6 @@ bool export_factory_preset_json(const FactoryPreset& fp, std::string& out_json) 
     );
     out_json = buf;
     return true;
-}
-
-bool resolve_weight_path(const char* path, char* out, size_t out_size) {
-    if (!path || !path[0]) return false;
-
-    // 1. Try path as-is
-    if (std::filesystem::exists(path)) {
-        std::strncpy(out, path, out_size - 1);
-        out[out_size - 1] = '\0';
-        return true;
-    }
-
-    // 2. Try relative to preset directory
-    char preset_dir[512] = {0};
-    if (get_preset_directory(preset_dir, sizeof(preset_dir))) {
-        std::string candidate = std::string(preset_dir) + "/" + path;
-        if (std::filesystem::exists(candidate)) {
-            std::strncpy(out, candidate.c_str(), out_size - 1);
-            out[out_size - 1] = '\0';
-            return true;
-        }
-        candidate = std::string(preset_dir) + "/../weights/" + path;
-        if (std::filesystem::exists(candidate)) {
-            std::strncpy(out, candidate.c_str(), out_size - 1);
-            out[out_size - 1] = '\0';
-            return true;
-        }
-    }
-
-    // 3. Try $EMT_WEIGHTS_DIR / $MAMBA_WEIGHTS_DIR
-    const char* mwd = std::getenv("EMT_WEIGHTS_DIR");
-    if (!mwd || !mwd[0]) mwd = std::getenv("MAMBA_WEIGHTS_DIR");
-    if (mwd && mwd[0]) {
-        std::string candidate = std::string(mwd) + "/" + path;
-        if (std::filesystem::exists(candidate)) {
-            std::strncpy(out, candidate.c_str(), out_size - 1);
-            out[out_size - 1] = '\0';
-            return true;
-        }
-    }
-
-    // 4. Try models/ relative to cwd
-    {
-        std::string candidate = std::string("models/") + path;
-        if (std::filesystem::exists(candidate)) {
-            std::strncpy(out, candidate.c_str(), out_size - 1);
-            out[out_size - 1] = '\0';
-            return true;
-        }
-    }
-
-    // Not found — return input path as-is (caller will handle failure)
-    std::strncpy(out, path, out_size - 1);
-    out[out_size - 1] = '\0';
-    return false;
 }
 
 } // namespace mamba

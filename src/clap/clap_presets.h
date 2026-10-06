@@ -27,15 +27,28 @@ static constexpr uint32_t kPresetMagic   = 0x4D425052u;
 static constexpr uint32_t kPresetVersion = 0x00020000u;
 static constexpr size_t   kMaxPresetName = 128;
 
-// Factory preset definition
+// Factory preset definition. param_values is indexed by ParamIds and must
+// always carry exactly PARAM_COUNT entries: build it with
+// make_synth_preset_values(), whose arity the compiler checks. (A bare braced
+// list would silently zero-fill a short list; std::array also keeps the
+// .size() tripwire available to validation code.)
 struct FactoryPreset {
     const char* name;
     const char* category;
-    double param_values[PARAM_COUNT];
+    std::array<double, PARAM_COUNT> param_values;
     bool bypass_target;
     float bypass_fade;
     const char* weight_path;
 };
+
+// Named-argument constructor for FactoryPreset::param_values, in ParamIds
+// order. Adding a parameter breaks the static_assert until the arity here
+// (and every call site) is updated deliberately.
+constexpr std::array<double, PARAM_COUNT> make_synth_preset_values(
+    double gain, double attack, double release, double mix, double bypass) {
+    static_assert(PARAM_COUNT == 5, "update make_synth_preset_values arity");
+    return {gain, attack, release, mix, bypass};
+}
 
 // Factory preset bank
 static constexpr size_t kFactoryPresetCount = 6;

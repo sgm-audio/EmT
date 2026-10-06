@@ -57,7 +57,7 @@ WeightLoader::~WeightLoader() {
     unload();
 }
 
-int WeightLoader::load(const char* path) {
+LoadError WeightLoader::load(const char* path) {
     unload();
 
     char resolved[512];
@@ -68,40 +68,40 @@ int WeightLoader::load(const char* path) {
     HANDLE hFile = CreateFileA(resolved, GENERIC_READ, FILE_SHARE_READ,
                                nullptr, OPEN_EXISTING,
                                FILE_ATTRIBUTE_READONLY, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) return -1;
+    if (hFile == INVALID_HANDLE_VALUE) return LoadError::OpenFailed;
 
     LARGE_INTEGER file_size;
-    if (!GetFileSizeEx(hFile, &file_size)) { CloseHandle(hFile); return -2; }
+    if (!GetFileSizeEx(hFile, &file_size)) { CloseHandle(hFile); return LoadError::StatFailed; }
     mapped_size_ = static_cast<size_t>(file_size.QuadPart);
 
     HANDLE hMap = CreateFileMappingA(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
-    if (!hMap) { CloseHandle(hFile); return -3; }
+    if (!hMap) { CloseHandle(hFile); return LoadError::MapFailed; }
 
     mapped_data_ = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
     CloseHandle(hMap);
     CloseHandle(hFile);
 
-    if (!mapped_data_) return -4;
+    if (!mapped_data_) return LoadError::MapViewFailed;
     fd_ = -1;
 #else
     fd_ = open(resolved, O_RDONLY);
-    if (fd_ < 0) return -1;
+    if (fd_ < 0) return LoadError::OpenFailed;
 
     struct stat st;
-    if (fstat(fd_, &st) < 0) { close(fd_); fd_ = -1; return -2; }
+    if (fstat(fd_, &st) < 0) { close(fd_); fd_ = -1; return LoadError::StatFailed; }
     mapped_size_ = static_cast<size_t>(st.st_size);
 
     mapped_data_ = mmap(nullptr, mapped_size_, PROT_READ, MAP_PRIVATE, fd_, 0);
     if (mapped_data_ == MAP_FAILED) {
         mapped_data_ = nullptr;
         close(fd_); fd_ = -1;
-        return -3;
+        return LoadError::MapFailed;
     }
 #endif
 
     if (mapped_size_ < sizeof(WeightFileHeader)) {
         unload();
-        return -10;
+        return LoadError::FileTooSmall;
     }
 
     header_ = static_cast<const WeightFileHeader*>(mapped_data_);
@@ -109,27 +109,27 @@ int WeightLoader::load(const char* path) {
     // Accept both version 1 (Mamba-1) and version 2 (Mamba-3)
     if (header_->magic != WEIGHT_MAGIC) {
         unload();
-        return -11;
+        return LoadError::BadMagic;
     }
 
     if (header_->version != 1 && header_->version != 2) {
         unload();
-        return -12;
+        return LoadError::BadVersion;
     }
 
     // Mamba-3 dimension validation
-    if (header_->d_state   == 0 || header_->d_state   > MAX_D_STATE)  { unload(); return -14; }
-    if (header_->d_model   == 0 || header_->d_model   > MAX_D_MODEL)  { unload(); return -14; }
-    if (header_->d_inner   == 0 || header_->d_inner   > MAX_D_INNER)  { unload(); return -14; }
-    if (header_->nheads    == 0 || header_->nheads    > MAX_NHEADS)   { unload(); return -14; }
-    if (header_->headdim   == 0 || header_->headdim   > MAX_HEADDIM)  { unload(); return -14; }
-    if (header_->cond_dim  == 0 || header_->cond_dim  > COND_DIM)     { unload(); return -14; }
-    if (header_->num_layers== 0 || header_->num_layers > MAX_LAYERS) { unload(); return -14; }
+    if (header_->d_state   == 0 || header_->d_state   > MAX_D_STATE)  { unload(); return LoadError::DimsExceedLimits; }
+    if (header_->d_model   == 0 || header_->d_model   > MAX_D_MODEL)  { unload(); return LoadError::DimsExceedLimits; }
+    if (header_->d_inner   == 0 || header_->d_inner   > MAX_D_INNER)  { unload(); return LoadError::DimsExceedLimits; }
+    if (header_->nheads    == 0 || header_->nheads    > MAX_NHEADS)   { unload(); return LoadError::DimsExceedLimits; }
+    if (header_->headdim   == 0 || header_->headdim   > MAX_HEADDIM)  { unload(); return LoadError::DimsExceedLimits; }
+    if (header_->cond_dim  == 0 || header_->cond_dim  > COND_DIM)     { unload(); return LoadError::DimsExceedLimits; }
+    if (header_->num_layers== 0 || header_->num_layers > MAX_LAYERS) { unload(); return LoadError::DimsExceedLimits; }
 
     // Validate quantization format
     if (header_->quantization > static_cast<uint32_t>(QuantFormat::FP16)) {
         unload();
-        return -15;
+        return LoadError::BadQuantFormat;
     }
 
     // Deviation D3: rank-R MIMO is reserved in the file format, but the forward
@@ -138,7 +138,7 @@ int WeightLoader::load(const char* path) {
     // 0 means "legacy file written before the field existed" -> rank 1.
     if (header_->version >= 2 && header_->mimo_rank > 1) {
         unload();
-        return -16;
+        return LoadError::MimoRankRefused;
     }
 
     // Compute offset of weight data (header + q-metadata)
@@ -151,7 +151,7 @@ int WeightLoader::load(const char* path) {
     size_t needed = sizeof(WeightFileHeader) + q_meta_size + weight_data_bytes_;
     if (needed > mapped_size_) {
         unload();
-        return -13;
+        return LoadError::TruncatedData;
     }
 
     // Per-layer size validation
@@ -159,10 +159,10 @@ int WeightLoader::load(const char* path) {
     size_t expected_total = expected_bpl * header_->num_layers;
     if (weight_data_bytes_ < expected_total) {
         unload();
-        return -13;
+        return LoadError::TruncatedData;
     }
 
-    return 0;
+    return LoadError::Ok;
 }
 
 void WeightLoader::unload() {
@@ -260,14 +260,14 @@ const uint8_t* WeightLoader::layer_base(uint32_t layer) const {
     return weight_data_ + layer * bytes_per_layer();
 }
 
-int WeightLoader::get_layer_pointers(uint32_t layer,
+LoadError WeightLoader::get_layer_pointers(uint32_t layer,
                                      WeightLayerPointers& out) const {
-    if (!header_ || !weight_data_) return -1;
-    if (quant_format() != QuantFormat::Float32) return -1;
-    if (layer >= header_->num_layers) return -2;
+    if (!header_ || !weight_data_) return LoadError::NotLoaded;
+    if (quant_format() != QuantFormat::Float32) return LoadError::WrongQuantFormat;
+    if (layer >= header_->num_layers) return LoadError::LayerOutOfRange;
 
     const uint8_t* base = layer_base(layer);
-    if (!base) return -1;
+    if (!base) return LoadError::InternalError;
     const float* fbase = reinterpret_cast<const float*>(base);
 
     uint32_t ds = header_->d_state;
@@ -296,18 +296,18 @@ int WeightLoader::get_layer_pointers(uint32_t layer,
     out.out_proj_w    = fbase + off; off += dm * di;
     out.film_proj_w   = fbase + off; off += 2 * dm * cd;
     out.dt_film_proj_w = fbase + off;
-    return 0;
+    return LoadError::Ok;
 }
 
-int WeightLoader::get_layer_pointers_i8(uint32_t layer,
+LoadError WeightLoader::get_layer_pointers_i8(uint32_t layer,
                                          WeightLayerPointersI8& out) const {
-    if (!header_ || !weight_data_) return -1;
+    if (!header_ || !weight_data_) return LoadError::NotLoaded;
     if (quant_format() != QuantFormat::Int8Tensor &&
-        quant_format() != QuantFormat::Int8PerLayer) return -1;
-    if (layer >= header_->num_layers) return -2;
+        quant_format() != QuantFormat::Int8PerLayer) return LoadError::WrongQuantFormat;
+    if (layer >= header_->num_layers) return LoadError::LayerOutOfRange;
 
     const uint8_t* base = layer_base(layer);
-    if (!base) return -1;
+    if (!base) return LoadError::InternalError;
     const int8_t* ibase = reinterpret_cast<const int8_t*>(base);
 
     uint32_t ds = header_->d_state;
@@ -336,17 +336,17 @@ int WeightLoader::get_layer_pointers_i8(uint32_t layer,
     out.out_proj_w    = ibase + off; off += dm * di;
     out.film_proj_w   = ibase + off; off += 2 * dm * cd;
     out.dt_film_proj_w = ibase + off;
-    return 0;
+    return LoadError::Ok;
 }
 
-int WeightLoader::get_layer_pointers_f16(uint32_t layer,
+LoadError WeightLoader::get_layer_pointers_f16(uint32_t layer,
                                           WeightLayerPointersF16& out) const {
-    if (!header_ || !weight_data_) return -1;
-    if (quant_format() != QuantFormat::FP16) return -1;
-    if (layer >= header_->num_layers) return -2;
+    if (!header_ || !weight_data_) return LoadError::NotLoaded;
+    if (quant_format() != QuantFormat::FP16) return LoadError::WrongQuantFormat;
+    if (layer >= header_->num_layers) return LoadError::LayerOutOfRange;
 
     const uint8_t* base = layer_base(layer);
-    if (!base) return -1;
+    if (!base) return LoadError::InternalError;
     const uint16_t* hbase = reinterpret_cast<const uint16_t*>(base);
 
     uint32_t ds = header_->d_state;
@@ -375,41 +375,41 @@ int WeightLoader::get_layer_pointers_f16(uint32_t layer,
     out.out_proj_w    = hbase + off; off += dm * di;
     out.film_proj_w   = hbase + off; off += 2 * dm * cd;
     out.dt_film_proj_w = hbase + off;
-    return 0;
+    return LoadError::Ok;
 }
 
-int WeightLoader::get_tensor_qparam(TensorQParam& out) const {
-    if (!header_) return -1;
-    if (quant_format() != QuantFormat::Int8Tensor) return -2;
+LoadError WeightLoader::get_tensor_qparam(TensorQParam& out) const {
+    if (!header_) return LoadError::NotLoaded;
+    if (quant_format() != QuantFormat::Int8Tensor) return LoadError::WrongQuantFormat;
 
-    if (header_->q_metadata_size < sizeof(TensorQMetaRaw)) return -3;
+    if (header_->q_metadata_size < sizeof(TensorQMetaRaw)) return LoadError::QMetadataTooSmall;
     const uint8_t* base = static_cast<const uint8_t*>(mapped_data_);
     const TensorQMetaRaw* m = reinterpret_cast<const TensorQMetaRaw*>(
         base + sizeof(WeightFileHeader));
     out.scale = m->scale;
     out.zero_point = m->zero_point;
-    return 0;
+    return LoadError::Ok;
 }
 
-int WeightLoader::get_layer_qparam(uint32_t layer, LayerQParam& out) const {
-    if (!header_) return -1;
-    if (quant_format() != QuantFormat::Int8PerLayer) return -2;
-    if (layer >= header_->num_layers) return -3;
+LoadError WeightLoader::get_layer_qparam(uint32_t layer, LayerQParam& out) const {
+    if (!header_) return LoadError::NotLoaded;
+    if (quant_format() != QuantFormat::Int8PerLayer) return LoadError::WrongQuantFormat;
+    if (layer >= header_->num_layers) return LoadError::LayerOutOfRange;
 
     size_t needed = sizeof(LayerQMetaRaw) * header_->num_layers;
-    if (header_->q_metadata_size < needed) return -4;
+    if (header_->q_metadata_size < needed) return LoadError::QMetadataTooSmall;
 
     const uint8_t* base = static_cast<const uint8_t*>(mapped_data_);
     const LayerQMetaRaw* m = reinterpret_cast<const LayerQMetaRaw*>(
         base + sizeof(WeightFileHeader));
     out.scale = m[layer].scale;
     out.zero_point = m[layer].zero_point;
-    return 0;
+    return LoadError::Ok;
 }
 
-int WeightLoader::dequantize_layer_to(uint32_t layer, SSMWeights& out_f32) const {
-    if (!header_ || !weight_data_) return -1;
-    if (layer >= header_->num_layers) return -2;
+LoadError WeightLoader::dequantize_layer_to(uint32_t layer, SSMWeights& out_f32) const {
+    if (!header_ || !weight_data_) return LoadError::NotLoaded;
+    if (layer >= header_->num_layers) return LoadError::LayerOutOfRange;
 
     uint32_t ds = header_->d_state;
     uint32_t dm = header_->d_model;
@@ -461,7 +461,7 @@ int WeightLoader::dequantize_layer_to(uint32_t layer, SSMWeights& out_f32) const
     switch (quant_format()) {
         case QuantFormat::Float32: {
             WeightLayerPointers p;
-            if (get_layer_pointers(layer, p) != 0) return -3;
+            if (LoadError err = get_layer_pointers(layer, p); err != LoadError::Ok) return err;
 
             copy_in_proj([&](size_t r, size_t c) { return p.in_proj_w[r * dm + c]; });
             copy_1d(out_f32.dt_bias, [&](size_t i) { return p.dt_bias[i]; }, nh);
@@ -478,13 +478,13 @@ int WeightLoader::dequantize_layer_to(uint32_t layer, SSMWeights& out_f32) const
             for (size_t r = 0; r < 2 * nh; ++r)
                 for (size_t c = 0; c < cd; ++c)
                     out_f32.dt_film_proj_w[r][c] = p.dt_film_proj_w[r * cd + c];
-            return 0;
+            return LoadError::Ok;
         }
         case QuantFormat::Int8Tensor: {
             WeightLayerPointersI8 p;
-            if (get_layer_pointers_i8(layer, p) != 0) return -3;
+            if (LoadError err = get_layer_pointers_i8(layer, p); err != LoadError::Ok) return err;
             TensorQParam qp;
-            if (get_tensor_qparam(qp) != 0) return -4;
+            if (LoadError err = get_tensor_qparam(qp); err != LoadError::Ok) return err;
 
             auto deq = [&](int8_t v) { return qp.scale * (static_cast<float>(v) - static_cast<float>(qp.zero_point)); };
 
@@ -503,13 +503,13 @@ int WeightLoader::dequantize_layer_to(uint32_t layer, SSMWeights& out_f32) const
             for (size_t r = 0; r < 2 * nh; ++r)
                 for (size_t c = 0; c < cd; ++c)
                     out_f32.dt_film_proj_w[r][c] = deq(p.dt_film_proj_w[r * cd + c]);
-            return 0;
+            return LoadError::Ok;
         }
         case QuantFormat::Int8PerLayer: {
             WeightLayerPointersI8 p;
-            if (get_layer_pointers_i8(layer, p) != 0) return -3;
+            if (LoadError err = get_layer_pointers_i8(layer, p); err != LoadError::Ok) return err;
             LayerQParam qp;
-            if (get_layer_qparam(layer, qp) != 0) return -4;
+            if (LoadError err = get_layer_qparam(layer, qp); err != LoadError::Ok) return err;
 
             auto deq = [&](int8_t v) { return qp.scale * (static_cast<float>(v) - static_cast<float>(qp.zero_point)); };
 
@@ -528,11 +528,11 @@ int WeightLoader::dequantize_layer_to(uint32_t layer, SSMWeights& out_f32) const
             for (size_t r = 0; r < 2 * nh; ++r)
                 for (size_t c = 0; c < cd; ++c)
                     out_f32.dt_film_proj_w[r][c] = deq(p.dt_film_proj_w[r * cd + c]);
-            return 0;
+            return LoadError::Ok;
         }
         case QuantFormat::FP16: {
             WeightLayerPointersF16 p;
-            if (get_layer_pointers_f16(layer, p) != 0) return -3;
+            if (LoadError err = get_layer_pointers_f16(layer, p); err != LoadError::Ok) return err;
 
             copy_in_proj([&](size_t r, size_t c) { return fp16_to_fp32(p.in_proj_w[r * dm + c]); });
             copy_1d(out_f32.dt_bias, [&](size_t i) { return fp16_to_fp32(p.dt_bias[i]); }, nh);
@@ -549,10 +549,10 @@ int WeightLoader::dequantize_layer_to(uint32_t layer, SSMWeights& out_f32) const
             for (size_t r = 0; r < 2 * nh; ++r)
                 for (size_t c = 0; c < cd; ++c)
                     out_f32.dt_film_proj_w[r][c] = fp16_to_fp32(p.dt_film_proj_w[r * cd + c]);
-            return 0;
+            return LoadError::Ok;
         }
     }
-    return -100;
+    return LoadError::InternalError;
 }
 
 } // namespace mamba

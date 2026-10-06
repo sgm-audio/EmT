@@ -2,6 +2,149 @@
 
 All notable changes to the EmT CLAP/ARA Plugin Suite (EmT).
 
+## [Unreleased] - Phase 1, item #8 (see REFACTORING_PLAN.md)
+
+RT DSP helpers extracted to header-only `src/dsp/`. Behavior-preserving:
+125/125 ctest (24 new `test_dsp_helpers` vectors, 0 skips),
+`verify_deviations.py` 4 closed / 2 open / 0 failing, benchmark gate PASS
+(5.5 us/sample worst vs 5.9 before -- machine noise; the benchmark covers
+the SSM core, not these paths).
+
+### Changed
+- **New `src/dsp/` (no CLAP includes, reusable for the ARA offline renderer)**:
+  `param_smoother.h` (one-pole coefficient + double/float advance),
+  `bypass_fader.h` (`BypassState` + 4-state machine + `compute_mixed_sample`),
+  `voice_envelope.h` (`VoiceState` + per-sample envelope step). Each carries a
+  no-alloc contract, enforced at runtime by a glibc heap-growth check.
+- `BypassState`/`VoiceState` moved out of `clap_plugin.h` (single definitions);
+  smoother/bypass stay visible through `clap_common_utils.h`, so the synth and
+  FX call sites are byte-identical -- both now resolve to the one tested home.
+  The voice-loop switch became a `voice_envelope_step()` call (IDLE `continue`
+  guard and `default`-branch quirk preserved verbatim).
+- Deliberately out of scope: unifying the FX inline per-sample fade with the
+  synth 4-state machine (observable behavior differs; item #1), and wiring the
+  Attack/Release knobs to the envelope rates (behavior change; new O10).
+- Docs: README tree + test counts (125 across 10 binaries), `PARAMETER_REFERENCE.md`
+  §§2.2--2.3/3.3 corrected to the shipped envelope behavior (fixed rates).
+
+## [Unreleased] - Phase 1, item #4 (see REFACTORING_PLAN.md)
+
+GUI split by platform backend. Behavior-preserving: 101/101 ctest (11 new
+`GuiDispatch`/`GuiInstance`/`GuiHelpers` pins, 0 skips), `verify_deviations.py`
+4 closed / 2 open / 0 failing, benchmark gate PASS. No DSP code touched.
+
+### Changed
+- **`src/clap/clap_gui.cpp` (863 lines, ~15 platform `#if`s) → five files**:
+  `gui_common.cpp` (host-facing dispatch + shared helpers), `gui_x11.cpp` and
+  `gui_win32.cpp` (backends, moved verbatim), `gui_stub.cpp` (fallback that
+  reports unsupported — the macOS/Cocoa insertion point), and `gui_backend.h`
+  (the seam: `GuiInstance` + `gui_backend_*` + shared helpers). CMake compiles
+  exactly one backend per platform. Only 3 `#if`s remain, all in the header.
+- The seam is free functions + CMake selection, not a virtual `IGuiBackend`:
+  the backend is fixed at compile time, so virtual dispatch would be pure
+  overhead. Deliberate micro-changes: `win32_timer_id` is `uintptr_t`
+  (identical to `UINT_PTR`); handle types are forward-declared so the header
+  needs no system GUI headers; the Win32 `GetModuleHandleEx` anchor moved to
+  `&gui_backend_set_parent` (same module).
+- Docs: README tree + test counts (101 across 9 binaries), `AGENTS.md` known
+  limitation corrected (it claimed Windows had no GUI), new observation O9
+  (CI `startup_failure` — no signal, needs separate diagnosis).
+
+## [Unreleased] - Phase 1, item #3 (see REFACTORING_PLAN.md)
+
+Preset TU split. Pure code motion, verified behavior-preserving: 90/90 ctest
+(0 skips with generated inputs), `verify_deviations.py` 4 closed / 2 open /
+0 failing, benchmark gate PASS. No DSP code touched.
+
+### Changed
+- **`src/clap/clap_presets.cpp` (984 lines) → three TUs**: `preset_bank.cpp`
+  (factory data + query + apply), `preset_codec.cpp` (binary/JSON codecs and
+  helpers), `preset_paths.cpp` (preset directory, scan, weight-path search).
+  Function bodies moved verbatim; `clap_presets.h` keeps the full API so no
+  consumer changed. Only the include lists are per-TU now (the unused
+  `<climits>` include was dropped). Both CMake consumers (plugin lib,
+  `test_conditioning`) compile the three TUs.
+- The direct codec round-trip tests (`BinaryPresetSaveLoadRoundTrip`,
+  `JsonPresetExportImportFileRoundTrip`, `JsonStringExportImportAndValidation`)
+  already existed and cover the split — no new tests needed.
+- Docs: README tree and `PARAMETER_REFERENCE.md` §5 point at the new filenames.
+
+## [Unreleased] - Phase 1, item #2 (see REFACTORING_PLAN.md)
+
+Data-driven parameter table. Behavior-preserving: 90/90 ctest (18 new
+`ParamTable.*` pins), `verify_deviations.py` 4 closed / 2 open / 0 failing.
+No DSP code touched, so the benchmark gate does not apply.
+
+### Added
+- **`src/clap/param_table.h` / `param_table.cpp`** — `constexpr ParamDesc`
+  tables for the synth (5 params) and FX (3 params): id, name, module,
+  min/max/default, curve, smoothing time, CLAP flags, and a `ParamFormat`
+  text-conversion tag. `init_param_smooth()` initializes `ParamSmooth`
+  metadata from a row; `param_value_to_text()` / `param_text_to_value()`
+  implement the moved conversions. `static_assert`s pin id/index alignment,
+  defaults-in-range, and the FX row count; `make_synth_preset_values()` (in
+  `clap_presets.h`) gives factory presets arity-checked initializers.
+- **`tests/test_param_table.cpp`** — 18 tests pinning table contents against
+  `PARAMETER_REFERENCE.md`, string lengths against the CLAP buffers, and every
+  value↔text conversion including the as-shipped quirks (O7/O8).
+
+### Changed
+- `params_get_info` / `value_to_text` / `text_to_value` (synth) and their FX
+  counterparts are thin table dispatches now; the three handwritten
+  `init_param_metadata` copies (synth, FX, test fixture) are one template call
+  each; `FactoryPreset::param_values` is a `std::array` built by the checked
+  helper; GUI slider labels read the table. Deleted the dead log knob helpers
+  (O2) and split the `fx_params_flush` one-liner, clearing both build warnings
+  (O1).
+- **`PARAMETER_REFERENCE.md`** corrected to shipped behavior: FX modules are
+  empty (O8), Gain/Mix/Bypass text parsing is documented per plugin instead of
+  jointly, and §3.4 no longer claims the removed log knob mapping.
+
+## [Unreleased] - Phase 0 refactoring (see REFACTORING_PLAN.md)
+
+Behavior-preserving restructuring. Verified after each step: 72/72 ctest,
+`verify_deviations.py` 4 closed / 2 open / 0 failing, benchmark gate PASS,
+parity vectors byte-identical.
+
+### Added
+- **`scripts/emt_format.py`** — single source of truth for the flat-binary
+  weight format on the Python side (header constants, `MAX_*` file-layout
+  strides, `floats_per_layer`, `make_header`, `parse_header`). The exporter,
+  validator, and both NumPy references import it instead of re-declaring the
+  layout; names stay importable from `export_mamba_weights` for compatibility.
+- **`LoadError`** (`src/core/weight_loader.h`) — `enum class` replacing the
+  undocumented magic ints. `load()` values (`-1`…`-4`, `-10`…`-16`) keep their
+  exact integers, locked by `static_assert`; accessor failures move to their
+  own `-20`… range plus `-100`, and `dequantize_layer_to()` now propagates the
+  underlying accessor error. `load_error_string()` renders codes for host
+  logs; `WEIGHT_FORMAT_SPEC.md` §8 documents the full table.
+- **`tests/fixtures/weight_fixture.h`** — shared test helpers (`TempWeightFile`
+  RAII paths, `WeightFileSpec`/`write_weight_file`, layout math mirroring
+  `emt_format.py`), exposed via a `test_fixtures` INTERFACE lib.
+  `test_weight_loader.cpp` is migrated; other suites can follow.
+- **`docs/BUILD.md`** — full build/test/offline/CI-parity guide;
+  **`docs/README.md`** — documentation index with the archive policy;
+  **`.editorconfig`** and **`.gitattributes`** (`text=auto`).
+- **`REFACTORING_PLAN.md`** — phased plan (0–2) with per-item approach, impact,
+  guardrails, and observations found along the way.
+
+### Changed
+- **CMake is per-target now.** RT flags (`-fno-exceptions -fno-rtti`,
+  MSVC `/GR-`) apply PRIVATE to `core`/`ara_plugin`/`mamba_synth` only —
+  GTest and the test executables build with normal exception support
+  (verified in `build.ninja`). No more global `include_directories()`;
+  `tests/CMakeLists.txt` uses an `emt_add_test()` helper. New
+  `-DEMT_USE_SYSTEM_GTEST=ON` option and
+  `-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=` support for offline builds.
+- **`clap-validator`** is a real ctest step and build target when the tool is
+  installed (previously an echo stub).
+- **Docs**: superseded `AUDIT_REPORT.md` / `GAP_ANALYSIS.md` moved to
+  `docs/archive/`; README points at `docs/BUILD.md` and its stale test counts
+  (64/67) are corrected to the measured 72.
+- The D3 tripwire in `verify_deviations.py` checks the header pack site in
+  `emt_format.py` and pins `LoadError::MimoRankRefused` **and** its stable
+  `-16` value.
+
 ## [Unreleased] - 2026-10-04
 
 Verification-driven fixes. Context: [`CLAIMS_VERIFICATION.md`](CLAIMS_VERIFICATION.md)
