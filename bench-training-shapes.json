@@ -1,0 +1,32 @@
+{
+  "cpu": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+  "budget_pct_of_one_core": 40,
+  "repeats": 3,
+  "seconds_per_measurement": 0.1,
+  "results": [
+    {"config": "train4070", "layers": 1, "sample_rate": 48000, "block_size": 64, "us_per_sample": 1.93717, "pct_of_one_core": 9.29839, "pass": true},
+    {"config": "train4070", "layers": 1, "sample_rate": 48000, "block_size": 128, "us_per_sample": 1.94488, "pct_of_one_core": 9.33544, "pass": true},
+    {"config": "train4070", "layers": 1, "sample_rate": 48000, "block_size": 256, "us_per_sample": 1.9291, "pct_of_one_core": 9.25968, "pass": true},
+    {"config": "train4070", "layers": 1, "sample_rate": 48000, "block_size": 512, "us_per_sample": 1.93898, "pct_of_one_core": 9.30711, "pass": true},
+    {"config": "train4070", "layers": 3, "sample_rate": 48000, "block_size": 64, "us_per_sample": 5.86443, "pct_of_one_core": 28.1493, "pass": true},
+    {"config": "train4070", "layers": 3, "sample_rate": 48000, "block_size": 128, "us_per_sample": 5.97767, "pct_of_one_core": 28.6928, "pass": true},
+    {"config": "train4070", "layers": 3, "sample_rate": 48000, "block_size": 256, "us_per_sample": 5.82458, "pct_of_one_core": 27.958, "pass": true},
+    {"config": "train4070", "layers": 3, "sample_rate": 48000, "block_size": 512, "us_per_sample": 6.20211, "pct_of_one_core": 29.7701, "pass": true},
+    {"config": "train4070", "layers": 6, "sample_rate": 48000, "block_size": 64, "us_per_sample": 12.5723, "pct_of_one_core": 60.3471, "pass": false},
+    {"config": "train4070", "layers": 6, "sample_rate": 48000, "block_size": 128, "us_per_sample": 12.5132, "pct_of_one_core": 60.0635, "pass": false},
+    {"config": "train4070", "layers": 6, "sample_rate": 48000, "block_size": 256, "us_per_sample": 12.4302, "pct_of_one_core": 59.6648, "pass": false},
+    {"config": "train4070", "layers": 6, "sample_rate": 48000, "block_size": 512, "us_per_sample": 12.6281, "pct_of_one_core": 60.6148, "pass": false},
+    {"config": "trainl4", "layers": 1, "sample_rate": 48000, "block_size": 64, "us_per_sample": 16.2754, "pct_of_one_core": 78.1221, "pass": false},
+    {"config": "trainl4", "layers": 1, "sample_rate": 48000, "block_size": 128, "us_per_sample": 16.1966, "pct_of_one_core": 77.7439, "pass": false},
+    {"config": "trainl4", "layers": 1, "sample_rate": 48000, "block_size": 256, "us_per_sample": 14.7727, "pct_of_one_core": 70.9087, "pass": false},
+    {"config": "trainl4", "layers": 1, "sample_rate": 48000, "block_size": 512, "us_per_sample": 14.6206, "pct_of_one_core": 70.179, "pass": false},
+    {"config": "trainl4", "layers": 3, "sample_rate": 48000, "block_size": 64, "us_per_sample": 43.2859, "pct_of_one_core": 207.772, "pass": false},
+    {"config": "trainl4", "layers": 3, "sample_rate": 48000, "block_size": 128, "us_per_sample": 46.388, "pct_of_one_core": 222.662, "pass": false},
+    {"config": "trainl4", "layers": 3, "sample_rate": 48000, "block_size": 256, "us_per_sample": 45.9072, "pct_of_one_core": 220.355, "pass": false},
+    {"config": "trainl4", "layers": 3, "sample_rate": 48000, "block_size": 512, "us_per_sample": 45.8293, "pct_of_one_core": 219.981, "pass": false},
+    {"config": "trainl4", "layers": 6, "sample_rate": 48000, "block_size": 64, "us_per_sample": 92.1503, "pct_of_one_core": 442.322, "pass": false},
+    {"config": "trainl4", "layers": 6, "sample_rate": 48000, "block_size": 128, "us_per_sample": 91.6682, "pct_of_one_core": 440.007, "pass": false},
+    {"config": "trainl4", "layers": 6, "sample_rate": 48000, "block_size": 256, "us_per_sample": 86.5918, "pct_of_one_core": 415.641, "pass": false},
+    {"config": "trainl4", "layers": 6, "sample_rate": 48000, "block_size": 512, "us_per_sample": 83.7987, "pct_of_one_core": 402.234, "pass": false}
+  ]
+}
