@@ -1,7 +1,12 @@
 # Parameter Reference
 
 **EmT CLAP/ARA Plugin Suite** — Architecture Version: Mamba-3 (`v0.3.0`)  
-**Source Files:** `src/clap/clap_params.cpp`, `src/clap/clap_plugin.h`, `src/clap/clap_fx_plugin.h`, `src/clap/clap_fx_plugin.cpp`, `src/clap/clap_note_ports.cpp`
+**Source Files:** `src/clap/param_table.h`, `src/clap/param_table.cpp`, `src/clap/clap_params.cpp`, `src/clap/clap_plugin.h`, `src/clap/clap_fx_plugin.h`, `src/clap/clap_fx_plugin.cpp`, `src/clap/clap_note_ports.cpp`
+
+Parameter metadata (ranges, defaults, curves, smoothing times, names, modules,
+flags, text formats) lives in the `ParamDesc` tables in `src/clap/param_table.h`
+and is pinned by `tests/test_param_table.cpp`. The tables are the single source
+of truth; the sections below restate them for readability.
 
 This document provides complete, normative documentation for all parameter definitions, data ranges, default values, smoothing filters, MIDI CC bindings, and control behavior for both plugins exported by the binary:
 1. **EmT Synth** (`com.emt.synth`): Generative neural synthesizer with envelope modulation, multi-voice polyphony, and FiLM conditioning.
@@ -29,8 +34,8 @@ Exposed via `CLAP_EXT_PARAMS`. Total count: `FX_PARAM_COUNT = 3`.
 
 | ID | Name | Module | Min | Max | Default | Curve | Smooth Time | CLAP Flags |
 |---|---|---|---|---|---|---|---|---|
-| **0** | **Gain** | `SSM` | `0.0` (-inf dB) | `2.0` (+6.0 dB) | `1.0` (0.0 dB) | Logarithmic | 10 ms | `CLAP_PARAM_IS_AUTOMATABLE` |
-| **1** | **Mix** | `SSM` | `0.0` (0% wet) | `1.0` (100% wet) | `1.0` (100% wet) | Linear | 10 ms | `CLAP_PARAM_IS_AUTOMATABLE` |
+| **0** | **Gain** | `""` (empty as-shipped; see O8) | `0.0` (-inf dB) | `2.0` (+6.0 dB) | `1.0` (0.0 dB) | Logarithmic | 10 ms | `CLAP_PARAM_IS_AUTOMATABLE` |
+| **1** | **Mix** | `""` (empty as-shipped; see O8) | `0.0` (0% wet) | `1.0` (100% wet) | `1.0` (100% wet) | Linear | 10 ms | `CLAP_PARAM_IS_AUTOMATABLE` |
 | **2** | **Bypass** | `""` (root) | `0.0` (Off) | `1.0` (On) | `0.0` (Off) | Stepped | 0 ms (Instant) | `IS_AUTOMATABLE \| IS_STEPPED \| IS_BYPASS` |
 
 ---
@@ -43,7 +48,7 @@ Exposed via `CLAP_EXT_PARAMS`. Total count: `FX_PARAM_COUNT = 3`.
 |---|---|
 | **CLAP ID** | `0` (`PARAM_GAIN` / `FX_PARAM_GAIN`) |
 | **Display Name** | `"Gain"` |
-| **Module Hierarchy** | `"SSM"` |
+| **Module Hierarchy** | Synth: `"SSM"`; FX: `""` (empty as-shipped, see O8) |
 | **Internal Unit** | Linear amplitude scalar (\(A\)) |
 | **Minimum Value** | `0.0` (\(-\infty\text{ dB}\)) |
 | **Maximum Value** | `2.0` (\(+6.02\text{ dB}\)) |
@@ -60,10 +65,11 @@ Exposed via `CLAP_EXT_PARAMS`. Total count: `FX_PARAM_COUNT = 3`.
   Output string format: `snprintf(out, size, "%.3f", value)`.
 
 #### Text to Value Parsing
-- Accepts raw decimal strings (e.g., `"0.5"`, `"1.0"`, `"1.414"`).
-- Accepts strings with `"dB"` or `"db"` suffix (e.g., `"-6.0 dB"`, `"+3 dB"`, `"0dB"`). The parser strips whitespace and converts:
+- **Synth:** Accepts raw decimal strings (e.g., `"0.5"`, `"1.0"`, `"1.414"`).
+- **Synth:** A single `'d'`/`'D'` after optional spaces triggers dB conversion (e.g., `"-6.0 dB"`, `"+3 D"`, `"0dB"`):
   $$v = 10^{\frac{\text{dB}}{20}}$$
-- Clamped strictly to \([0.0, 2.0]\).
+- **Synth:** Clamped strictly to \([0.0, 2.0]\).
+- **FX:** Plain `strtod` decimal only: no dB handling and no clamping (`"-6 dB"` parses as `-6.0`). Non-finite input is rejected.
 
 #### DSP Signal Flow
 The smoothed gain value scales the wet neural output prior to channel bus mixing:
@@ -103,6 +109,8 @@ On each sample \(n\):
 $$\text{env}[n] = \text{env}[n-1] + \text{attack\_rate}$$
 When \(\text{env}[n] \ge 1.0\), the envelope saturates to \(1.0\) and transitions to `VOICE_SUSTAIN`.
 
+> **Shipped behavior (O10, found in #8):** the `attack_time` → `attack_rate` formula above is the *intended* mapping, not the wired one. `start_voice()` assigns the fixed constant `VOICE_ATTACK_RATE` (1/1024 per sample); the `PARAM_ATTACK` value is accepted, range-checked, stored, and has smoothing state allocated, but its smoothed value is never stepped in `process()` and nothing reads it. The per-sample step itself is `voice_envelope_step()` in `src/dsp/voice_envelope.h`, which takes the rates as parameters -- wiring the knob is a rate computation at the call site (Phase 2).
+
 ---
 
 ### 2.3 PARAM_RELEASE (Synth ID: 2)
@@ -137,6 +145,8 @@ On each sample \(n\):
 $$\text{env}[n] = \text{env}[n-1] - \text{release\_rate}$$
 When \(\text{env}[n] \le 0.0\), the voice enters `VOICE_SILENT` and becomes available for reallocation.
 
+> **Shipped behavior (O10, found in #8):** the `release_time` → `release_rate` formula above is the *intended* mapping, not the wired one. `start_voice()` assigns the fixed constant `VOICE_RELEASE_RATE` (1/4096 per sample); the `PARAM_RELEASE` value is accepted, range-checked, stored, and has smoothing state allocated, but its smoothed value is never stepped in `process()` and nothing reads it. The per-sample step itself is `voice_envelope_step()` in `src/dsp/voice_envelope.h`, which takes the rates as parameters -- wiring the knob is a rate computation at the call site (Phase 2).
+
 ---
 
 ### 2.4 PARAM_MIX / FX_PARAM_MIX (Synth ID: 3, FX ID: 1)
@@ -145,7 +155,7 @@ When \(\text{env}[n] \le 0.0\), the voice enters `VOICE_SILENT` and becomes avai
 |---|---|
 | **CLAP ID** | Synth: `3`, FX: `1` |
 | **Display Name** | `"Mix"` |
-| **Module Hierarchy** | `"SSM"` |
+| **Module Hierarchy** | Synth: `"SSM"`; FX: `""` (empty as-shipped, see O8) |
 | **Internal Unit** | Normalized wet ratio (\([0.0, 1.0]\)) |
 | **Minimum Value** | `0.0` (100% dry passthrough) |
 | **Maximum Value** | `1.0` (100% wet neural output) |
@@ -162,10 +172,11 @@ When \(\text{env}[n] \le 0.0\), the voice enters `VOICE_SILENT` and becomes avai
   Output string format: `snprintf(out, size, "%.3f", value)`.
 
 #### Text to Value Parsing
-- Accepts percentage values (e.g., `"75%"`, `"50 %"`).
-- Accepts raw numeric representations (e.g., `"0.75"`, `"1.0"`).
-- Numbers entered \(> 1.0\) without a `%` sign are treated as percentage values (\(v = v / 100.0\)).
-- Clamped strictly to \([0.0, 1.0]\).
+- **Synth:** Accepts percentage values (e.g., `"75%"`, `"50 %"`).
+- **Synth:** Accepts raw numeric representations (e.g., `"0.75"`, `"1.0"`).
+- **Synth:** Numbers entered \(> 1.0\) without a `%` sign are treated as percentage values (\(v = v / 100.0\)).
+- **Synth:** Clamped strictly to \([0.0, 1.0]\).
+- **FX:** Plain `strtod` decimal only: `"75%"` parses as `75.0`, no clamping. Non-finite input is rejected.
 
 #### DSP Signal Flow
 Blends the unprocessed incoming audio (dry) with the SSM inference output (wet):
@@ -189,12 +200,12 @@ $$y_{\text{mixed}}[n] = x_{\text{dry}}[n] \cdot (1.0 - \text{mix}[n]) + y_{\text
 | **Flags** | `CLAP_PARAM_IS_AUTOMATABLE \| CLAP_PARAM_IS_STEPPED \| CLAP_PARAM_IS_BYPASS` |
 
 #### Value to Text Formatting
-- `value >= 0.5` \(\to\) `"On"`
-- `value < 0.5` \(\to\) `"Off"`
+- **Synth:** `value > 0.5` \(\to\) `"On"`, otherwise `"Off"` (strict threshold).
+- **FX:** `value >= 0.5` \(\to\) `"On"`, otherwise `"Off"`.
 
 #### Text to Value Parsing
-- Accepts `"On"`, `"on"`, `"ON"`, `"1"` \(\to 1.0\).
-- Accepts `"Off"`, `"off"`, `"OFF"`, `"0"` \(\to 0.0\).
+- **Synth:** `"On"`/`"on"`/`"ON"` \(\to 1.0\); `"Off"`/`"off"`/`"OFF"` \(\to 0.0\); anything else falls back to numeric parsing with `v > 0.5` \(\to 1.0\) (so `"1"` \(\to 1.0\), `"0"`/`"0.5"` \(\to 0.0\)). Fails only when no number is present.
+- **FX:** Only `"On"` and `"1"` \(\to 1.0\); literally anything else \(\to 0.0\), and parsing never fails.
 
 #### DSP Signal Flow
 Drives the 4-state crossfade state machine (`BYPASS_PROCESSING`, `BYPASS_FADING_OUT`, `BYPASS_BYPASSED`, `BYPASS_FADING_IN`). Crossfade rate is fixed at:
@@ -246,14 +257,16 @@ $$t_{99\%} \approx 4.6 \cdot \tau$$
 | **Mix** | 10 ms (`0.010 s`) | `0.002265` | `0.002081` | `0.001041` | ~46.0 ms |
 | **Bypass** | 0 ms (`0.000 s`) | `1.000000` | `1.000000` | `1.000000` | Instant (managed by fade ramp) |
 
-### 3.4 Non-Linear Knob Curves
+> **Note (O10):** the Attack/Release coefficients above are computed at activation but never stepped in `process()` -- only Gain and Mix advance in the sample loops. Their settling times are therefore inert until the knobs are wired to the envelope rates (Phase 2).
 
-For logarithmic parameters (`PARAM_CURVE_LOG`), the plugin maps between GUI knob positions \(k \in [0.0, 1.0]\) and engineering values \(v \in [v_{\min}, v_{\max}]\) using logarithmic interpolation:
+### 3.4 Knob Curves (Host-Side)
 
-$$v(k) = \exp\left(\ln(v_{\min}) + k \cdot (\ln(v_{\max}) - \ln(v_{\min}))\right)$$
-$$k(v) = \frac{\ln(v) - \ln(v_{\min})}{\ln(v_{\max}) - \ln(v_{\min})}$$
-
-This ensures that knob adjustments have perceptual linearity across frequency, time, and gain scales.
+The `curve` field in the parameter table (`PARAM_CURVE_LOG` / `PARAM_CURVE_LINEAR` /
+`PARAM_CURVE_STEPPED`) is descriptive metadata: the DSP reads raw engineering values and
+hosts map their own knobs linearly over `[min_value, max_value]`. The plugin consumes the
+curve only for stepped detection (`PARAM_CURVE_STEPPED` drives toggle behavior in the
+built-in GUI and the `CLAP_PARAM_IS_STEPPED` flag). The former log knob-mapping helpers
+were dead code and were removed; there is currently no plugin-side logarithmic taper.
 
 ---
 
@@ -303,7 +316,7 @@ Per the CLAP specification:
 
 ### 5.1 Parameter State Block in Presets (`.mambapreset`)
 
-When saved via `CLAP_EXT_STATE` or the standalone preset manager (`clap_presets.cpp`), parameters are serialized in little-endian binary format:
+When saved via `CLAP_EXT_STATE` or the standalone preset manager (`preset_codec.cpp`), parameters are serialized in little-endian binary format:
 
 ```
 Offset   Type     Field             Description

@@ -3,7 +3,7 @@
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![CLAP](https://img.shields.io/badge/CLAP-1.2+-purple.svg)](https://cleveraudio.org/)
 [![ARA 2](https://img.shields.io/badge/ARA-2.0-orange.svg)](https://www.celemony.com/en/ara)
-[![CTest](https://img.shields.io/badge/tests-67%20passing-brightgreen.svg)]()
+[![CTest](https://img.shields.io/badge/tests-125%20passing-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 Real-time neural audio synthesis and effect processing plugins powered by a **Mamba-3-inspired causal state-space model (SSM)**. Delivered as low-overhead, real-time safe **CLAP** plugins with optional **ARA 2.0** integration for DAW-hosted generative workflows.
@@ -249,7 +249,7 @@ scalar FiLM/RMSNorm/SiLU work — see `ARCHITECTURE_FIDELITY.md` §3.
   extension. (Reported, not asserted: verify with `clap-validator` and the host.)
 - **Audio Thread Heap Allocations**: 0 bytes (`malloc`/`free`/`new` strictly forbidden on the audio path).
 - **Denormal Prevention**: Automatic FTZ (Flush-to-Zero) and DAZ (Denormals-are-Zero) configured in MXCSR per audio block.
-- **CTest Pass Rate**: **67/67 tests** across 7 suites. The two tests that need
+- **CTest Pass Rate**: **125/125 tests** across 10 suites (see `docs/BUILD.md` for the full checklist). The two tests that need
   generated inputs — `CppParity` (parity vectors) and
   `RealtimeSafety.FxAcceptsMultiLayerWeightsWithinLimits` (an exported model) —
   are given them by CI before `ctest`, and `MAMBA_REQUIRE_PARITY=1` turns a
@@ -265,6 +265,8 @@ scalar FiLM/RMSNorm/SiLU work — see `ARCHITECTURE_FIDELITY.md` §3.
 ---
 
 ## Build Instructions
+
+> Full guide — prerequisites, offline builds, CI-parity checklist, troubleshooting: [`docs/BUILD.md`](docs/BUILD.md).
 
 ### Prerequisites
 
@@ -315,7 +317,7 @@ ctest --test-dir build --output-on-failure
 
 ### Running CTest & Benchmarks
 
-Run CTest across all 64 registered unit and stability tests:
+Run CTest across all 125 registered unit and stability tests:
 ```powershell
 ctest --test-dir build -C Release --output-on-failure
 ```
@@ -419,14 +421,26 @@ python scripts/export_mamba_weights.py \
  │   │   ├── seqlock.h            # Single-writer multi-reader SeqLock
  │   │   ├── double_buffer_seqlock.h # Atomic snapshot double-buffer exchange
  │   │   └── conditioning_frame.h # Conditioning structures (MIDI / ARA)
+ │   ├── dsp/                     # Header-only RT DSP helpers (no CLAP deps)
+ │   │   ├── param_smoother.h     # One-pole coefficient + advance (double/float)
+ │   │   ├── bypass_fader.h       # BypassState + 4-state machine + mix primitive
+ │   │   └── voice_envelope.h     # VoiceState + per-sample envelope step
  │   ├── clap/                    # CLAP plugin implementations (shared library)
  │   │   ├── clap_entry.cpp       # Plugin factory (exports synth and fx)
  │   │   ├── clap_plugin.h/.cpp   # EmT Synth instrument plugin
  │   │   ├── clap_fx_plugin.h/.cpp# EmT FX audio effect plugin
- │   │   ├── clap_gui.h/.cpp      # Dual Win32 HWND & Linux X11 native GUI
+ │   │   ├── clap_gui.h           # GUI extension entry point (s_gui)
+ │   │   ├── gui_backend.h        # GUI seam: GuiInstance + gui_backend_* API
+ │   │   ├── gui_common.cpp       # Host-facing dispatch + shared helpers
+ │   │   ├── gui_x11.cpp          # Linux/X11 backend (CMake-selected)
+ │   │   ├── gui_win32.cpp        # Windows HWND backend (CMake-selected)
+ │   │   ├── gui_stub.cpp         # Fallback backend: reports unsupported
  │   │   ├── clap_params.cpp      # Parameter definitions & smoothing
  │   │   ├── clap_state.cpp       # Plugin state serialization (Schema v3)
- │   │   ├── clap_presets.h/.cpp  # Preset file save/load engine
+ │   │   ├── clap_presets.h       # Preset engine API (bank + codec + paths)
+ │   │   ├── preset_bank.cpp      # Factory preset bank data & apply
+ │   │   ├── preset_codec.cpp     # Binary/JSON preset codecs
+ │   │   ├── preset_paths.cpp     # Preset dirs & weight-path search
  │   │   ├── clap_common_utils.h  # Common CLAP conversion & validation utilities
  │   │   ├── clap_audio_ports.cpp # Stereo audio port configuration
  │   │   ├── clap_note_ports.cpp  # MIDI note input port configuration
@@ -437,7 +451,7 @@ python scripts/export_mamba_weights.py \
  │       ├── ara_playback_renderer.cpp     # Timeline region playback renderer
  │       ├── ara_editor_renderer.cpp       # Editor renderer
  │       └── ara_types.h          # ARA data structures & forward declarations
- ├── tests/                       # GoogleTest verification suite (67 tests)
+ ├── tests/                       # GoogleTest verification suite (125 tests)
  │   ├── test_ssm_block.cpp       # Recurrence, multi-layer, state parity tests
  │   ├── test_weight_loader.cpp   # mmap validation, quantization, dimension checks
  │   ├── test_conditioning.cpp    # FiLM modulation, seqlock tear resistance
@@ -445,6 +459,9 @@ python scripts/export_mamba_weights.py \
  │   ├── test_realtime_safety.cpp # Zero allocation audit, zero-copy voice test, FX state roundtrip
  │   ├── test_cpp_parity.cpp      # C++ vs Python numerical parity verification
  │   ├── test_ara.cpp             # Celemony ARA 2.0 document controller & playback renderer tests
+ │   ├── test_param_table.cpp     # ParamDesc tables + value<->text conversion pins
+ │   ├── test_gui.cpp             # GUI dispatch pins (stub backend, no display)
+ │   ├── test_dsp_helpers.cpp     # RT DSP helper vectors + no-alloc check
  │   └── benchmark_ssm_block.cpp  # Real-time multi-rate throughput benchmark
  ├── scripts/                     # Python offline toolchain
  │   ├── export_mamba_weights.py  # Checkpoint exporter & config.h generator

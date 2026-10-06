@@ -1,33 +1,56 @@
-# SSMWeights is ~4 MB at max config — MSVC's 1 MB default stack is too small.
-if(MSVC)
-    set(_MAMBA_TEST_STACK /STACK:16777216)
-endif()
+# Shared test helpers (tests/fixtures/*). Header-only, no GTest dependency.
+add_library(test_fixtures INTERFACE)
+target_include_directories(test_fixtures INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
-add_executable(test_ssm_block test_ssm_block.cpp)
-target_link_libraries(test_ssm_block PRIVATE core common GTest::gtest GTest::gtest_main)
-if(MSVC)
-    target_link_options(test_ssm_block PRIVATE "/STACK:16777216")
-endif()
 include(GoogleTest)
-gtest_discover_tests(test_ssm_block)
 
-# Needed for std::thread in test_conditioning.cpp
+# Needed for std::thread in test_conditioning.cpp and test_ara.cpp.
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
-add_executable(test_weight_loader test_weight_loader.cpp)
-target_link_libraries(test_weight_loader PRIVATE core common GTest::gtest GTest::gtest_main)
-if(MSVC)
-    target_link_options(test_weight_loader PRIVATE "/STACK:16777216")
-endif()
-gtest_discover_tests(test_weight_loader)
+# Test executables get warnings but keep C++ exceptions/RTTI: GTest needs
+# exceptions, and several fixtures use throwing APIs (std::filesystem).
+# MSVC targets get a 16 MB stack: SSMWeights is ~4 MB at max config while
+# the default 1 MB stack is too small.
+function(emt_add_test target)
+    add_executable(${target} ${ARGN})
+    target_link_libraries(${target} PRIVATE
+        core common test_fixtures GTest::gtest GTest::gtest_main)
+    target_compile_options(${target} PRIVATE ${EMT_WARN_FLAGS})
+    if(MSVC)
+        target_link_options(${target} PRIVATE "/STACK:16777216")
+    endif()
+    gtest_discover_tests(${target})
+endfunction()
 
-add_executable(test_conditioning test_conditioning.cpp ${PROJECT_SOURCE_DIR}/src/clap/clap_presets.cpp)
-target_link_libraries(test_conditioning PRIVATE core common GTest::gtest GTest::gtest_main Threads::Threads)
-if(MSVC)
-    target_link_options(test_conditioning PRIVATE "/STACK:16777216")
-endif()
-gtest_discover_tests(test_conditioning)
+emt_add_test(test_ssm_block test_ssm_block.cpp)
+
+emt_add_test(test_weight_loader test_weight_loader.cpp)
+
+emt_add_test(test_conditioning
+    test_conditioning.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/preset_bank.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/preset_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/preset_paths.cpp)
+target_link_libraries(test_conditioning PRIVATE Threads::Threads)
+target_include_directories(test_conditioning PRIVATE
+    ${PROJECT_SOURCE_DIR}/extern/clap/include)
+
+emt_add_test(test_param_table
+    test_param_table.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/param_table.cpp)
+target_include_directories(test_param_table PRIVATE
+    ${PROJECT_SOURCE_DIR}/extern/clap/include)
+
+# GUI dispatch pins link the fallback stub backend (no display needed) plus
+# preset_paths.cpp for get_preset_directory (referenced, never called here).
+emt_add_test(test_gui
+    test_gui.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/gui_common.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/gui_stub.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/preset_paths.cpp)
+target_include_directories(test_gui PRIVATE
+    ${PROJECT_SOURCE_DIR}/extern/clap/include)
 
 # Optimization level for the benchmark translation unit.  The root
 # CMakeLists already sets -O3 -mavx2 -mfma (or /O2 /arch:AVX2) in the Release
@@ -44,40 +67,26 @@ endif()
 
 add_executable(benchmark_ssm_block benchmark_ssm_block.cpp)
 target_link_libraries(benchmark_ssm_block PRIVATE core common)
-target_compile_options(benchmark_ssm_block PRIVATE ${_MAMBA_BENCH_OPT_FLAGS})
+target_compile_options(benchmark_ssm_block PRIVATE
+    ${EMT_WARN_FLAGS} ${_MAMBA_BENCH_OPT_FLAGS})
 if(MSVC)
     target_link_options(benchmark_ssm_block PRIVATE "/STACK:16777216")
 endif()
 
-add_executable(test_stability test_stability.cpp)
-target_link_libraries(test_stability PRIVATE core common GTest::gtest GTest::gtest_main)
-if(MSVC)
-    target_link_options(test_stability PRIVATE "/STACK:16777216")
-endif()
-gtest_discover_tests(test_stability)
+emt_add_test(test_dsp_helpers test_dsp_helpers.cpp)
 
-add_executable(test_realtime_safety
+emt_add_test(test_stability test_stability.cpp)
+
+emt_add_test(test_realtime_safety
     test_realtime_safety.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/clap_fx_plugin.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/param_table.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/clap_audio_ports.cpp
-    ${PROJECT_SOURCE_DIR}/src/clap/clap_latency.cpp
-)
-target_link_libraries(test_realtime_safety PRIVATE core common GTest::gtest GTest::gtest_main)
-if(MSVC)
-    target_link_options(test_realtime_safety PRIVATE "/STACK:16777216")
-endif()
-gtest_discover_tests(test_realtime_safety)
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_latency.cpp)
+target_include_directories(test_realtime_safety PRIVATE
+    ${PROJECT_SOURCE_DIR}/extern/clap/include)
 
-add_executable(test_cpp_parity test_cpp_parity.cpp)
-target_link_libraries(test_cpp_parity PRIVATE core common GTest::gtest GTest::gtest_main)
-if(MSVC)
-    target_link_options(test_cpp_parity PRIVATE "/STACK:16777216")
-endif()
-gtest_discover_tests(test_cpp_parity)
+emt_add_test(test_cpp_parity test_cpp_parity.cpp)
 
-add_executable(test_ara test_ara.cpp)
-target_link_libraries(test_ara PRIVATE ara_plugin core common GTest::gtest GTest::gtest_main Threads::Threads)
-if(MSVC)
-    target_link_options(test_ara PRIVATE "/STACK:16777216")
-endif()
-gtest_discover_tests(test_ara)
+emt_add_test(test_ara test_ara.cpp)
+target_link_libraries(test_ara PRIVATE ara_plugin Threads::Threads)

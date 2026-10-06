@@ -20,20 +20,16 @@ import os
 import sys
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Flat-binary format constants (must match C++ weight_loader.h)
-# ---------------------------------------------------------------------------
-
-WEIGHT_MAGIC = 0x4D424D41
-WEIGHT_VERSION = 2
-HEADER_FMT = '<12IQII'  # 12 x uint32, uint64 wds, uint32 mimo_rank, uint32 reserved
-HEADER_SIZE = 64
-
-# Compile-time layout constants (must match C++ config.h)
-# The weight file uses these fixed-size slots regardless of actual model dims.
-MAX_MIMO_RANK = 4
-MAX_NUM_ROPE_ANGLES = 16
-MAX_NUM_BC_HEADS = 1
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from emt_format import (  # noqa: E402
+    HEADER_FMT,
+    HEADER_SIZE,
+    MAX_MIMO_RANK,
+    MAX_NUM_BC_HEADS,
+    MAX_NUM_ROPE_ANGLES,
+    WEIGHT_MAGIC,
+    WEIGHT_VERSION,
+)
 
 # ---------------------------------------------------------------------------
 # Math helpers — exact C++ equivalents

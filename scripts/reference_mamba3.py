@@ -11,15 +11,17 @@ Run with --generate to create test vectors for C++ parity tests.
 
 import argparse
 import math
-import struct
 import os
 import sys
 import numpy as np
 
-HEADER_FMT = '<12IQII'  # 12 x uint32, uint64 wds, uint32 mimo_rank, uint32 reserved
-HEADER_SIZE = 64
-WEIGHT_MAGIC = 0x4D424D41
-WEIGHT_VERSION = 2
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from emt_format import (  # noqa: E402
+    MAX_MIMO_RANK,
+    MAX_NUM_ROPE_ANGLES,
+    floats_per_layer,
+    make_header,
+)
 
 
 # === Step-by-step match for C++ SSMBlock::process_sample() ===
@@ -237,8 +239,8 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
     num_bc_heads = 1
     d_cond = 128
     num_rope_angles = d_state // 2
-    MAX_MIMO_RANK = 4  # Must match C++ config.h for weight file layout
-    MAX_NUM_ROPE_ANGLES = 16  # Must match C++ config.h
+    # File-layout strides (MAX_MIMO_RANK, MAX_NUM_ROPE_ANGLES) come from
+    # emt_format.py, the single source of truth for the Python side.
 
     # Fixed seed for reproducibility
     rng = np.random.RandomState(42)
@@ -275,11 +277,8 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
 
     in_proj_out_file = (d_inner * 2 + nheads * MAX_MIMO_RANK * d_state * 2
                         + nheads * 3 + MAX_NUM_ROPE_ANGLES)
-    fpl = (in_proj_out_file * d_model + nheads + nheads * MAX_MIMO_RANK * d_state
-           + nheads * MAX_MIMO_RANK * d_state + d_state + d_state
-           + nheads * MAX_MIMO_RANK * headdim + nheads * MAX_MIMO_RANK * headdim
-           + nheads * MAX_MIMO_RANK * headdim + nheads + d_model * d_inner
-           + 2 * d_model * d_cond + 2 * nheads * d_cond)
+    fpl = floats_per_layer(d_state, d_model, d_inner, nheads,
+                           headdim, d_cond)
 
     # Expand in_proj_w to MAX_MIMO_RANK + MAX_NUM_ROPE_ANGLES layout for weight file
     # Layout: [z(d_inner), x(d_inner), B(nh*MAX_MIMO_RANK*ds), C(nh*MAX_MIMO_RANK*ds), dd_dt(nh), dd_A(nh), trap(nh), angles(MAX_NUM_ROPE_ANGLES)]
@@ -318,13 +317,8 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
     with open(weight_path, 'wb') as f:
         # Header: 12 uint32 + uint64 (weight_data_size) + uint32 mimo_rank
         # + uint32 reserved = 64 bytes.  mimo_rank is 1 for the parity vectors.
-        hdr = struct.pack(HEADER_FMT,
-                          WEIGHT_MAGIC, WEIGHT_VERSION,
-                          d_state, d_model, d_inner, nheads, 1, headdim,
-                          d_cond, 0, 0, 0,  # magic, version, d_state, d_model, d_inner, nheads, num_layers, headdim, cond_dim, quantization, q_metadata_size, flags
-                          fpl * 4, mimo_rank, 0)  # weight_data_size, mimo_rank, reserved
-        f.write(hdr)
-        assert len(hdr) == HEADER_SIZE
+        f.write(make_header(d_state, d_model, d_inner, nheads, headdim,
+                            1, d_cond, fpl * 4, mimo_rank))
 
         # Write weights in C++ order (MAX_MIMO_RANK layout)
         def w(data):

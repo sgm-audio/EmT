@@ -1,6 +1,7 @@
 #include "clap/clap_plugin.h"
 #include "clap/clap_common_utils.h"
 #include "clap/clap_gui.h"
+#include "clap/param_table.h"
 #include "config.h"
 #include <cstring>
 #include <cmath>
@@ -54,40 +55,11 @@ static void recompute_smooth_coefficients(MambaSynth* m) {
     }
 }
 
-// Initialize per-parameter metadata (range, curve, smoothing time).
-// Defaults: linear, 10ms smoothing, ranges from previous design.
+// Initialize per-parameter metadata (range, curve, smoothing time) from the
+// shared table. Array-size deduction in init_param_smooth fails to compile
+// if the smoothing array and the table ever disagree on PARAM_COUNT.
 static void init_param_metadata(MambaSynth* m) {
-    auto& p = m->params;
-
-    p[PARAM_GAIN].min_value = 0.0;
-    p[PARAM_GAIN].max_value = 2.0;
-    p[PARAM_GAIN].default_value = 1.0;
-    p[PARAM_GAIN].curve = PARAM_CURVE_LOG;
-    p[PARAM_GAIN].smooth_time_s = 0.010f;
-
-    p[PARAM_ATTACK].min_value = 0.001;
-    p[PARAM_ATTACK].max_value = 1.0;
-    p[PARAM_ATTACK].default_value = 0.1;
-    p[PARAM_ATTACK].curve = PARAM_CURVE_LOG;
-    p[PARAM_ATTACK].smooth_time_s = 0.020f;
-
-    p[PARAM_RELEASE].min_value = 0.001;
-    p[PARAM_RELEASE].max_value = 2.0;
-    p[PARAM_RELEASE].default_value = 0.3;
-    p[PARAM_RELEASE].curve = PARAM_CURVE_LOG;
-    p[PARAM_RELEASE].smooth_time_s = 0.050f;
-
-    p[PARAM_MIX].min_value = 0.0;
-    p[PARAM_MIX].max_value = 1.0;
-    p[PARAM_MIX].default_value = 1.0;
-    p[PARAM_MIX].curve = PARAM_CURVE_LINEAR;
-    p[PARAM_MIX].smooth_time_s = 0.010f;
-
-    p[PARAM_BYPASS].min_value = 0.0;
-    p[PARAM_BYPASS].max_value = 1.0;
-    p[PARAM_BYPASS].default_value = 0.0;
-    p[PARAM_BYPASS].curve = PARAM_CURVE_STEPPED;
-    p[PARAM_BYPASS].smooth_time_s = 0.0f; // no smoothing on bypass
+    init_param_smooth(m->params, kSynthParamTable);
 }
 
 static void reset_smoothing_to_targets(MambaSynth* m) {
@@ -523,20 +495,8 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
             float voice_sum = 0.0f;
             for (uint32_t v = 0; v < MAX_VOICES; ++v) {
                 Voice& voice = m->voices[v];
-                switch (voice.stage) {
-                case VOICE_IDLE: continue;
-                case VOICE_ATTACK:
-                    voice.env += voice.attack_rate;
-                    if (voice.env >= 1.0f) { voice.env = 1.0f; voice.stage = VOICE_SUSTAIN; }
-                    break;
-                case VOICE_SUSTAIN: voice.env = 1.0f; break;
-                case VOICE_RELEASE:
-                    voice.env -= voice.release_rate;
-                    if (voice.env <= 0.0f) { voice.env = 0.0f; voice.stage = VOICE_SILENT; }
-                    break;
-                case VOICE_SILENT: voice.env = 0.0f; break;
-                default: voice.env = 0.0f; break;
-                }
+                if (voice.stage == VOICE_IDLE) continue;
+                voice_envelope_step(voice.env, voice.stage, voice.attack_rate, voice.release_rate);
                 m->voice_atomics[v].stage.store(voice.stage, std::memory_order_relaxed);
                 m->voice_atomics[v].env.store(voice.env, std::memory_order_relaxed);
                 if (voice.env <= 0.0f) continue;
@@ -627,7 +587,7 @@ static const clap_plugin_t s_plugin_class = {
 
 bool MambaSynth::load_weights(const char* path) {
     if (!path || path[0] == '\0') return false;
-    if (weight_loader.load(path) != 0) return false;
+    if (weight_loader.load(path) != LoadError::Ok) return false;
 
     // Validate dimensions against the loaded header
     const auto& hdr = weight_loader.header();
@@ -656,7 +616,7 @@ bool MambaSynth::load_weights(const char* path) {
     // Load weights: 13 arrays per layer (Mamba-3 layout)
     for (uint32_t layer = 0; layer < core_cfg.num_layers; ++layer) {
         WeightLayerPointers ptrs;
-        if (weight_loader.get_layer_pointers(layer, ptrs) != 0) {
+        if (weight_loader.get_layer_pointers(layer, ptrs) != LoadError::Ok) {
             weight_loader.unload();
             return false;
         }

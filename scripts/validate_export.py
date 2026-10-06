@@ -13,19 +13,24 @@ Usage:
 """
 
 import argparse
-import struct
 import sys
 import os
 
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.dirname(__file__))
-from export_mamba_weights import (
-    WEIGHT_MAGIC, WEIGHT_VERSION, HEADER_SIZE,
-    MAX_MIMO_RANK, MAX_NUM_ROPE_ANGLES,
-    floats_per_layer, Mamba3Block, Mamba3Model
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from emt_format import (
+    HEADER_SIZE,
+    MAX_MIMO_RANK,
+    MAX_NUM_ROPE_ANGLES,
+    WEIGHT_MAGIC,
+    WEIGHT_VERSION,
+    floats_per_layer,
+    in_proj_out_for,
+    parse_header,
 )
+from export_mamba_weights import Mamba3Block, Mamba3Model
 
 ATOL = 1e-5
 RTOL = 1e-5
@@ -34,25 +39,25 @@ RTOL = 1e-5
 def load_header(path: str) -> dict:
     with open(path, 'rb') as f:
         raw = f.read(HEADER_SIZE)
-    fields = struct.unpack('<12IQII', raw)
+    h = parse_header(raw)
     return {
-        'magic': fields[0],
-        'version': fields[1],
-        'd_state': fields[2],
-        'd_model': fields[3],
-        'd_inner': fields[4],
-        'nheads': fields[5],
-        'num_layers': fields[6],
-        'headdim': fields[7],
-        'cond_dim': fields[8],
-        'quantization': fields[9],
-        'q_metadata_size': fields[10],
-        'flags': fields[11],
-        'weight_data_size': fields[12],
+        'magic': h.magic,
+        'version': h.version,
+        'd_state': h.d_state,
+        'd_model': h.d_model,
+        'd_inner': h.d_inner,
+        'nheads': h.nheads,
+        'num_layers': h.num_layers,
+        'headdim': h.headdim,
+        'cond_dim': h.cond_dim,
+        'quantization': h.quantization,
+        'q_metadata_size': h.q_metadata_size,
+        'flags': h.flags,
+        'weight_data_size': h.weight_data_size,
         # Deviation D3: 0 = legacy file written before the field existed
         # (treated as rank 1), 1 = rank-1 SISO.  The runtime refuses > 1.
-        'mimo_rank': fields[13],
-        'reserved': fields[14],
+        'mimo_rank': h.mimo_rank,
+        'reserved': h.reserved,
     }
 
 
@@ -68,10 +73,10 @@ def load_weights_into_model(model: Mamba3Model, path: str) -> Mamba3Model:
     cd = hdr['cond_dim']
     mr = model.layers[0].mimo_rank  # model's actual mimo_rank (not MAX_)
 
-    in_proj_out_file = di * 2 + nh * MAX_MIMO_RANK * ds * 2 + nh * 3 + MAX_NUM_ROPE_ANGLES
+    in_proj_out_file = in_proj_out_for(di, nh, ds)
     in_proj_out_model = di * 2 + nh * mr * ds * 2 + nh * 3 + (ds // 2)
 
-    fpl = floats_per_layer(ds, dm, di, nh, mr, hd, cd)
+    fpl = floats_per_layer(ds, dm, di, nh, hd, cd)
     file_size = os.path.getsize(path)
     expected = HEADER_SIZE + fpl * nl * 4
     assert file_size == expected, (

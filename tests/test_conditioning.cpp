@@ -229,6 +229,7 @@ TEST(ConditioningSeqlock, ReaderNeverObservesTornWrite) {
 
 #include "clap/clap_plugin.h"
 #include "clap/clap_presets.h"
+#include "clap/param_table.h"
 #include <filesystem>
 
 namespace mamba {
@@ -287,25 +288,9 @@ static TestSynthPtr create_test_synth() {
         va.velocity.store(0.0f, std::memory_order_relaxed);
     }
 
-    m->params[PARAM_GAIN].min_value = 0.0;
-    m->params[PARAM_GAIN].max_value = 2.0;
-    m->params[PARAM_GAIN].default_value = 1.0;
-
-    m->params[PARAM_ATTACK].min_value = 0.001;
-    m->params[PARAM_ATTACK].max_value = 1.0;
-    m->params[PARAM_ATTACK].default_value = 0.1;
-
-    m->params[PARAM_RELEASE].min_value = 0.001;
-    m->params[PARAM_RELEASE].max_value = 2.0;
-    m->params[PARAM_RELEASE].default_value = 0.3;
-
-    m->params[PARAM_MIX].min_value = 0.0;
-    m->params[PARAM_MIX].max_value = 1.0;
-    m->params[PARAM_MIX].default_value = 1.0;
-
-    m->params[PARAM_BYPASS].min_value = 0.0;
-    m->params[PARAM_BYPASS].max_value = 1.0;
-    m->params[PARAM_BYPASS].default_value = 0.0;
+    // Same metadata the plugin installs at init (range, default, curve,
+    // smoothing time) -- the shared param table is the single source.
+    init_param_smooth(m->params, kSynthParamTable);
 
     for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
         m->param_values[i].store(m->params[i].default_value, std::memory_order_relaxed);
@@ -366,15 +351,14 @@ TEST(PresetManagement, FactoryPresetsBank) {
         ASSERT_NE(found, nullptr);
         EXPECT_EQ(found, fp);
 
-        // Parameters in valid range
-        EXPECT_GE(fp->param_values[PARAM_GAIN], 0.0);
-        EXPECT_LE(fp->param_values[PARAM_GAIN], 2.0);
-        EXPECT_GE(fp->param_values[PARAM_ATTACK], 0.001);
-        EXPECT_LE(fp->param_values[PARAM_ATTACK], 1.0);
-        EXPECT_GE(fp->param_values[PARAM_RELEASE], 0.001);
-        EXPECT_LE(fp->param_values[PARAM_RELEASE], 2.0);
-        EXPECT_GE(fp->param_values[PARAM_MIX], 0.0);
-        EXPECT_LE(fp->param_values[PARAM_MIX], 1.0);
+        // Every entry inside the table range for its ParamIds slot.
+        ASSERT_EQ(fp->param_values.size(), static_cast<size_t>(PARAM_COUNT));
+        for (uint32_t pi = 0; pi < PARAM_COUNT; ++pi) {
+            EXPECT_GE(fp->param_values[pi], kSynthParamTable[pi].min_value)
+                << "preset " << i << " param " << pi;
+            EXPECT_LE(fp->param_values[pi], kSynthParamTable[pi].max_value)
+                << "preset " << i << " param " << pi;
+        }
     }
 
     EXPECT_EQ(get_factory_preset(6), nullptr);

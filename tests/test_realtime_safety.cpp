@@ -264,7 +264,7 @@ TEST(RealtimeSafety, FxAcceptsMultiLayerWeightsWithinLimits) {
     ASSERT_NE(fx, nullptr);
 
     WeightLoader probe;
-    ASSERT_EQ(probe.load(path), 0);
+    ASSERT_EQ(probe.load(path), LoadError::Ok);
     const auto& hdr = probe.header();
     ASSERT_GT(hdr.num_layers, 1u) << "this test needs a multi-layer model";
     ASSERT_TRUE(WeightLoader::fits_in_static_weights_with(hdr))
