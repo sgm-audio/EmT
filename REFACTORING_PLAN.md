@@ -93,10 +93,21 @@ automation-heavy sessions, testable without a CLAP host.
   synth reports `"SSM"`. Preserved verbatim; `PARAMETER_REFERENCE.md` now
   documents the shipped behavior. If a host-visible regrouping is acceptable,
   set the two FX table modules to `"SSM"` and revert the doc note.
-- **O9 — CI never runs (found in #4, out of scope)**: every recent workflow
-  run ends `startup_failure` with no jobs created (GitHub: "likely a workflow
-  file issue"), on `main` and on branches alike; the last run that actually
-  executed failed 20 days ago. There is currently zero CI signal. Diagnose
-  separately (validate `.github/workflows/ci.yml`, check Actions permissions);
-  also note CI installs no `libx11-dev`, which the Linux build requires.
+- **O9 — CI never runs (found in #4, diagnosed for PR #4)**: every run ends
+  `startup_failure` with 0 jobs because GitHub routes all events to an orphaned
+  workflow object (id `297117553`, name `""`, path `"BuildFailed"`, state
+  `deleted`) instead of the real CI workflow (id `297117519`, active). The
+  workflow file itself is valid (parses, and trigger filters are never even
+  evaluated -- runs are created for non-`main` pushes despite
+  `on.push.branches: [main]`). This is a registry-side defect (or, not yet
+  ruled out, an account billing/minutes block on this private repo), not a YAML
+  bug. Purging needs repo-admin powers the agent token lacks (403): the owner
+  should delete the `startup_failure` runs, toggle Settings > Actions off/on to
+  force a re-sync, check Settings > Billing for minutes/spending-limit blocks,
+  and if it persists open a support ticket citing ghost workflow `297117553`.
+  Meanwhile every CI step was validated locally with the exact workflow
+  commands (125/125 ctest with `MAMBA_REQUIRE_PARITY=1`, losses self-test,
+  trainer smoke, both benchmark invocations, validator skip-path), and the one
+  real workflow bug found -- no `libx11-dev` despite `find_package(X11
+  REQUIRED)` -- is fixed, so the first run after the purge should go green.
 - **O10 — Attack/Release knobs unconnected (found in #8, Phase 2 material)**: `PARAM_ATTACK`/`PARAM_RELEASE` are accepted, range-checked, stored, and get smoothing state allocated, but their smoothed values are never stepped in `process()` and nothing reads them -- `start_voice()` assigns the fixed `VOICE_ATTACK_RATE` (1/1024) / `VOICE_RELEASE_RATE` (1/4096) constants. `PARAMETER_REFERENCE.md` §§2.2--2.3/3.3 now document the shipped behavior. Wiring them is a rate computation (`1/max(1, t*fs)`) at the `voice_envelope_step()` call site -- a behavior change, hence Phase 2, benchmark-gated.
