@@ -45,7 +45,7 @@ wants (audio developers who read code and papers). The rule from here on:
 | "Exponential-trapezoidal discretization" | Implemented rule is classical trapezoidal on a real pole. See D1 | "bilinear (Tustin) discretization" |
 | "Zero algorithmic latency *because* Mamba-3 removed conv1d" | Mamba-1/2's causal conv is already streamable with zero look-ahead (`causal_conv1d_update`); removing it is a compute/simplification win, not a latency win | "no conv1d: simpler and cheaper than Mamba-1/2, and no look-ahead" |
 | Any per-sample CPU figure that is not reproduced by the harness on the target machine | The published 1.79 us/sample was measured on the toy shape; the shapes this repo's own training configs produce are 5-65x more expensive (§3) | Run `benchmark_ssm_block --config train4070,trainl4 --json bench.json` and quote the JSON |
-| "Runtime LoRA adapters" | No LoRA code exists. `packages/emt_lora_matrix_companion/` is a GUI asset pack (mockups + layout spec). See `packages/emt_lora_matrix_companion/README.md` | "planned"; or "per-preset merged weights", which is what the format supports today |
+| "Runtime LoRA adapters" | No LoRA code exists. `packages/emt_lora_matrix_companion/` is a GUI asset pack (mockups + layout spec). See `assets/gui/README.md` | "planned"; or "per-preset merged weights", which is what the format supports today |
 
 ### 1.3 EmT additions that are NOT in the Mamba-3 paper
 

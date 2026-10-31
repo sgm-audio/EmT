@@ -28,8 +28,9 @@ session (see Known problems).
   `src/clap/clap_fx_plugin.cpp`), presets under
   `$XDG_DATA_HOME/clap/presets/com.mamba-ssm.synth/` (falls back to
   `~/.local/share/...`; `src/clap/preset_paths.cpp`).
-- Plain Win32 and Xlib editors (`src/clap/gui_*.cpp`). The images in
-  `assets/gui/` are mockups and aren't used by the code.
+- Plain Win32 and Xlib editors (`src/clap/gui_*.cpp`). The mockup images
+  (`assets/gui/`, plus four not yet moved there; see `assets/gui/README.md`)
+  aren't used by the code.
 - 0 samples of reported latency; the recurrence is causal, one sample per step.
 
 ARA: `src/ara/` contains document-controller and renderer classes built
@@ -89,7 +90,7 @@ Needs CMake 3.20+, Ninja, a C++20 compiler, Python 3.10+ with `numpy`,
 fetched by CMake.
 
 ```bash
-scripts/ci.sh        # configure, build, parity vectors, test weights, ctest,
+bash scripts/ci.sh   # configure, build, parity vectors, test weights, ctest,
                      # loss self-test, trainer smoke test, benchmark gate,
                      # clap-validator if installed
 ```
@@ -151,7 +152,7 @@ scripts/     exporter, parity reference, deviation checker, ci.sh
 training/    PyTorch trainer, losses, configs
 docs/        build guide, architecture, fidelity ledger, weight format, ADRs (docs/adr/)
 extern/clap  CLAP 1.2.7 headers (MIT)
-assets/gui   GUI mockups (unused by the code)
+assets/gui   GUI mockups (unused by the code; 4 more at the root and in packages/)
 ```
 
 ## License
