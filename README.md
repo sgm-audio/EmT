@@ -2,11 +2,11 @@
 
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![CLAP](https://img.shields.io/badge/CLAP-1.2+-purple.svg)](https://cleveraudio.org/)
-[![ARA 2](https://img.shields.io/badge/ARA-2.0-orange.svg)](https://www.celemony.com/en/ara)
+[![ARA 2](https://img.shields.io/badge/ARA_2-not_host--connected-lightgrey.svg)](#celemony-ara-2-status)
 [![CTest](https://img.shields.io/badge/ctest-125%20registered-lightgrey.svg)](docs/BUILD.md)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-Neural audio synthesis and effect plugins built on a small causal state-space model (SSM) in the Mamba family. Delivered as **CLAP** plugins. ARA 2.0 code exists in `src/ara/` but is **not exposed to hosts yet** (see [ARA status](#celemony-ara-20-integration--fallback)).
+Neural audio synthesis and effect plugins built on a small causal state-space model (SSM) in the Mamba family. Delivered as **CLAP** plugins. Includes an ARA 2 document controller and playback renderer, tested on their own but not yet connected to the CLAP entry point (see [ARA status](#celemony-ara-2-status)).
 
 > **Read this before quoting architecture or performance claims:**
 > [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md) is the authoritative
@@ -38,7 +38,7 @@ Neural audio synthesis and effect plugins built on a small causal state-space mo
   - [Sub-Sample Event Scheduling](#sub-sample-event-scheduling)
   - [State Persistence & Preset Engine](#state-persistence--preset-engine)
   - [Dual-Platform GUI Backend](#dual-platform-gui-backend)
-  - [Celemony ARA 2.0 Integration & Fallback](#celemony-ara-20-integration--fallback)
+  - [Celemony ARA 2 status](#celemony-ara-2-status)
 - [Performance & Benchmarks](#performance--benchmarks)
 - [Training & Objectives](#training--objectives)
 - [Build Instructions](#build-instructions)
@@ -189,7 +189,7 @@ The plugin implements native window embedding without heavy third-party GUI fram
 - **Linux (`CLAP_WINDOW_API_X11`)**: Native Xlib rendering with event dispatching.
 - **Decoupled Architecture**: GUI reads parameters asynchronously from atomic caches, ensuring host UI repaints never contend with the audio thread.
 
-### Celemony ARA 2.0 Integration & Fallback
+### Celemony ARA 2 status
 
 **Status: not available in a DAW yet.** ARA 2.0 components live in `src/ara/`, but:
 
