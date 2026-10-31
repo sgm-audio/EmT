@@ -71,9 +71,9 @@ add_subdirectory(tests)
 find_program(CLAP_VALIDATOR_BIN clap-validator)
 if(CLAP_VALIDATOR_BIN)
     add_test(NAME clap-validator
-        COMMAND ${CLAP_VALIDATOR_BIN} "$<TARGET_FILE:mamba_synth>")
+        COMMAND ${CLAP_VALIDATOR_BIN} validate "$<TARGET_FILE:mamba_synth>")
     add_custom_target(clap-validator
-        COMMAND ${CLAP_VALIDATOR_BIN} "$<TARGET_FILE:mamba_synth>"
+        COMMAND ${CLAP_VALIDATOR_BIN} validate "$<TARGET_FILE:mamba_synth>"
         DEPENDS mamba_synth
         COMMENT "Validating CLAP plugin with clap-validator"
         VERBATIM)

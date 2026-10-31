@@ -51,8 +51,10 @@ Per-target flags (set in the root `CMakeLists.txt`, not globally):
   `-Wall -Wextra -Wpedantic` (`/W4` on MSVC).
 - Tests and GTest build with warnings but **with** exceptions/RTTI, which
   GTest and `std::filesystem` fixtures require.
-- MSVC test executables and the plugin link with `/STACK:16777216`:
+- MSVC test executables (not the plugin) link with `/STACK:16777216`:
   `SSMWeights` is ~4 MB at max config and the 1 MB default stack is too small.
+  A plugin can't set the host thread's stack, so `clap_plugin.cpp:624`
+  (`SSMWeights w{}` on the stack) is a known overflow risk in hosts.
 
 ## Tests
 
