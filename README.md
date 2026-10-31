@@ -2,11 +2,11 @@
 
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![CLAP](https://img.shields.io/badge/CLAP-1.2+-purple.svg)](https://cleveraudio.org/)
-[![ARA 2](https://img.shields.io/badge/ARA_2-not_host--connected-lightgrey.svg)](#celemony-ara-2-status)
+[![ARA 2](https://img.shields.io/badge/ARA_2-stub_scaffolding_only-lightgrey.svg)](#celemony-ara-2-status)
 [![CTest](https://img.shields.io/badge/ctest-125%20registered-lightgrey.svg)](docs/BUILD.md)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-Neural audio synthesis and effect plugins built on a small causal state-space model (SSM) in the Mamba family. Delivered as **CLAP** plugins. Includes an ARA 2 document controller and playback renderer, tested on their own but not yet connected to the CLAP entry point (see [ARA status](#celemony-ara-2-status)).
+Neural audio synthesis and effect plugins built on a small causal state-space model (SSM) in the Mamba family. Delivered as **CLAP** plugins. Includes ARA 2 scaffolding (document-controller and renderer classes) that only builds against stub types and isn't connected to the CLAP entry point (see [ARA status](#celemony-ara-2-status)).
 
 > **Read this before quoting architecture or performance claims:**
 > [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md) is the authoritative
@@ -194,11 +194,12 @@ The plugin implements native window embedding without heavy third-party GUI fram
 **Status: not available in a DAW yet.** ARA 2.0 components live in `src/ara/`, but:
 
 - The CLAP entry point only returns the plugin factory (`src/clap/clap_entry.cpp:53-58`); there is no ARA factory, so no host can negotiate ARA with EmT today.
-- `ARA_SDK` is recorded as a submodule (gitlink) but there is no `.gitmodules` file, so it cannot be fetched. Without the SDK, `src/ara/ara_types.h:21-37` compiles against stub forward declarations.
+- `ARA_SDK` is recorded as a submodule (gitlink) but there is no `.gitmodules` file, so it cannot be fetched.
+- The real-SDK path can't switch on even with the SDK present: `src/ara/ara_types.h:21` checks for `<ARA_API/ARAPlugInBase.h>`, a header the ARA SDK doesn't ship. So `src/ara/` always compiles against the stub forward declarations.
 - The ARA classes are exercised by the unit tests in `tests/test_ara.cpp` only.
 
 What the code contains:
-- `ara_document_controller.cpp`: document-controller logic for tempo, time signature, bar positions and pitch trajectories (unit-tested, not host-connected).
+- `ara_document_controller.cpp`: document-controller logic for tempo, time signature, bar positions and pitch trajectories, built against stub types (unit-tested, not host-connected).
 - `ara_playback_renderer.cpp`: offline rendering aligned to timeline regions (unit-tested).
 - `ara_editor_renderer.cpp`: editor-renderer hooks.
 
