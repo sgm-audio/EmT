@@ -1,0 +1,17 @@
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> ParamUpdateRequested: Main thread sets parameter via CLAP
+    ParamUpdateRequested --> Enqueuing: Main thread pushes ParamAtom to SPSC ring
+    Enqueuing --> Enqueued: SPSC ring push succeeds
+    Enqueued --> Processing: Audio thread pops ParamAtom from ring
+    Processing --> Applied: Audio thread applies parameter to internal state
+    Applied --> [*]
+    
+    %% Handle full buffer case
+    Enqueuing --> BufferFull: SPSC ring is full
+    BufferFull --> Dropped: Main thread drops oldest param or new param (policy)
+    Dropped --> [*]
+    
+    %% Handle spurious wakeups or errors
+    Processing --> Error: Pop failed (should not happen in correct implementation)
+    Error --> [*]

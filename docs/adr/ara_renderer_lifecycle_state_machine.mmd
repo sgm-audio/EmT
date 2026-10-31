@@ -1,0 +1,14 @@
+stateDiagram-v2
+    [*] --> Uninitialized
+    Uninitialized --> Initializing: Host calls ARA plugin initialization
+    Initializing --> Ready: ARA DocumentController created and ready
+    Ready --> PlugInAdded: Host adds plug-in to ARA document
+    PlugInAdded --> PlugInRemoved: Host removes plug-in from document (or document closed)
+    PlugInRemoved --> Ready: Plug-in removed but host still alive (can be re-added)
+    Ready --> Uninitialized: Host uninitializes the ARA plug-in
+    PlugInAdded --> OfflineRendering: Host initiates offline rendering (e.g., bounce, render-in-place)
+    OfflineRendering --> PlugInAdded: Offline rendering completes
+    PlugInAdded --> Analysis: Host requests analysis (e.g., chord detection, tempo analysis)
+    Analysis --> PlugInAdded: Analysis completes
+    %% Note: The ARA thread may call into the plug-in for DocumentController, PlaybackRenderer, EditorRenderer.
+    %% We model the high-level lifecycle of the ARA plug-in instance within the host.
