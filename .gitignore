@@ -10,3 +10,16 @@ Thumbs.db
 .idea/
 *.user
 *.suo
+
+# Training / test outputs
+runs/
+models/
+*.pt
+*.ckpt
+*.onnx
+*.zip
+bench-*.json
+test_*_output.txt
+test_*_error.txt
+.venv/
+venv/
