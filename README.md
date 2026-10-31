@@ -3,10 +3,10 @@
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![CLAP](https://img.shields.io/badge/CLAP-1.2+-purple.svg)](https://cleveraudio.org/)
 [![ARA 2](https://img.shields.io/badge/ARA-2.0-orange.svg)](https://www.celemony.com/en/ara)
-[![CTest](https://img.shields.io/badge/tests-125%20passing-brightgreen.svg)]()
+[![CTest](https://img.shields.io/badge/ctest-125%20registered-lightgrey.svg)](docs/BUILD.md)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-Real-time neural audio synthesis and effect processing plugins powered by a **Mamba-3-inspired causal state-space model (SSM)**. Delivered as low-overhead, real-time safe **CLAP** plugins with optional **ARA 2.0** integration for DAW-hosted generative workflows.
+Neural audio synthesis and effect plugins built on a small causal state-space model (SSM) in the Mamba family. Delivered as **CLAP** plugins. ARA 2.0 code exists in `src/ara/` but is **not exposed to hosts yet** (see [ARA status](#celemony-ara-20-integration--fallback)).
 
 > **Read this before quoting architecture or performance claims:**
 > [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md) is the authoritative
@@ -179,7 +179,7 @@ Parameter smoothing (one-pole lowpass filter, 10 ms time constant) and envelope 
 ### State Persistence & Preset Engine
 
 - **EmT Synth**: State saving and loading conforms to Schema v3 (`kStateSchemaV3`), capturing voice allocation, active parameters, and bypass states.
-- **EmT FX**: State saving and loading implements `CLAP_EXT_STATE` (`MBFX` magic `0x4D424658`, version 1), preserving Gain, Mix, and Bypass settings.
+- **EmT FX**: State saving and loading implements `CLAP_EXT_STATE` (`MFXS` magic `0x4D465853`, `src/clap/clap_fx_plugin.cpp:280`), preserving Gain, Mix, and Bypass settings.
 - **Preset File Format**: Human-readable `.mambapreset` files saved to standard user directories (`%APPDATA%/mamba-ssm/presets/` on Windows; `~/.local/share/mamba-ssm/presets/` on Linux).
 
 ### Dual-Platform GUI Backend
@@ -191,11 +191,18 @@ The plugin implements native window embedding without heavy third-party GUI fram
 
 ### Celemony ARA 2.0 Integration & Fallback
 
-Modular ARA 2.0 components live in `src/ara/`:
-- `ara_document_controller.cpp`: Extracts musical tempo, time signature, bar positions, and pitch trajectories from DAW host tracks.
-- `ara_playback_renderer.cpp`: Renders offline neural audio aligned to timeline regions.
-- `ara_editor_renderer.cpp`: Provides interactive audio editing hooks.
-- **Transparent Fallback**: When loaded in hosts that do not negotiate ARA 2.0, the plugin runs in standard real-time CLAP mode with zero overhead or configuration changes.
+**Status: not available in a DAW yet.** ARA 2.0 components live in `src/ara/`, but:
+
+- The CLAP entry point only returns the plugin factory (`src/clap/clap_entry.cpp:53-58`); there is no ARA factory, so no host can negotiate ARA with EmT today.
+- `ARA_SDK` is recorded as a submodule (gitlink) but there is no `.gitmodules` file, so it cannot be fetched. Without the SDK, `src/ara/ara_types.h:21-37` compiles against stub forward declarations.
+- The ARA classes are exercised by the unit tests in `tests/test_ara.cpp` only.
+
+What the code contains:
+- `ara_document_controller.cpp`: document-controller logic for tempo, time signature, bar positions and pitch trajectories (unit-tested, not host-connected).
+- `ara_playback_renderer.cpp`: offline rendering aligned to timeline regions (unit-tested).
+- `ara_editor_renderer.cpp`: editor-renderer hooks.
+
+In every host, EmT currently runs as a normal real-time CLAP plugin.
 
 ---
 
@@ -249,7 +256,7 @@ scalar FiLM/RMSNorm/SiLU work — see `ARCHITECTURE_FIDELITY.md` §3.
   extension. (Reported, not asserted: verify with `clap-validator` and the host.)
 - **Audio Thread Heap Allocations**: 0 bytes (`malloc`/`free`/`new` strictly forbidden on the audio path).
 - **Denormal Prevention**: Automatic FTZ (Flush-to-Zero) and DAZ (Denormals-are-Zero) configured in MXCSR per audio block.
-- **CTest Pass Rate**: **125/125 tests** across 10 suites (see `docs/BUILD.md` for the full checklist). The two tests that need
+- **CTest**: 125 tests are registered across 10 suites (see `docs/BUILD.md`). On a fresh build, 123 pass and 2 are skipped; with the generated inputs below, all 125 pass (re-checked 2026-10-31 on Linux, clang 22). The two tests that need
   generated inputs — `CppParity` (parity vectors) and
   `RealtimeSafety.FxAcceptsMultiLayerWeightsWithinLimits` (an exported model) —
   are given them by CI before `ctest`, and `MAMBA_REQUIRE_PARITY=1` turns a
@@ -317,7 +324,7 @@ ctest --test-dir build --output-on-failure
 
 ### Running CTest & Benchmarks
 
-Run CTest across all 125 registered unit and stability tests:
+Run CTest across all 125 registered tests (2 need generated inputs; see above):
 ```powershell
 ctest --test-dir build -C Release --output-on-failure
 ```
@@ -400,9 +407,9 @@ python scripts/export_mamba_weights.py \
  ```
  .
  ├── CMakeLists.txt               # Root CMake orchestration with enable_testing()
- ├── README.md                    # Comprehensive project documentation
- ├── CHANGELOG.md                 # Complete release history and gap records
- ├── TODO.md                      # Master gap analysis & verification evidence (100% DONE)
+ ├── README.md                    # This file
+ ├── CHANGELOG.md                 # Change history
+ ├── TODO.md                      # Gap analysis and task list
  ├── ARCHITECTURE.md              # Deep technical architectural overview
  ├── PARAMETER_REFERENCE.md       # Plugin parameter specifications
  ├── WEIGHT_FORMAT_SPEC.md        # SSM weight binary format specification

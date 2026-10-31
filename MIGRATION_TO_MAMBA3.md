@@ -21,8 +21,8 @@
 
 **Date:** 2026-06-14  
 **Last updated:** 2026-06-15 — **Phases 1-4 complete, core + CLAP builds**
-**Reference implementation:** `/home/sgm/Desktop/Dev/mamba3/model.py` (PerTrackProcessor, Mamba3MIMOLayer)  
-**Official reference:** `/home/sgm/Github Repo's/Mamba Based/mamba/mamba_ssm/modules/mamba3.py` (Mamba3, step())  
+**Reference implementation:** `mamba3/model.py` in [sgm-audio/mamba3](https://github.com/sgm-audio/mamba3/blob/master/mamba3/model.py) (PerTrackProcessor, Mamba3MIMOLayer)  
+**Official reference:** `mamba_ssm/modules/mamba3.py` in [state-spaces/mamba](https://github.com/state-spaces/mamba) (Mamba3, step())  
 **Paper:** arXiv 2603.15569
 
 ## Migration Progress Tracker
