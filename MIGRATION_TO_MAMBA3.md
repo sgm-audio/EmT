@@ -21,8 +21,8 @@
 
 **Date:** 2026-06-14  
 **Last updated:** 2026-06-15 — **Phases 1-4 complete, core + CLAP builds**
-**Reference implementation:** `/home/sgm/Desktop/Dev/mamba3/model.py` (PerTrackProcessor, Mamba3MIMOLayer)  
-**Official reference:** `/home/sgm/Github Repo's/Mamba Based/mamba/mamba_ssm/modules/mamba3.py` (Mamba3, step())  
+**Reference implementation:** `mamba3/model.py` in [sgm-audio/mamba3](https://github.com/sgm-audio/mamba3/blob/master/mamba3/model.py) (PerTrackProcessor, Mamba3MIMOLayer)  
+**Official reference:** `mamba_ssm/modules/mamba3.py` in [state-spaces/mamba](https://github.com/state-spaces/mamba) (Mamba3, step())  
 **Paper:** arXiv 2603.15569
 
 ## Migration Progress Tracker
@@ -35,7 +35,7 @@
 | 4 | CLAP Plugin Shell (`clap_plugin.cpp`, `clap_latency.cpp`, `conditioning_frame.h`) | ✅ **DONE** |
 | 5 | Python Export Pipeline (`export_mamba_weights.py`, `validate_export.py`) | ✅ **DONE** |
 | 6 | Tests (6 files) | ✅ **DONE** — 40/40 passing |
-| 7 | ss_block.cpp `process_sample()` Mamba-3 forward pass | ✅ **DONE** |
+| 7 | ss_block.cpp `process_sample()` Mamba-3-inspired forward pass (two-term bilinear, real state, rank-1) | ✅ **DONE** |
 
 **Build status:** Core library + CLAP plugin (`mamba_synth`) compiles and links. **40/40 tests pass** (the suite has since grown to 64). The 1.79 us/sample single-layer / 3.73 us/sample 2-layer figures were measured on the *toy* benchmark shape (d_state 16, d_model 16, d_inner 32, 2 heads); the shapes this repo's own training configs produce cost 4.3 us (laptop config) to ~19 us (RunPod L4 config) per sample per layer. Use `tests/benchmark_ssm_block.cpp` and quote its JSON.
 
@@ -55,12 +55,12 @@ This project implements Mamba-1 (arxiv 2312.00752):
 
 ## The Target: Mamba-3
 
-Mamba-3 eliminates every Mamba-1 limitation:
+The Mamba-3 paper changes these things relative to Mamba-1 (status in this repo noted per item):
 - **No conv1d** — removes the stateful delay line; note Mamba-1/2's causal conv is *already* zero-look-ahead in streaming form, so this is a compute/simplification win rather than a latency win
 - **Caveat:** the shipped recurrence is two-term bilinear, not the paper's exponential-trapezoidal form
 - **(paper feature — NOT implemented)** exponential-trapezoidal discretization; the shipped rule is the classical two-term trapezoidal/bilinear update above, which is stable and cheap but carries no input-history (β) term
 - **A, B, C all input-dependent** — via single `in_proj` layer
-- **Multi-head SSM** — H heads, each a resonant complex pole
+- **Multi-head SSM** — H heads; in this repo each head has a real scalar decay (no complex pole, see below)
 - **Data-dependent rotation of B/C** — implemented (`step_rope_bc`); the *state* itself stays real
 - **(not implemented)** complex-valued state / complex-plane poles per head — `ssm_imag` is allocated but never written
 - **(refused, not executed — D3 closed 2026-10-04)** MIMO — the weight format, exporter and loader still reserve rank R, but the inference path implements rank 0 only. A file with `mimo_rank > 1` is now rejected at load (`-16`), at export, and at training-config validation; `mimo_o` is never applied.
@@ -101,7 +101,7 @@ Input: u ∈ ℝ^d_model
    y = einsum("h r p, h r p -> h p", y, mimo_o)    — rank-R → headdim
    z = einsum("h r p, h r p -> h r p", z, mimo_z)   — MIMO z projection
    The shipped recurrence indexes rank 0 only and never applies mimo_o/mimo_z,
-   so mimo_rank > 1 is silently rank-1 at inference (ARCHITECTURE_FIDELITY.md D3).
+   so files with mimo_rank > 1 are refused at load with error -16 (ARCHITECTURE_FIDELITY.md D3, closed 2026-10-04).
 
 6. Output projection + residual:
    out = out_proj(concat_head(y))
