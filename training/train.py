@@ -543,7 +543,7 @@ def main():
             f"mimo_rank={cfg.get('mimo_rank')} is not supported: the runtime "
             "implements rank-1 SISO per head (deviation D3 in "
             "ARCHITECTURE_FIDELITY.md). Use mimo_rank: 1, or implement the "
-            "rank-R reduction first (see Prompts/DEVIATION_RESOLUTION/D3_MIMO_RANK.md).")
+            "rank-R reduction first (deviation D3 in docs/ARCHITECTURE_FIDELITY.md).")
 
     for flag, key in [("batch_size", "batch_size"), ("grad_accum", "grad_accum"),
                       ("num_workers", "num_workers"), ("lr", "lr"),
