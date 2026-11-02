@@ -77,6 +77,10 @@ emt_add_test(test_dsp_helpers test_dsp_helpers.cpp)
 
 emt_add_test(test_stability test_stability.cpp)
 
+# Audio-thread vs main-thread stress (TSan target; see test_rt_stress.cpp).
+emt_add_test(test_rt_stress test_rt_stress.cpp)
+target_link_libraries(test_rt_stress PRIVATE Threads::Threads)
+
 emt_add_test(test_realtime_safety
     test_realtime_safety.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/clap_fx_plugin.cpp
