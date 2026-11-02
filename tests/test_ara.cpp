@@ -1,5 +1,5 @@
 // tests/test_ara.cpp
-// Comprehensive tests for ARA 2.0 DocumentController and PlaybackRenderer
+// Tests for the ARA stub classes (no ARA SDK, not host-reachable)
 
 #include "ara/ara_document_controller.h"
 #include "ara/ara_renderer.h"

@@ -39,7 +39,7 @@ import torch.nn.functional as F
 # Reference Mamba-3 block (PyTorch)
 #
 # Matches the C++ SSMBlock architecture:
-#   - No conv1d (zero latency)
+#   - No conv1d, so no extra algorithmic delay from it
 #   - Fused in_proj: all projections in one linear layer
 #   - Per-head A (decay) and dt (step size)
 #   - RMSNorm on B and C
