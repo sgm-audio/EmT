@@ -13,12 +13,12 @@ Branch `chore/sanitize`, cut from `main` @ `855e84e`. 5 local commits, including
 | `docs/archive/AUDIT_REPORT.md`, `GAP_ANALYSIS.md` | 2 | Agent-generated audit ("96/100") and gap analysis, both superseded. |
 | `extern/clap/include/{ext,factory,private}` | 44 | Byte-identical copies of `include/clap/*`. Nothing includes them. `extern/clap/LICENSE` (MIT) and a README naming CLAP 1.2.7 were added. |
 | `ARA_SDK` gitlink | 1 | No `.gitmodules` entry, so a clone can't fetch it. |
-| `packages/` | 10 | Duplicate PNGs of `assets/gui`. The two unique tiles (`lora_sigil_tile_{active,inactive}.png`) stay in `packages/emt_lora_matrix_companion/` for now; moving them to `assets/gui/` is deferred to the credentialed push. |
+| `packages/` | 10 | Duplicate PNGs of `assets/gui`. The two unique tiles (renamed `sigil_tile_{active,inactive}.png`) stay in `packages/emt_matrix_companion/` (dir renamed from `emt_lora_matrix_companion` on 2026-11-02); moving them to `assets/gui/` is deferred to the credentialed push. |
 
 ## Moved
 - Root docs → `docs/`: ARCHITECTURE, ARCHITECTURE_FIDELITY, CLAIMS_VERIFICATION, MIGRATION_TO_MAMBA3, PARAMETER_REFERENCE, REFACTORING_PLAN, TODO, TRAINING_PLAN, WEIGHT_FORMAT_SPEC.
 - `ADR's/` → `docs/adr/` (the apostrophe in the folder name broke shell scripts).
-- GUI images: `assets/gui/README.md` added, saying they're mockups the plugin doesn't load. Moving and renaming the five that are still at the repo root, in `packages/` or under their old name (`emt_lora_matrix_companion_daw_ready.png`) is deferred to the credentialed push; the README lists their current paths.
+- GUI images: `assets/gui/README.md` added, saying they're mockups the plugin doesn't load. Moving and renaming the five that are still at the repo root, in `packages/` or under their old name (`emt_lora_matrix_companion_daw_ready.png`, renamed `emt_matrix_companion_daw_ready.png` 2026-11-02) is deferred to the credentialed push; the README lists their current paths.
 - `verify_deviations.py` now reads `docs/ARCHITECTURE_FIDELITY.md`. 26 absolute `file:///x:/...` links in TODO.md are now relative.
 
 ## Added
