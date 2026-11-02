@@ -47,7 +47,7 @@ inline void write_audio_output(clap_audio_buffer_t& out_bus, uint32_t sample_idx
 }
 
 // ---------------------------------------------------------------------------
-// Robust CLAP Stream I/O helpers
+// CLAP stream I/O helpers (handle short reads/writes)
 // ---------------------------------------------------------------------------
 
 inline bool stream_write_all(const clap_ostream_t* stream, const void* data, uint64_t size) {
