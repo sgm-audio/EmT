@@ -174,11 +174,11 @@ int main() {
 
         double psm = 0.0;
         {
-            float x = 1.0f;
+            float y = 1.0f;
             auto start = clock_type::now();
             for (size_t n = 0; n < ITERS; ++n) {
-                core.process_sample(x);
-                x *= 0.999f;
+                core.process_sample(y);
+                y *= 0.999f;
             }
             auto end = clock_type::now();
             psm = elapsed_seconds(start, end) / ITERS;

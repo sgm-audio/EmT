@@ -26,8 +26,17 @@ struct SSMWeights {
     float W_out[MAX_D_MODEL][MAX_D_INNER];
     float W_ssm[MAX_D_MODEL][MAX_D_STATE];
     float b_in[MAX_D_INNER];
+    // Conditioning projection (Phase 3): the audio thread reads a
+    // COND_DIM vector and applies a learned per-state linear projection
+    // to modulate dt and B inside the SSM step.  Per-layer weights so
+    // each layer can specialise its response to musical context.
+    //
+    //   delta_effective = softplus(delta_base + cond_proj_dt @ cond + cond_dt_bias)
+    //   B_effective     = B_base + cond_proj_B @ cond + cond_B_bias
     float cond_proj_dt[MAX_D_STATE][COND_DIM];
     float cond_proj_B[MAX_D_STATE][COND_DIM];
+    float cond_dt_bias[MAX_D_STATE];
+    float cond_B_bias[MAX_D_STATE];
 };
 
 struct SSMBlockParams {

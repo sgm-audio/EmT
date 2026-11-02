@@ -4,14 +4,22 @@
 #include <cmath>
 #include <algorithm>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 namespace {
 
 void set_mxcsr_ftz_daz_impl() {
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(_MSC_VER)
+    unsigned int mxcsr = _mm_getcsr();
+    mxcsr |= 0x8040;
+    _mm_setcsr(mxcsr);
+#elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
     unsigned int mxcsr;
     __asm__ __volatile__ ("stmxcsr %0" : "=m"(mxcsr));
     mxcsr |= 0x8040;
-    __asm__ __volatile__ ("ldmxcsr %0" : : "m"(mxcsr));
+    __asm__ __volatile__ ("ldmxcsr %0" : "=m"(mxcsr));
 #endif
 }
 
@@ -123,11 +131,19 @@ float SSMBlock::process_sample(float input) {
     }
 
     // === Step 4: Conditioning modulation (learned projection) ===
-    // Uses dedicated cond_proj weights (d_state, COND_DIM) per ADR-003
+    // Uses dedicated cond_proj weights (d_state, COND_DIM) plus per-state
+    // biases (cond_dt_bias, cond_B_bias) per ADR-003 + Phase 3 spec:
+    //
+    //   dt_eff = softplus(dt_base + (cond_proj_dt @ cond) + cond_dt_bias)
+    //   B_eff  = B_base           + (cond_proj_B  @ cond) + cond_B_bias
+    //
+    // The short-circuit `conditioning_active_` flag skips the per-state
+    // matmul when the conditioning vector is all-zero (saves ~2*d_state*
+    // COND_DIM FLOPs per sample in the common case).
     if (conditioning_active_) {
         for (size_t i = 0; i < d_state_; ++i) {
-            float dt_cond = 0.0f;
-            float b_cond = 0.0f;
+            float dt_cond = weights_.cond_dt_bias[i];
+            float b_cond = weights_.cond_B_bias[i];
             for (size_t c = 0; c < COND_DIM; ++c) {
                 float cv = cond_[c];
                 dt_cond += weights_.cond_proj_dt[i][c] * cv;

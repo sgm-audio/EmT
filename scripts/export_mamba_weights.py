@@ -54,6 +54,10 @@ class MambaBlock(nn.Module):
         # Conditioning projections (d_state, cond_dim)
         self.cond_proj_dt = nn.Parameter(torch.zeros(d_state, 16))
         self.cond_proj_B = nn.Parameter(torch.zeros(d_state, 16))
+        # Per-state additive biases for the conditioning projection
+        # (Phase 3 of TODO.md).  Mirrors the dt_bias convention.
+        self.cond_dt_bias = nn.Parameter(torch.zeros(d_state))
+        self.cond_B_bias = nn.Parameter(torch.zeros(d_state))
 
         # Output projections
         self.W_out = nn.Linear(d_inner, d_model, bias=False)
@@ -117,7 +121,7 @@ HEADER_SIZE = 64
 
 def floats_per_layer(ds: int, dm: int, di: int, dc: int, cd: int = 16) -> int:
     return (3 * ds + 3 * ds * di + dc * di + 2 * di +
-            di * dm + dm * di + dm * ds + 2 * ds * cd)
+            di * dm + dm * di + dm * ds + 2 * ds * cd + 2 * ds)
 
 
 def make_header(ds: int, dm: int, di: int, dc: int,
@@ -163,6 +167,10 @@ def extract_layer_weights(block: MambaBlock) -> bytes:
     parts.append(block.cond_proj_dt.detach().cpu().numpy().tobytes())
     # 14. cond_proj_B: (d_state, cond_dim)
     parts.append(block.cond_proj_B.detach().cpu().numpy().tobytes())
+    # 15. cond_dt_bias: (d_state,)  -- Phase 3 additive bias
+    parts.append(block.cond_dt_bias.detach().cpu().numpy().tobytes())
+    # 16. cond_B_bias: (d_state,)  -- Phase 3 additive bias
+    parts.append(block.cond_B_bias.detach().cpu().numpy().tobytes())
     return b''.join(parts)
 
 
@@ -203,8 +211,10 @@ def _random_init(model: SimpleMamba, std: float = 0.02):
         nn.init.normal_(b.C_proj_w, std=std)
         nn.init.normal_(b.W_out.weight, std=std)
         nn.init.normal_(b.W_ssm.weight, std=std)
-        nn.init.normal_(b.cond_proj_dt, std=std)
-        nn.init.normal_(b.cond_proj_B, std=std)
+    nn.init.normal_(b.cond_proj_dt, std=std)
+    nn.init.normal_(b.cond_proj_B, std=std)
+    nn.init.normal_(b.cond_dt_bias, std=0.1)
+    nn.init.normal_(b.cond_B_bias, std=0.1)
 
 
 def generate_config_h(ds: int, dm: int, di: int, dc: int,

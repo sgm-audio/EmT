@@ -5,10 +5,21 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -fno-math-errno -fno-trapping-math -fno-reciprocal-math -fno-signaling-nans -fcx-limited-range")
-set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fsanitize=address")
+if(MSVC)
+    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG")
+    set(CMAKE_CXX_FLAGS_DEBUG "/Od /Zi")
+    # MSVC has /W4 by default; map -Wall/-Wextra to it for parity.
+    set(_MAMBA_WARN_FLAGS /W4 /permissive-)
+    set(_MAMBA_NO_EXCEPTIONS_RTTI_FLAGS /GR-)
+else()
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -fno-math-errno -fno-trapping-math -fno-reciprocal-math -fno-signaling-nans -fcx-limited-range")
+    set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fsanitize=address")
+    set(_MAMBA_WARN_FLAGS -Wall -Wextra -Wpedantic)
+    set(_MAMBA_NO_EXCEPTIONS_RTTI_FLAGS -fno-exceptions -fno-rtti -fvisibility=hidden)
+endif()
 
-string(APPEND CMAKE_CXX_FLAGS_RELEASE " -fno-exceptions -fno-rtti -fvisibility=hidden -Wall -Wextra -Wpedantic")
+# Apply extra flags via add_compile_options so they remain separate tokens.
+add_compile_options(${_MAMBA_NO_EXCEPTIONS_RTTI_FLAGS} ${_MAMBA_WARN_FLAGS})
 
 if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
 set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0")
@@ -19,8 +30,9 @@ include(FetchContent)
 
 FetchContent_Declare(
 googletest
-GIT_REPOSITORY https://github.com/google/googletest.git
-GIT_TAG v1.14.0
+URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+URL_HASH SHA256=8ad598c73ad796e0d8280b082cebd82a630d73e73cd3c70057938a6501bba5d7
+DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 set(gtest_force_shared_crt ON)
 set(BUILD_GMOCK OFF)
