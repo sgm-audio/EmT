@@ -83,6 +83,10 @@ def run_gtest(build_dir: Path, binary: str, gtest_filter: str) -> Result:
     """Run a gtest filter and turn it into evidence."""
     exe = build_dir / "tests" / binary
     if not exe.exists():
+        # Windows builds append .exe; without this every behavioural check
+        # silently SKIPs and the register looks greener than it is.
+        exe = exe.with_suffix(".exe")
+    if not exe.exists():
         return Result("", "", SKIP, [f"SKIP: {exe} not built"])
     cp = run([str(exe), f"--gtest_filter={gtest_filter}"])
     tail = [
@@ -99,17 +103,85 @@ def run_gtest(build_dir: Path, binary: str, gtest_filter: str) -> Result:
 # ---------------------------------------------------------------------------
 
 
+def strip_comments(text: str) -> str:
+    """Drop // and /* */ comments, keeping string/char literals intact.
+
+    The checks below are text searches, so without this a doc comment that
+    merely *mentions* beta/gamma (e.g. the D1/D2 design note in
+    recurrence_kernel.h) would flip D1 to CLOSED. A check that a comment can
+    satisfy proves nothing.
+    """
+    out = []
+    i, n = 0, len(text)
+    state = None  # None | "line" | "block" | "str" | "char"
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if state is None:
+            if c == "/" and nxt == "/":
+                state = "line"
+                i += 2
+                continue
+            if c == "/" and nxt == "*":
+                state = "block"
+                i += 2
+                continue
+            if c == '"':
+                state = "str"
+            elif c == "'":
+                state = "char"
+            out.append(c)
+            i += 1
+            continue
+        if state == "line":
+            if c == "\n":
+                state = None
+                out.append(c)
+            i += 1
+            continue
+        if state == "block":
+            if c == "*" and nxt == "/":
+                state = None
+                i += 2
+                continue
+            i += 1
+            continue
+        if c == "\\":  # escape inside a literal
+            out.append(c)
+            i += 1
+            if i < n:
+                out.append(text[i])
+                i += 1
+            continue
+        if (state == "str" and c == '"') or (state == "char" and c == "'"):
+            state = None
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def recurrence_body() -> str:
+    """The recurrence formula lives in recurrence_kernel.h (F1 §a extraction).
+
+    Scan the step_recurrence() body PLUS the kernel header, so the D1/D2
+    evidence describes the code that actually runs rather than the thin
+    wrapper that calls it. Comments are stripped first: prose must not be able
+    to satisfy (or break) a check.
+    """
+    src = read(CORE / "ssm_block.cpp")
+    body = src[src.find("void SSMBlock::step_recurrence") :]
+    body = body[: body.find("\n}\n")]
+    return strip_comments(body + "\n" + read(CORE / "recurrence_kernel.h"))
+
+
 def check_d1() -> Result:
     r = Result("D1", "exponential-trapezoidal three-term recurrence", OPEN_PENDING)
-    src = read(CORE / "ssm_block.cpp")
-    rec = src[src.find("void SSMBlock::step_recurrence") :]
-    rec = rec[: rec.find("\n}\n")]
+    rec = recurrence_body()
     has_history = bool(re.search(r"(x_prev|B_prev|beta|gamma)", rec))
-    r.evidence.append(
-        f"step_recurrence() contains an input-history (beta/gamma) term: {has_history}"
-    )
-    two_term = bool(re.search(r"ssm_real\[h\]\[d\]\[s\] = A_bar", rec))
-    r.evidence.append(f"step_recurrence() uses a two-term update: {two_term}")
+    r.evidence.append(f"recurrence contains an input-history (beta/gamma) term: {has_history}")
+    # Matches the pre-extraction inline assignment and the kernel's form.
+    two_term = bool(re.search(r"(ssm_real\[h\]\[d\]\[s\] = A_bar|a_bar \* h\b)", rec))
+    r.evidence.append(f"recurrence uses a two-term update: {two_term}")
     if has_history:
         r.status = CLOSED
         r.evidence.append(
@@ -128,11 +200,10 @@ def check_d1() -> Result:
 
 def check_d2() -> Result:
     r = Result("D2", "2x2 rotational state dynamics (complex state)", OPEN_PENDING)
-    src = read(CORE / "ssm_block.cpp")
-    body = src[src.find("void SSMBlock::step_recurrence") :]
-    body = body[: body.find("\n}\n")]
+    body = recurrence_body()
     writes_imag = bool(re.search(r"ssm_imag\[[^\]]*\]\s*[+\-*/]?=", body))
-    r.evidence.append(f"step_recurrence() writes ssm_imag (rotational dynamics): {writes_imag}")
+    r.evidence.append(f"recurrence writes ssm_imag (rotational dynamics): {writes_imag}")
+    src = read(CORE / "ssm_block.cpp")
     rope = bool(re.search(r"B_norm\[base \+ s0\] = B0", src))
     r.evidence.append(f"B/C RoPE rotation present: {rope}")
     if writes_imag:

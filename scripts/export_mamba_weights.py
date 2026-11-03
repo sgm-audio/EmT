@@ -32,7 +32,7 @@ from emt_format import (  # noqa: E402
 # Reference Mamba-3 block (PyTorch)
 #
 # Matches the C++ SSMBlock architecture:
-#   - No conv1d, so no extra algorithmic delay from it
+#   - No conv1d (zero latency)
 #   - Fused in_proj: all projections in one linear layer
 #   - Per-head A (decay) and dt (step size)
 #   - RMSNorm on B and C
@@ -144,7 +144,7 @@ class Mamba3Block(nn.Module):
         dd_A = proj[..., idx : idx + self.nheads]
         idx += self.nheads
         _trap = proj[..., idx : idx + self.nheads]
-        idx += self.nheads  # unused (E26)
+        idx += self.nheads
         angles = proj[..., idx : idx + self.num_rope_angles]
 
         # Reshape B, C and clone so that in-place RoPE updates are safe
