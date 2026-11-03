@@ -427,7 +427,8 @@ class ReferenceForward:
             for i in range(d_inner):
                 s += w.out_proj_w[j, i] * y_head[i]
             if j < nheads:
-                s += w.D_proj[j] * x[j * headdim]
+                # D-skip: channel j's own input x[j], not head j's channel 0 (E9).
+                s += w.D_proj[j] * x[j]
             s += u_film[j]
             out[j] = s
 
