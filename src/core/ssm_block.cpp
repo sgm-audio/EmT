@@ -312,7 +312,9 @@ void SSMBlock::step_out_proj_residual(const float* x_ptr, float* output) {
     for (size_t j = 0; j < d_model_; ++j) {
         float sum = simd::dot_product(weights_.out_proj_w[j], y_head_.data(), d_inner_);
         if (j < nheads_) {
-            sum += weights_.D_proj[j] * x_ptr[j * headdim_];
+            // D-skip: channel j's own input x_ptr[j], not head j's channel 0
+            // (E9). The old x_ptr[j * headdim_] was cross-wired.
+            sum += weights_.D_proj[j] * x_ptr[j];
         }
         sum += u_film_[j];
         out_[j] = sum;
