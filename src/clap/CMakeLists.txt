@@ -13,6 +13,7 @@ preset_bank.cpp
 preset_codec.cpp
 preset_paths.cpp
 gui_common.cpp
+preset_discovery.cpp
 )
 
 # Exactly one GUI backend implements the gui_backend_* seam declared in

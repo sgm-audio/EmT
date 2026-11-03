@@ -1,6 +1,7 @@
 #include "clap/clap_plugin.h"
 #include "clap/clap_common_utils.h"
 #include "clap/clap_gui.h"
+#include "clap/clap_presets.h"
 #include "clap/param_table.h"
 #include "config.h"
 #include <cstring>
@@ -8,6 +9,8 @@
 #include <cstdio>
 #include <algorithm>
 #include <clap/ext/timer-support.h>
+#include <clap/ext/preset-load.h>
+#include <clap/factory/preset-discovery.h>
 #include <new>
 
 namespace mamba {
@@ -537,6 +540,26 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
 // CLAP_EXT_THREAD_CHECK, and helpers in clap_thread_check.h use the
 // cached host pointer instead. We keep the slot here so get_extension
 // is unambiguous about which IDs the plugin recognizes.
+// clap.preset-load: load a preset by the preset-discovery location (E13).
+static bool plugin_preset_load_from_location(const clap_plugin_t* plugin,
+                                             uint32_t location_kind,
+                                             const char* location,
+                                             const char* load_key) {
+    auto* m = get_synth(plugin);
+    if (location_kind == CLAP_PRESET_DISCOVERY_LOCATION_PLUGIN) {
+        // Factory preset bundled in the DSO; load_key is the preset name.
+        return load_key ? apply_factory_preset(m, load_key) : false;
+    }
+    if (location_kind == CLAP_PRESET_DISCOVERY_LOCATION_FILE && location) {
+        return load_preset(m, location);
+    }
+    return false;
+}
+
+static const clap_plugin_preset_load_t s_preset_load = {
+    plugin_preset_load_from_location
+};
+
 static const void* plugin_get_extension(const clap_plugin_t* plugin, const char* id) {
     (void)plugin;
 
@@ -563,6 +586,9 @@ static const void* plugin_get_extension(const clap_plugin_t* plugin, const char*
     }
     if (strcmp(id, CLAP_EXT_TIMER_SUPPORT) == 0) {
         return &s_timer_support;
+    }
+    if (strcmp(id, CLAP_EXT_PRESET_LOAD) == 0) {
+        return &s_preset_load;
     }
     return nullptr;
 }
