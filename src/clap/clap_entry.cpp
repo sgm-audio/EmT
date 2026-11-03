@@ -1,4 +1,5 @@
 #include <clap/clap.h>
+#include <clap/factory/preset-discovery.h>
 #include "clap/clap_plugin.h"
 #include "clap/clap_fx_plugin.h"
 #include <cstring>
@@ -7,6 +8,7 @@ namespace mamba {
 
 extern const clap_plugin_descriptor_t emt_synth_descriptor;
 extern const clap_plugin_descriptor_t emt_fx_descriptor;
+extern const clap_preset_discovery_factory_t s_preset_discovery_factory;
 const clap_plugin_t* mamba_synth_create(const clap_host_t* host);
 
 } // namespace mamba
@@ -53,6 +55,10 @@ static void entry_deinit(void) {}
 static const void* entry_get_factory(const char* factory_id) {
     if (strcmp(factory_id, CLAP_PLUGIN_FACTORY_ID) == 0) {
         return &s_factory;
+    }
+    if (strcmp(factory_id, CLAP_PRESET_DISCOVERY_FACTORY_ID) == 0 ||
+        strcmp(factory_id, CLAP_PRESET_DISCOVERY_FACTORY_ID_COMPAT) == 0) {
+        return &mamba::s_preset_discovery_factory;
     }
     return nullptr;
 }
