@@ -179,7 +179,9 @@ TEST(RecurrenceKernel, TwoTermHeadWritesOnlyItsSlices) {
     }
     for (size_t i = 0; i < y.size(); ++i) {
         const bool in_slice = i >= target * headdim && i < (target + 1) * headdim;
-        if (!in_slice) ASSERT_EQ(as_u32(y[i]), as_u32(0.0f)) << "output element " << i << " outside the slice changed";
+        if (!in_slice) {
+            ASSERT_EQ(as_u32(y[i]), as_u32(0.0f)) << "output element " << i << " outside the slice changed";
+        }
     }
 }
 

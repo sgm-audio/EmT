@@ -15,9 +15,6 @@ else()
     # EMT_X86_AVX2 is ON, so a non-AVX2 build is possible.
     option(EMT_X86_AVX2 "Build with AVX2/FMA" ON)
     option(EMT_WERROR "Treat warnings as errors on project code" OFF)
-    if(EMT_WERROR)
-        list(APPEND EMT_WARN_FLAGS -Werror)
-    endif()
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64" AND EMT_X86_AVX2)
         set(_EMT_ISA_FLAGS "-mavx2 -mfma")
     else()
@@ -26,6 +23,11 @@ else()
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 ${_EMT_ISA_FLAGS} -fno-math-errno -fno-trapping-math -fno-reciprocal-math -fcx-limited-range")
     set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fsanitize=address")
     set(EMT_WARN_FLAGS -Wall -Wextra -Wpedantic)
+    # -Werror must be appended AFTER the base flags above (an earlier
+    # list(APPEND) was clobbered by this set()).
+    if(EMT_WERROR)
+        list(APPEND EMT_WARN_FLAGS -Werror)
+    endif()
     # -fno-signaling-nans is a GNU-only flag; Clang warns it is ignored on
     # every TU (E5/E21). Keep it only for GCC.
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
