@@ -217,8 +217,10 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
             m->next_note_id = std::max(m->next_note_id, saved.note_id + 1);
         }
         // Set voice 0 state into core (the core's state doesn't persist
-        // across save/load, but set it so audio starts from a valid state)
-        m->core->set_state(voice_states[0].ssm_state);
+        // across save/load, but set it so audio starts from a valid state).
+        // State load runs on the main thread while the audio thread is
+        // stopped (CLAP contract), so mutating the published core is safe.
+        if (auto* c = m->core.published()) c->set_state(voice_states[0].ssm_state);
     }
 
     std::memset(m->weight_path, 0, sizeof(m->weight_path));

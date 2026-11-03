@@ -480,7 +480,7 @@ int main(int argc, char** argv) {
 #if defined(_WIN32)
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 #endif
-    SSMBlock::apply_ftz_daz();
+    ScopedFtzDaz ftz_guard;  // FTZ/DAZ for the run, restored on scope exit
 
     Options opt;
     if (!parse_args(argc, argv, opt)) return 2;

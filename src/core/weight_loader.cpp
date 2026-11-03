@@ -35,6 +35,9 @@ bool resolve_path(const char* path, char* out, size_t out_size) {
         std::snprintf(out, out_size, "%s", path);
         return true;
     }
+    // Main thread only: resolve_weight_path runs during load_weights, never on
+    // the audio thread, so std::getenv is safe here (clang-tidy concurrency-
+    // mt-unsafe is suppressed by this contract, not silenced blindly).
     const char* env = std::getenv("EMT_WEIGHTS");
     if (!env || !*env) env = std::getenv("MAMBA_WEIGHTS");
     if (env && *env) {

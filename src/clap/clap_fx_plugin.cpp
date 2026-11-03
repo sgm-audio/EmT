@@ -46,7 +46,7 @@ static bool fx_init(const clap_plugin_t* plugin) {
     auto* f = get_fx(plugin);
     f->core_cfg = MambaConfig::max_config();
     f->core_cfg.num_layers = 1;
-    f->core = new (f->core_storage.data) SSMInferenceCore(f->core_cfg);
+    f->core.publish(new SSMInferenceCore(f->core_cfg));
     f->sample_rate = 48000.0;
     f->block_size = 512;
     f->is_active = false;
@@ -70,7 +70,7 @@ static bool fx_init(const clap_plugin_t* plugin) {
 
 static void fx_destroy(const clap_plugin_t* plugin) {
     auto* f = get_fx(plugin);
-    if (f->core) { f->core->~SSMInferenceCore(); f->core = nullptr; }
+    f->core.destroy();
     delete f;
     delete plugin;
 }
@@ -83,7 +83,7 @@ static bool fx_activate(const clap_plugin_t* plugin, double sample_rate,
     f->block_size = max_frames;
     f->is_active = true;
     recompute_smooth_coefficients(f);
-    f->core->reset();
+    if (auto* c = f->core.published()) c->reset();
     return true;
 }
 
@@ -105,7 +105,7 @@ static void fx_stop_processing(const clap_plugin_t* plugin) {
 
 static void fx_reset(const clap_plugin_t* plugin) {
     auto* f = get_fx(plugin);
-    f->core->reset();
+    if (auto* c = f->core.published()) c->reset();
     f->bypass_state.store(BYPASS_PROCESSING, std::memory_order_relaxed);
     f->bypass_fade.store(0.0f, std::memory_order_relaxed);
 }
@@ -158,7 +158,10 @@ static const clap_plugin_params_t s_fx_params = {fx_params_count, fx_params_get_
 static clap_process_status fx_process(const clap_plugin_t* plugin, const clap_process_t* process) {
     if (!process || !process->audio_outputs || process->audio_outputs_count == 0)
         return CLAP_PROCESS_ERROR;
-    auto* f = get_fx(plugin); SSMBlock::apply_ftz_daz(); f->thread_check.mark_audio_thread();
+    auto* f = get_fx(plugin);
+    ScopedFtzDaz ftz_guard;  // FTZ/DAZ for the block; MXCSR restored on exit (E8/E19)
+    f->thread_check.mark_audio_thread();
+    SSMInferenceCore* core = f->core.adopt();  // stable across this block (E12)
     clap_audio_buffer_t& out = process->audio_outputs[0];
     const clap_audio_buffer_t* in = process->audio_inputs && process->audio_inputs_count ? &process->audio_inputs[0] : nullptr;
     if ((!out.data32 && !out.data64) || out.channel_count == 0) return CLAP_PROCESS_ERROR;
@@ -189,7 +192,7 @@ static clap_process_status fx_process(const clap_plugin_t* plugin, const clap_pr
             else if (in->data64 && in->data64[ch]) dry[ch]=static_cast<float>(in->data64[ch][n]);
         }
         const float mono = nc > 1 ? 0.5f*(dry[0]+dry[1]) : dry[0];
-        alignas(64) float processed[MAX_D_MODEL]; f->core->process_sample(mono, processed);
+        alignas(64) float processed[MAX_D_MODEL]; core->process_sample(mono, processed);
         for (uint32_t ch=0; ch<out.channel_count; ++ch) {
             const float d = ch < nc ? dry[ch] : mono;
             const float wet = processed[0] * static_cast<float>(gain);
@@ -238,7 +241,9 @@ bool fx_load_weights(FxState* f, const char* path) {
     if (hdr.version == 2) {
         f->core_cfg.num_layers = hdr.num_layers;
     }
-    f->core->init(f->core_cfg);
+
+    // Build the new engine off the audio path and publish it (E12).
+    auto* new_core = new SSMInferenceCore(f->core_cfg);
 
     auto w_ptr = std::make_unique<SSMWeights>();
     SSMWeights& w = *w_ptr;
@@ -246,6 +251,7 @@ bool fx_load_weights(FxState* f, const char* path) {
     for (uint32_t layer = 0; layer < f->core_cfg.num_layers; ++layer) {
         WeightLayerPointers ptrs;
         if (f->weight_loader.get_layer_pointers(layer, ptrs) != LoadError::Ok) {
+            delete new_core;
             f->weight_loader.unload();
             return false;
         }
@@ -269,8 +275,10 @@ bool fx_load_weights(FxState* f, const char* path) {
         std::memcpy(w.film_proj_w, ptrs.film_proj_w, 2 * f->core_cfg.d_model * f->core_cfg.cond_dim * sizeof(float));
         std::memcpy(w.dt_film_proj_w, ptrs.dt_film_proj_w, 2 * f->core_cfg.nheads * f->core_cfg.cond_dim * sizeof(float));
 
-        f->core->set_layer_weights(layer, w);
+        new_core->set_layer_weights(layer, w);
     }
+    f->core.reclaim();   // free any previously retired core (main thread)
+    f->core.publish(new_core);
     f->weights_loaded.store(true, std::memory_order_release);
     std::strncpy(f->weight_path, path, sizeof(f->weight_path) - 1);
     f->weight_path[sizeof(f->weight_path) - 1] = '\0';
@@ -408,7 +416,10 @@ static const void* fx_get_extension(const clap_plugin_t* plugin, const char* id)
 
 static void fx_on_main_thread(const clap_plugin_t* plugin) {
     auto* f = get_fx(plugin);
-    if (f) f->thread_check.set_host(f->host);
+    if (f) {
+        f->thread_check.set_host(f->host);
+        f->core.reclaim();  // free cores the audio thread has retired (E12)
+    }
 }
 
 // ---- Descriptor and plugin class ----
@@ -454,7 +465,6 @@ const clap_plugin_t* mamba_fx_create(const clap_host_t* host) {
     auto* f = new (std::nothrow) FxState();
     if (!f) return nullptr;
     f->host = host;
-    f->core = nullptr;
     f->weights_loaded.store(false, std::memory_order_relaxed);
     f->block_size = 512;
     f->is_active = false;
