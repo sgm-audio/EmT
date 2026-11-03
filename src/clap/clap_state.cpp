@@ -47,11 +47,26 @@ static bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream
     if (!stream_write_u32(stream, 0)) return false;             // reserved
     if (!stream_write_u32(stream, kStateSchemaV3)) return false;
 
-    // Pull a fresh state-mirror snapshot from the audio thread.
-    auto mirror_ptr = std::make_unique<StateMirror>();
-    if (!mirror_ptr) return false;
-    StateMirror& mirror = *mirror_ptr;
-    {
+    // Params, bypass and the weight path are owned by the main thread and are
+    // read here live (atomics / plain array), NOT from the audio-thread state
+    // mirror. The mirror goes stale the moment state_load finishes (nothing
+    // re-publishes it until the next process() call), so reading it for these
+    // fields made save->load->save non-byte-identical (E3).
+    if (!stream_write_u32(stream, MAX_VOICES)) return false;
+
+    if (!stream_write_u32(stream, PARAM_COUNT)) return false;
+    for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
+        if (!stream_write_f64(stream, m->param_values[i].load(std::memory_order_acquire))) return false;
+    }
+    if (!stream_write_u32(stream, m->bypass_target.load(std::memory_order_acquire) ? 1u : 0u)) return false;
+    if (!stream_write_f32(stream, m->bypass_fade.load(std::memory_order_relaxed))) return false;
+
+    // h_state is only present if weights have been loaded. Its voice snapshots
+    // ARE audio-thread-owned, so they still come from the tear-free mirror.
+    const bool h_present = m->weights_loaded.load(std::memory_order_acquire);
+    if (!stream_write_u32(stream, h_present ? 1u : 0u)) return false;
+    if (h_present) {
+        StateMirror mirror{};
         constexpr int kMaxRetries = 8;
         bool ok = false;
         for (int retry = 0; retry < kMaxRetries; ++retry) {
@@ -59,25 +74,6 @@ static bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream
             if (m->state_mirror.read(mirror)) { ok = true; break; }
         }
         if (!ok) return false;
-    }
-
-    // V2: num_voices
-    if (!stream_write_u32(stream, MAX_VOICES)) return false;
-
-    if (!stream_write_u32(stream, PARAM_COUNT)) return false;
-    for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
-        if (!stream_write_f64(stream, mirror.param_values[i])) return false;
-    }
-    if (!stream_write_u32(stream, mirror.bypass_target ? 1u : 0u)) return false;
-    if (!stream_write_f32(stream, mirror.bypass_fade)) return false;
-
-    // h_state is only present if weights have been loaded; otherwise
-    // we save a sentinel and zero state, so the load() doesn't try to
-    // overwrite the core's uninitialized state.
-    const bool h_present = m->weights_loaded.load(std::memory_order_acquire);
-    if (!stream_write_u32(stream, h_present ? 1u : 0u)) return false;
-    if (h_present) {
-        // Save all voice states + envelope levels
         for (uint32_t v = 0; v < MAX_VOICES; ++v) {
             if (!stream_write_all(stream, &mirror.voice_snapshots[v],
                                   sizeof(VoiceSnapshot))) return false;
@@ -85,15 +81,15 @@ static bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream
     }
 
     uint32_t path_len = 0;
-    if (mirror.weight_path[0] != '\0') {
-        path_len = static_cast<uint32_t>(std::strlen(mirror.weight_path));
+    if (m->weight_path[0] != '\0') {
+        path_len = static_cast<uint32_t>(std::strlen(m->weight_path));
         if (path_len >= MambaSynth::MAX_WEIGHT_PATH) {
             path_len = MambaSynth::MAX_WEIGHT_PATH - 1;
         }
     }
     if (!stream_write_u32(stream, path_len)) return false;
     if (path_len > 0) {
-        if (!stream_write_all(stream, mirror.weight_path, path_len)) return false;
+        if (!stream_write_all(stream, m->weight_path, path_len)) return false;
     }
 
     return true;
@@ -227,6 +223,45 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
     if (path_len > 0) {
         std::memcpy(m->weight_path, path_buf, path_len);
         m->weight_path[path_len] = '\0';
+    }
+
+    // Refresh the state mirror so a save immediately after this load (before
+    // the next process() call re-publishes it) reads fresh voice data (E3).
+    // Runs on the main thread while the host is applying state (audio stopped
+    // per the CLAP contract); mirrors the field set of publish_state_mirror.
+    {
+        StateMirror* slot = m->state_mirror.begin_write();
+        for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+            slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
+            slot->voice_snapshots[v].env = m->voices[v].env;
+            slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
+            slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
+            slot->voice_snapshots[v].velocity = m->voices[v].velocity;
+            slot->voice_snapshots[v].key = m->voices[v].key;
+            slot->voice_snapshots[v].channel = m->voices[v].channel;
+            slot->voice_snapshots[v].note_id = m->voices[v].note_id;
+            slot->voice_snapshots[v].stage = m->voices[v].stage;
+        }
+        for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
+            slot->param_values[i] = m->param_values[i].load(std::memory_order_acquire);
+        }
+        slot->bypass_target = m->bypass_target.load(std::memory_order_acquire);
+        slot->bypass_fade = m->bypass_fade.load(std::memory_order_relaxed);
+        std::memset(slot->weight_path, 0, sizeof(slot->weight_path));
+        std::memcpy(slot->weight_path, m->weight_path, std::strlen(m->weight_path));
+        m->state_mirror.end_write();
+        m->state_mirror.swap();
+    }
+
+    // Parameter values changed outside the flush/process path, so tell the
+    // host to rescan them (CLAP requires it; the validator's
+    // state-reproducibility test fails otherwise, E3).
+    if (m->host && m->host->get_extension) {
+        const auto* hp = static_cast<const clap_host_params_t*>(
+            m->host->get_extension(m->host, CLAP_EXT_PARAMS));
+        if (hp && hp->rescan) {
+            hp->rescan(m->host, CLAP_PARAM_RESCAN_VALUES);
+        }
     }
 
     return true;

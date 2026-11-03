@@ -22,9 +22,9 @@ test -f "$T/smoke/plugin_weights.bin"
 BENCH="$(find "$B" -name benchmark_ssm_block -type f -perm -u+x | head -1)"
 "$BENCH" --config small --layers 1,2 --sample-rate 48000 --budget-pct 40 --repeats 5 --seconds 0.1
 if command -v clap-validator >/dev/null; then
-  # Known failing on 2026-10-31: state-reproducibility-{basic,binary,buffered}
-  # for both com.emt.fx and com.emt.synth (6 of 81). Reported, not gating.
-  clap-validator validate "$(find "$B" -name 'EmTSynth.clap' | head -1)" || echo "clap-validator: FAILED (known, not gating yet)"
+  # Any validator failure fails the script (E25). Skipped tests are reported by
+  # the validator itself and are not a failure.
+  clap-validator validate "$(find "$B" -name 'EmTSynth.clap' | head -1)"
 else
   echo "SKIPPED: clap-validator not on PATH"
 fi
