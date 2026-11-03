@@ -386,6 +386,15 @@ static bool fx_state_load(const clap_plugin_t* plugin, const clap_istream_t* str
         fx_load_weights(f, path_buf);
     }
 
+    // Parameter values changed outside the flush/process path (E3).
+    if (f->host && f->host->get_extension) {
+        const auto* hp = static_cast<const clap_host_params_t*>(
+            f->host->get_extension(f->host, CLAP_EXT_PARAMS));
+        if (hp && hp->rescan) {
+            hp->rescan(f->host, CLAP_PARAM_RESCAN_VALUES);
+        }
+    }
+
     return true;
 }
 
