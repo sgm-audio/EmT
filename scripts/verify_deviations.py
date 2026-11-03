@@ -82,6 +82,10 @@ def run_gtest(build_dir: Path, binary: str, gtest_filter: str) -> Result:
     """Run a gtest filter and turn it into evidence."""
     exe = build_dir / "tests" / binary
     if not exe.exists():
+        # Windows builds append .exe; without this every behavioural check
+        # silently SKIPs and the register looks greener than it is.
+        exe = exe.with_suffix(".exe")
+    if not exe.exists():
         return Result("", "", SKIP, [f"SKIP: {exe} not built"])
     cp = run([str(exe), f"--gtest_filter={gtest_filter}"])
     tail = [l for l in cp.stdout.splitlines()

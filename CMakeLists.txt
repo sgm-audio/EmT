@@ -70,10 +70,13 @@ add_subdirectory(tests)
 # when the tool is installed; otherwise the target explains the skip.
 find_program(CLAP_VALIDATOR_BIN clap-validator)
 if(CLAP_VALIDATOR_BIN)
+    # clap-validator 0.4.1 (and every release with subcommands) needs the
+    # `validate` subcommand; passing the bundle path alone exits 2 with
+    # "unrecognized subcommand".
     add_test(NAME clap-validator
-        COMMAND ${CLAP_VALIDATOR_BIN} "$<TARGET_FILE:mamba_synth>")
+        COMMAND ${CLAP_VALIDATOR_BIN} validate "$<TARGET_FILE:mamba_synth>")
     add_custom_target(clap-validator
-        COMMAND ${CLAP_VALIDATOR_BIN} "$<TARGET_FILE:mamba_synth>"
+        COMMAND ${CLAP_VALIDATOR_BIN} validate "$<TARGET_FILE:mamba_synth>"
         DEPENDS mamba_synth
         COMMENT "Validating CLAP plugin with clap-validator"
         VERBATIM)
