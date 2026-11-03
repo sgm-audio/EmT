@@ -58,7 +58,7 @@ constexpr int64_t kTotalSamples = 44100 * 5;  // 5 seconds for faster test
 constexpr float kLogE1m1 = 0.54132485f;  // softplus^-1(1.0) = log(e - 1)
 
 void fill_steady_state_h4_weights(SSMWeights& w, size_t d_model, size_t d_inner,
-                                  size_t nheads, size_t headdim, size_t d_state,
+                                  size_t nheads, [[maybe_unused]] size_t headdim, size_t d_state,
                                   size_t mimo_rank) {
     std::memset(&w, 0, sizeof(w));
 

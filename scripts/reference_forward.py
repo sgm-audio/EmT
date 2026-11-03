@@ -15,9 +15,10 @@ Usage:
 
 import argparse
 import math
-import struct
 import os
+import struct
 import sys
+
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -25,7 +26,6 @@ from emt_format import (  # noqa: E402
     HEADER_FMT,
     HEADER_SIZE,
     MAX_MIMO_RANK,
-    MAX_NUM_BC_HEADS,
     MAX_NUM_ROPE_ANGLES,
     WEIGHT_MAGIC,
     WEIGHT_VERSION,
@@ -34,6 +34,7 @@ from emt_format import (  # noqa: E402
 # ---------------------------------------------------------------------------
 # Math helpers — exact C++ equivalents
 # ---------------------------------------------------------------------------
+
 
 def softplus(x):
     """C++: if (x > 20) return x; if (x < -20) return 0; return log1p(exp(x))"""
@@ -52,6 +53,7 @@ def softplus_np(x):
 # ---------------------------------------------------------------------------
 # Weight file loader (matches C++ WeightLoader)
 # ---------------------------------------------------------------------------
+
 
 class WeightFileHeader:
     def __init__(self, data):
@@ -89,40 +91,44 @@ class WeightFileHeader:
 
 class SSMWeights:
     """Python mirror of C++ SSMWeights struct."""
+
     def __init__(self):
-        self.in_proj_w = None       # [in_proj_out, d_model]
-        self.dt_bias = None         # [nheads]
-        self.B_bias = None          # [nheads, mimo_rank, d_state]
-        self.C_bias = None          # [nheads, mimo_rank, d_state]
-        self.B_norm_weight = None   # [d_state]
-        self.C_norm_weight = None   # [d_state]
-        self.mimo_x = None          # [nheads, mimo_rank, headdim]
-        self.mimo_z = None          # [nheads, mimo_rank, headdim]
-        self.mimo_o = None          # [nheads, mimo_rank, headdim]
-        self.D_proj = None          # [nheads]
-        self.out_proj_w = None      # [d_model, d_inner]
-        self.film_proj_w = None     # [2*d_model, d_cond]
+        self.in_proj_w = None  # [in_proj_out, d_model]
+        self.dt_bias = None  # [nheads]
+        self.B_bias = None  # [nheads, mimo_rank, d_state]
+        self.C_bias = None  # [nheads, mimo_rank, d_state]
+        self.B_norm_weight = None  # [d_state]
+        self.C_norm_weight = None  # [d_state]
+        self.mimo_x = None  # [nheads, mimo_rank, headdim]
+        self.mimo_z = None  # [nheads, mimo_rank, headdim]
+        self.mimo_o = None  # [nheads, mimo_rank, headdim]
+        self.D_proj = None  # [nheads]
+        self.out_proj_w = None  # [d_model, d_inner]
+        self.film_proj_w = None  # [2*d_model, d_cond]
         self.dt_film_proj_w = None  # [2*nheads, d_cond]
 
 
 class WeightLoader:
     """Python equivalent of C++ WeightLoader — mmap not needed, just read."""
+
     def __init__(self, path):
-        with open(path, 'rb') as f:
+        with open(path, "rb") as f:
             self.data = f.read()
 
         self.header = WeightFileHeader(self.data[:HEADER_SIZE])
         self.header.validate()
 
-        self.weight_data = self.data[HEADER_SIZE + self.header.q_metadata_size:]
+        self.weight_data = self.data[HEADER_SIZE + self.header.q_metadata_size :]
         self._validate_size()
 
     def _validate_size(self):
         h = self.header
-        in_proj_out = (h.d_inner * 2
-                       + h.nheads * MAX_MIMO_RANK * h.d_state * 2
-                       + h.nheads * 3
-                       + MAX_NUM_ROPE_ANGLES)
+        in_proj_out = (
+            h.d_inner * 2
+            + h.nheads * MAX_MIMO_RANK * h.d_state * 2
+            + h.nheads * 3
+            + MAX_NUM_ROPE_ANGLES
+        )
 
         elems = 0
         elems += in_proj_out * h.d_model
@@ -143,8 +149,7 @@ class WeightLoader:
         actual_bytes = len(self.weight_data)
         if actual_bytes < expected_bytes:
             raise ValueError(
-                f"Weight data too small: expected {expected_bytes} bytes, "
-                f"got {actual_bytes}"
+                f"Weight data too small: expected {expected_bytes} bytes, got {actual_bytes}"
             )
 
     def get_layer(self, layer_idx, mimo_rank=1):
@@ -153,10 +158,12 @@ class WeightLoader:
         if layer_idx >= h.num_layers:
             raise IndexError(f"Layer {layer_idx} >= {h.num_layers}")
 
-        in_proj_out = (h.d_inner * 2
-                       + h.nheads * MAX_MIMO_RANK * h.d_state * 2
-                       + h.nheads * 3
-                       + MAX_NUM_ROPE_ANGLES)
+        in_proj_out = (
+            h.d_inner * 2
+            + h.nheads * MAX_MIMO_RANK * h.d_state * 2
+            + h.nheads * 3
+            + MAX_NUM_ROPE_ANGLES
+        )
 
         # Compute bytes per layer (MAX_* layout)
         elems = 0
@@ -176,7 +183,7 @@ class WeightLoader:
         bytes_per_layer = elems * 4
 
         base = layer_idx * bytes_per_layer
-        data = self.weight_data[base:base + bytes_per_layer]
+        data = self.weight_data[base : base + bytes_per_layer]
         floats = np.frombuffer(data, dtype=np.float32)
 
         w = SSMWeights()
@@ -184,19 +191,29 @@ class WeightLoader:
 
         def take(n):
             nonlocal off
-            arr = floats[off:off + n]
+            arr = floats[off : off + n]
             off += n
             return arr
 
         w.in_proj_w = take(in_proj_out * h.d_model).reshape(in_proj_out, h.d_model)
         w.dt_bias = take(h.nheads)
-        w.B_bias = take(h.nheads * MAX_MIMO_RANK * h.d_state).reshape(h.nheads, MAX_MIMO_RANK, h.d_state)
-        w.C_bias = take(h.nheads * MAX_MIMO_RANK * h.d_state).reshape(h.nheads, MAX_MIMO_RANK, h.d_state)
+        w.B_bias = take(h.nheads * MAX_MIMO_RANK * h.d_state).reshape(
+            h.nheads, MAX_MIMO_RANK, h.d_state
+        )
+        w.C_bias = take(h.nheads * MAX_MIMO_RANK * h.d_state).reshape(
+            h.nheads, MAX_MIMO_RANK, h.d_state
+        )
         w.B_norm_weight = take(h.d_state)
         w.C_norm_weight = take(h.d_state)
-        w.mimo_x = take(h.nheads * MAX_MIMO_RANK * h.headdim).reshape(h.nheads, MAX_MIMO_RANK, h.headdim)
-        w.mimo_z = take(h.nheads * MAX_MIMO_RANK * h.headdim).reshape(h.nheads, MAX_MIMO_RANK, h.headdim)
-        w.mimo_o = take(h.nheads * MAX_MIMO_RANK * h.headdim).reshape(h.nheads, MAX_MIMO_RANK, h.headdim)
+        w.mimo_x = take(h.nheads * MAX_MIMO_RANK * h.headdim).reshape(
+            h.nheads, MAX_MIMO_RANK, h.headdim
+        )
+        w.mimo_z = take(h.nheads * MAX_MIMO_RANK * h.headdim).reshape(
+            h.nheads, MAX_MIMO_RANK, h.headdim
+        )
+        w.mimo_o = take(h.nheads * MAX_MIMO_RANK * h.headdim).reshape(
+            h.nheads, MAX_MIMO_RANK, h.headdim
+        )
         w.D_proj = take(h.nheads)
         w.out_proj_w = take(h.d_model * h.d_inner).reshape(h.d_model, h.d_inner)
         w.film_proj_w = take(2 * h.d_model * h.cond_dim).reshape(2 * h.d_model, h.cond_dim)
@@ -208,6 +225,7 @@ class WeightLoader:
 # ---------------------------------------------------------------------------
 # Reference forward pass — bit-exact to C++ SSMBlock::process_sample()
 # ---------------------------------------------------------------------------
+
 
 class ReferenceForward:
     """
@@ -269,7 +287,7 @@ class ReferenceForward:
         headdim = h.headdim
         mimo_rank = self.mimo_rank
         num_rope_angles = d_state // 2
-        num_bc_heads = 1  # C++ MAX_NUM_BC_HEADS = 1
+        _num_bc_heads = 1  # C++ MAX_NUM_BC_HEADS = 1
         A_FLOOR = 1.0
 
         # ===== Step 0: FiLM conditioning on input =====
@@ -286,10 +304,9 @@ class ReferenceForward:
             u_film[:] = input_scalar
 
         # ===== Step 1: in_proj — single fused linear projection =====
-        in_proj_out_dim = (d_inner * 2
-                           + nheads * mimo_rank * d_state * 2
-                           + nheads * 3
-                           + num_rope_angles)
+        in_proj_out_dim = (
+            d_inner * 2 + nheads * mimo_rank * d_state * 2 + nheads * 3 + num_rope_angles
+        )
 
         in_proj_out_arr = np.zeros(in_proj_out_dim, dtype=np.float32)
         for out_idx in range(in_proj_out_dim):
@@ -300,15 +317,22 @@ class ReferenceForward:
 
         # Split components
         idx = 0
-        z = in_proj_out_arr[idx:idx + d_inner]; idx += d_inner
-        x = in_proj_out_arr[idx:idx + d_inner]; idx += d_inner
+        z = in_proj_out_arr[idx : idx + d_inner]
+        idx += d_inner
+        x = in_proj_out_arr[idx : idx + d_inner]
+        idx += d_inner
         bc_size = nheads * mimo_rank * d_state
-        B_flat = in_proj_out_arr[idx:idx + bc_size]; idx += bc_size
-        C_flat = in_proj_out_arr[idx:idx + bc_size]; idx += bc_size
-        dd_dt = in_proj_out_arr[idx:idx + nheads]; idx += nheads
-        dd_A = in_proj_out_arr[idx:idx + nheads]; idx += nheads
-        trap = in_proj_out_arr[idx:idx + nheads]; idx += nheads
-        angles = in_proj_out_arr[idx:idx + num_rope_angles]
+        B_flat = in_proj_out_arr[idx : idx + bc_size]
+        idx += bc_size
+        C_flat = in_proj_out_arr[idx : idx + bc_size]
+        idx += bc_size
+        dd_dt = in_proj_out_arr[idx : idx + nheads]
+        idx += nheads
+        dd_A = in_proj_out_arr[idx : idx + nheads]
+        idx += nheads
+        _trap = in_proj_out_arr[idx : idx + nheads]
+        idx += nheads  # unused (E26)
+        angles = in_proj_out_arr[idx : idx + num_rope_angles]
 
         # Reshape B, C: flat -> [nheads, mimo_rank, d_state]
         B = np.zeros((nheads, mimo_rank, d_state), dtype=np.float32)
@@ -355,8 +379,9 @@ class ReferenceForward:
                 rms = math.sqrt(rms / d_state + 1e-5)
                 inv_rms = 1.0 / rms
                 for s in range(d_state):
-                    B_norm[h_idx, r, s] = (B[h_idx, r, s] * inv_rms * w.B_norm_weight[s]
-                                            + w.B_bias[h_idx, r, s])
+                    B_norm[h_idx, r, s] = (
+                        B[h_idx, r, s] * inv_rms * w.B_norm_weight[s] + w.B_bias[h_idx, r, s]
+                    )
                 # C RMSNorm
                 rms = 0.0
                 for s in range(d_state):
@@ -364,8 +389,9 @@ class ReferenceForward:
                 rms = math.sqrt(rms / d_state + 1e-5)
                 inv_rms = 1.0 / rms
                 for s in range(d_state):
-                    C_norm[h_idx, r, s] = (C[h_idx, r, s] * inv_rms * w.C_norm_weight[s]
-                                            + w.C_bias[h_idx, r, s])
+                    C_norm[h_idx, r, s] = (
+                        C[h_idx, r, s] * inv_rms * w.C_norm_weight[s] + w.C_bias[h_idx, r, s]
+                    )
 
         # ===== Step 4: RoPE on B and C =====
         for h_idx in range(nheads):
@@ -408,8 +434,9 @@ class ReferenceForward:
                     B_val = B_norm[h_idx, 0, s]
                     C_val = C_norm[h_idx, 0, s]
 
-                    self.ssm_real[h_idx, d, s] = (A_bar * self.ssm_real[h_idx, d, s]
-                                                   + B_bar_scale * B_val * x_hd)
+                    self.ssm_real[h_idx, d, s] = (
+                        A_bar * self.ssm_real[h_idx, d, s] + B_bar_scale * B_val * x_hd
+                    )
                     y_head[h_idx * headdim + d] += C_val * self.ssm_real[h_idx, d, s]
 
         # ===== Step 6: MIMO combine (SiLU z-gating) =====
@@ -445,6 +472,7 @@ class ReferenceForward:
 # CLI / Test vector generation
 # ---------------------------------------------------------------------------
 
+
 def generate_test_vectors(weight_path, output_dir, num_samples=16):
     """Generate expected outputs for C++ parity test."""
     os.makedirs(output_dir, exist_ok=True)
@@ -458,8 +486,24 @@ def generate_test_vectors(weight_path, output_dir, num_samples=16):
     rf.set_conditioning(cond)
 
     # Test inputs matching C++
-    test_inputs = [0.0, 1.0, -1.0, 0.5, -0.5, 0.25, -0.25, 0.75,
-                   0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    test_inputs = [
+        0.0,
+        1.0,
+        -1.0,
+        0.5,
+        -0.5,
+        0.25,
+        -0.25,
+        0.75,
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+    ]
 
     outputs = []
     for val in test_inputs[:num_samples]:
@@ -467,8 +511,8 @@ def generate_test_vectors(weight_path, output_dir, num_samples=16):
         outputs.append(out)
 
     # Write expected outputs
-    expect_path = os.path.join(output_dir, 'parity_expected.bin')
-    with open(expect_path, 'wb') as f:
+    expect_path = os.path.join(output_dir, "parity_expected.bin")
+    with open(expect_path, "wb") as f:
         for out in outputs:
             f.write(out.tobytes())
 
@@ -478,14 +522,15 @@ def generate_test_vectors(weight_path, output_dir, num_samples=16):
 
 def main():
     p = argparse.ArgumentParser(description="Mamba-3 reference forward pass")
-    p.add_argument('--weights', required=True, help='Path to flat-binary weight file')
-    p.add_argument('--layer', type=int, default=0, help='Layer index (default: 0)')
-    p.add_argument('--mimo-rank', type=int, default=1, help='MIMO rank (default: 1)')
-    p.add_argument('--input', type=float, default=None, help='Single input value to process')
-    p.add_argument('--generate-vectors', action='store_true',
-                   help='Generate test vectors for C++ parity test')
-    p.add_argument('--output-dir', default='build', help='Output directory for test vectors')
-    p.add_argument('--num-samples', type=int, default=16, help='Number of test samples')
+    p.add_argument("--weights", required=True, help="Path to flat-binary weight file")
+    p.add_argument("--layer", type=int, default=0, help="Layer index (default: 0)")
+    p.add_argument("--mimo-rank", type=int, default=1, help="MIMO rank (default: 1)")
+    p.add_argument("--input", type=float, default=None, help="Single input value to process")
+    p.add_argument(
+        "--generate-vectors", action="store_true", help="Generate test vectors for C++ parity test"
+    )
+    p.add_argument("--output-dir", default="build", help="Output directory for test vectors")
+    p.add_argument("--num-samples", type=int, default=16, help="Number of test samples")
     args = p.parse_args()
 
     if args.generate_vectors:
@@ -505,5 +550,5 @@ def main():
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())
