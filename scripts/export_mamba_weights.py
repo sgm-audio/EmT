@@ -378,9 +378,9 @@ def export_model(model: Mamba3Model, output_path: str,
     if mr != 1:
         raise SystemExit(
             f"mimo_rank={mr} is not supported: the runtime implements rank-1 "
-            "SISO per head (deviation D3 in ARCHITECTURE_FIDELITY.md). "
+            "SISO per head (deviation D3 in docs/ARCHITECTURE_FIDELITY.md). "
             "Set mimo_rank: 1 in the training config, or implement the rank-R "
-            "reduction (see Prompts/DEVIATION_RESOLUTION/D3_MIMO_RANK.md).")
+            "reduction (deviation D3 in docs/ARCHITECTURE_FIDELITY.md).")
 
     if random_init:
         _random_init(model)
