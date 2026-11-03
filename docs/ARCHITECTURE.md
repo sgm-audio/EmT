@@ -68,13 +68,13 @@ Main design points:
 
 ## 2. The 3-Thread Concurrency Model
 
-Audio plugins must execute within strict real-time deadlines (typically \(\le 1.33\text{ ms}\) for a 64-sample buffer at \(48\text{ kHz}\)). Per **ADR-001**, the suite enforces strict thread boundaries across three asynchronous execution domains:
+Audio plugins must execute within strict real-time deadlines. A 64-sample buffer at 48 kHz is 1.33 ms; the measured worst-case cost of the shipped small model is **2.25 us/sample** (benchmark `--config small`, WSL2 Ubuntu 26.04, AMD Ryzen AI 7 350, 2026-11-02), about 11% of one core — see `tests/benchmark_ssm_block.cpp` for the machine next to the number. Per **ADR-001**, the suite enforces strict thread boundaries across three asynchronous execution domains:
 
 | Boundary | Thread | Priority | Role & Operations | Invariants & Constraints |
 |---|---|---|---|---|
 | **Domain 1** | **Audio Thread** | Real-Time / Priority Inversion Safe | `plugin_process()`, `fx_process()`, voice processing, SSM recurrence, one-pole smoothing, crossfading. | **Zero** `malloc`/`free`/`new`/`delete`<br>**Zero** mutexes / condition variables<br>**Zero** blocking I/O or sleep<br>**Zero** unbounded spinning |
 | **Domain 2** | **Main Thread** | Standard User Priority | Host callbacks, UI rendering (`clap_gui`), preset save/load (`.mambapreset`), parameter flushes (`params_flush`), weight loading (`WeightLoader::load` via `mmap`). | Owns GUI handles, performs file I/O, decodes presets, parses human text. |
-| **Domain 3** | **ARA Thread** | Background Worker Priority | Celemony ARA 2.0 Document Controller analysis, audio timeline scanning, tempo/chord detection, offline neural rendering. | Computes musical context asynchronously. Never interrupts the audio thread. |
+| **Domain 3** | **ARA Thread** | Background Worker Priority | ARA 2.0 Document Controller (stub — the ARA SDK is not fetched, so no ARA classes are host-reachable; see `src/ara/ara_types.h`). | The ARA code is present but not wired to a host; no tempo/chord detection runs. |
 
 ### 2.1 Lock-Free Communication Matrix
 
@@ -140,7 +140,7 @@ Main Thread (Reader):
   5. return g1 == g2            // Validation check
 ```
 
-The audio thread is **100% wait-free**: it never spins, never blocks, and writes exclusively to its dedicated back buffer. The main thread reads the front buffer with optimistic retry.
+The audio thread never spins, never blocks, and writes exclusively to its dedicated back buffer; the main thread reads the front buffer with optimistic retry. (The inference core itself is handed over RCU-style via `common/rcu_slot.h`; the audio thread adopts a fully-built core once per block and never touches a half-initialised one.)
 
 ---
 
@@ -223,7 +223,7 @@ $$u_{\text{film}, j} = u_j \cdot (1.0 + \gamma_j) + \beta_j$$
 
 ### 4.5 MIMO Coupling & Output Gating
 
-- **MIMO Coupling:** B and C matrices have rank \(R \le 4\), projecting between the multi-dimensional input/output and state space.
+- **MIMO Coupling:** B and C matrices have rank \(R = 1\) (rank-1 SISO per head). The file format reserves `mimo_rank` up to 4, but the loader refuses `mimo_rank > 1` (deviation D3); higher ranks are not implemented in the runtime.
 - **SiLU Gating on z Branch:** The \(z\) projection branch undergoes Sigmoid Linear Unit activation:
   $$z_{\text{silu}} = z \cdot \sigma(z) = \frac{z}{1 + e^{-z}}$$
   The head output \(y\) is multiplicatively gated: \(y_{\text{gated}} = y \cdot z_{\text{silu}}\).
@@ -424,11 +424,12 @@ Both plugins (`com.mamba-ssm.synth` and `com.mamba-ssm.fx`) implement the CLAP 1
 
 ## 9. Verification & Test Suite
 
-The codebase enforces strict correctness and real-time safety via automated GoogleTest executables (`tests/CMakeLists.txt`):
+The codebase checks correctness and real-time safety with automated GoogleTest executables (`tests/CMakeLists.txt`), plus ThreadSanitizer stress tests (`test_rt_stress.cpp`), an ASan+UBSan run, `ruff`, and `clap-validator` (all wired into `scripts/ci.sh`):
 
-1. **`test_ssm_block.cpp` (9 tests):** Validates reset behavior, multi-head dimensions, RoPE phase wrapping, trapezoidal stability, and multi-layer ping-pong routing.
-2. **`test_weight_loader.cpp` (20 tests):** Verifies header parsing, magic validation, dimension fit checks, FP16 dequantization, and INT8 dequantization.
-3. **`test_conditioning.cpp` (4 tests):** Validates FiLM modulation, zero-input protection, and seqlock tear resistance.
-4. **`test_stability.cpp` (3 tests):** Evaluates long-running audio generation (300 seconds continuous) to verify zero NaNs, no infinities, and no state explosion.
-5. **`test_realtime_safety.cpp` (3 tests):** Real-time safety audit verifying zero allocations, zero mutex acquisitions, and zero blocking syscalls during `plugin_process()`.
-6. **`test_cpp_parity.cpp` (1 test):** Validates bit-exact and numerical parity (\(\le 10^{-5}\) tolerance) between the C++ inference engine and reference Python Mamba-3 implementations.
+1. **`test_ssm_block.cpp`:** Validates reset behavior, multi-head dimensions, RoPE phase wrapping, trapezoidal stability, and multi-layer ping-pong routing.
+2. **`test_weight_loader.cpp`:** Verifies header parsing, magic validation, dimension fit checks, FP16 dequantization, and INT8 dequantization.
+3. **`test_conditioning.cpp`:** Validates FiLM modulation, zero-input protection, and seqlock tear resistance.
+4. **`test_stability.cpp`:** Evaluates long-running audio generation (300 seconds continuous) to verify zero NaNs, no infinities, and no state explosion.
+5. **`test_realtime_safety.cpp`:** Audit of the process call graph (no `malloc`/`new`/lock/syscall on the audio path) — it checks that `plugin_process()` and the seqlock read path stay within their no-allocation contract.
+6. **`test_rt_stress.cpp` / `test_rt_safety.cpp`:** ThreadSanitizer stress (process vs weight/state load) and FPU-state/conditioning isolation checks.
+7. **`test_cpp_parity.cpp`:** Numerical parity (\(\le 10^{-5}\) tolerance) between the C++ inference engine and the reference Python implementation.
