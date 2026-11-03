@@ -39,6 +39,11 @@
 #include "config.h"
 
 #if defined(_WIN32)
+// windows.h defines min/max as macros unless NOMINMAX is set, which breaks
+// every std::max/std::min call below (MSVC C2589).
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <intrin.h>
 #else

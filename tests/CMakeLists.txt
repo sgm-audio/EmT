@@ -92,6 +92,11 @@ target_link_libraries(test_state_roundtrip PRIVATE Threads::Threads)
 target_include_directories(test_state_roundtrip PRIVATE
     ${PROJECT_SOURCE_DIR}/extern/clap/include)
 
+# Recurrence kernel pins (F1 §a extraction): coefficients, per-element and
+# per-head arithmetic bit-identical to the pre-extraction inline loop, slice
+# isolation, and decay for every clamped pole.
+emt_add_test(test_recurrence_kernel test_recurrence_kernel.cpp)
+
 emt_add_test(test_realtime_safety
     test_realtime_safety.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/clap_fx_plugin.cpp
