@@ -1,0 +1,15 @@
+# Ruff configuration for the whole repo (scripts/ + training/).
+# Replaces the per-directory training/pyproject.toml ruff settings.
+line-length = 100
+target-version = "py312"
+
+# Build dirs contain vendored gtest/CLAP sources that are not our code.
+exclude = ["build", "build-*", "extern"]
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+# zip() without strict= is a real bug class (B905); the training code has two
+# known-correct call sites that are fixed with strict=True rather than ignored.
+
+[lint.per-file-ignores]
+# The vendored/reference scripts keep their layout; nothing ignored at top level.

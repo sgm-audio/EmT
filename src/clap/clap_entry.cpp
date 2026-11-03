@@ -59,7 +59,7 @@ static const void* entry_get_factory(const char* factory_id) {
 
 extern "C" {
 
-CLAP_EXPORT const clap_plugin_entry_t clap_entry = {
+CLAP_EXPORT extern const clap_plugin_entry_t clap_entry = {
     CLAP_VERSION_INIT,
     entry_init,
     entry_deinit,
