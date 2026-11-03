@@ -228,6 +228,7 @@ class ReferenceForward:
         self.ssm_real = np.zeros((self.h.nheads, self.h.headdim, self.h.d_state), dtype=np.float32)
         self.ssm_imag = np.zeros((self.h.nheads, self.h.headdim, self.h.d_state), dtype=np.float32)
         self.k_state = np.zeros((mimo_rank, self.h.nheads, self.h.d_state), dtype=np.float32)
+        self.x_prev = np.zeros((self.h.nheads, self.h.headdim), dtype=np.float32)
         self.angle_state = np.zeros((self.h.nheads, self.h.d_state // 2), dtype=np.float32)
 
         # Parameters (like C++ SSMBlockParams)
@@ -253,6 +254,7 @@ class ReferenceForward:
         self.ssm_real.fill(0.0)
         self.ssm_imag.fill(0.0)
         self.k_state.fill(0.0)
+        self.x_prev.fill(0.0)
         self.angle_state.fill(0.0)
 
     def process_sample(self, input_scalar):
@@ -393,24 +395,45 @@ class ReferenceForward:
                     C_norm[h_idx, r, s0] = C0 * cos_a + C1 * sin_a
                     C_norm[h_idx, r, s1] = -C0 * sin_a + C1 * cos_a
 
-        # ===== Step 5: Multi-head SSM recurrence (trapezoidal) =====
+        # ===== Step 5: Multi-head SSM recurrence (exponential-trapezoidal + 2x2 rotation) =====
         y_head = np.zeros(d_inner, dtype=np.float32)
 
         for h_idx in range(nheads):
             half_a = A_t[h_idx] * DT_t[h_idx] * 0.5
             inv_denom = 1.0 / (1.0 - half_a)
-            A_bar = (1.0 + half_a) * inv_denom
-            B_bar_scale = DT_t[h_idx] * inv_denom
+            alpha = (1.0 + half_a) * inv_denom
+            beta = DT_t[h_idx] * 0.5 * inv_denom
+            gamma = DT_t[h_idx] * 0.5 * inv_denom
+
+            # D2: theta per head, from the first RoPE angle.
+            theta = self.angle_state[h_idx, 0]
+            cos_t = math.cos(theta)
+            sin_t = math.sin(theta)
 
             for d in range(headdim):
                 x_hd = x[h_idx * headdim + d]
                 for s in range(d_state):
                     B_val = B_norm[h_idx, 0, s]
                     C_val = C_norm[h_idx, 0, s]
+                    B_prev = self.k_state[0, h_idx, s]
+                    x_prev_val = self.x_prev[h_idx, d]
 
-                    self.ssm_real[h_idx, d, s] = (A_bar * self.ssm_real[h_idx, d, s]
-                                                   + B_bar_scale * B_val * x_hd)
+                    # D2: rotate the previous complex state by R(theta).
+                    rot_re = (cos_t * self.ssm_real[h_idx, d, s]
+                              - sin_t * self.ssm_imag[h_idx, d, s])
+                    rot_im = (sin_t * self.ssm_real[h_idx, d, s]
+                              + cos_t * self.ssm_imag[h_idx, d, s])
+
+                    # D1: three-term update (history + current on the real axis).
+                    self.ssm_real[h_idx, d, s] = (alpha * rot_re
+                                                  + beta * (B_prev * x_prev_val)
+                                                  + gamma * (B_val * x_hd))
+                    self.ssm_imag[h_idx, d, s] = alpha * rot_im
                     y_head[h_idx * headdim + d] += C_val * self.ssm_real[h_idx, d, s]
+
+            # Save this sample's B and x as next sample's history (D1).
+            self.k_state[0, h_idx, :] = B_norm[h_idx, 0, :]
+            self.x_prev[h_idx, :] = x[h_idx * headdim:(h_idx + 1) * headdim]
 
         # ===== Step 6: MIMO combine (SiLU z-gating) =====
         for h_idx in range(nheads):

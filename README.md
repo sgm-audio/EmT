@@ -13,15 +13,13 @@ Neural audio synthesis and effect plugins built on a small causal state-space mo
 > record of what is implemented versus what the Mamba-3 paper (arXiv:2603.15569)
 > specifies, with a claim policy and a deviation register. The short version: the
 > core is a Mamba-family SSM with input-selective Δ/B/C, RMSNorm, B/C biases and
-> data-dependent rotation of B/C — but the recurrence is a two-term bilinear
-> update with a **real** state, not the paper's three-term exponential-trapezoidal
-> recurrence (deviation D1/D2, still open), and rank-R MIMO is reserved in the
-> weight format but **refused at load** rather than silently downgraded
-> (deviation D3, closed 2026-10-04).  `python3 scripts/verify_deviations.py`
-> prints one verified status line per deviation; the per-deviation prompts live in
-> [`Prompts/DEVIATION_RESOLUTION/`](Prompts/DEVIATION_RESOLUTION/README.md).
-> [`CLAIMS_VERIFICATION.md`](CLAIMS_VERIFICATION.md) is the
-> independent third-party-style review that produced this position.
+> data-dependent rotation of B/C, using the paper's three-term
+> exponential-trapezoidal recurrence and a complex-valued state realized as
+> per-element 2×2 rotation blocks (deviations D1 and D2, closed 2026-11-03).
+> Rank-R MIMO is reserved in the weight format but **refused at load** rather
+> than silently downgraded (deviation D3, closed 2026-10-04).
+> `python3 scripts/verify_deviations.py` prints one verified status line per
+> deviation.
 
 > **Project Identity:** This project is **EmT** (migrated from `mamba-ssm-plugin-suite-70317161`), a distinct Mamba-SSM CLAP/ARA plugin and training suite. It is separate from CLARA. No "0" in the name.
 
@@ -79,11 +77,11 @@ evidence and the plan to close the gaps.
    $$h_t = \bar{A}\, h_{t-1} + \bar{B}\,(B_t \odot x_t), \qquad y_t = C_t^{\top} h_t + D\,x_t$$
    Each layer decomposes the hidden state across $N_H$ heads
    (`src/core/ssm_block.cpp:245-273`).
-2. **Bilinear (Tustin) discretization**:
-   $$\bar{A} = \frac{1 + \frac{1}{2} A \Delta}{1 - \frac{1}{2} A \Delta}, \quad \bar{B} = \frac{\Delta}{1 - \frac{1}{2} A \Delta}$$
-   The bilinear map is A-stable, so the recurrence remains stable at 44.1–192 kHz.
-   *(This is a classical trapezoidal rule applied to a real pole — not the paper's
-   exponential-trapezoidal three-term form; see deviations D1/D2.)*
+2. **Exponential-trapezoidal (Tustin) discretization** (three-term):
+   $$\alpha = \frac{1 + \frac{1}{2} A \Delta}{1 - \frac{1}{2} A \Delta}, \quad \beta = \gamma = \frac{\Delta/2}{1 - \frac{1}{2} A \Delta}, \quad h_t = \alpha h_{t-1} + \beta B_{t-1} x_{t-1} + \gamma B_t x_t$$
+   The map is A-stable, so the recurrence remains stable at 44.1–192 kHz, and the
+   state is complex-valued (2×2 rotation blocks), matching the paper's recurrence
+   (deviations D1/D2, closed 2026-11-03).
 3. **Data-dependent rotation of $B$ and $C$ plus RMSNorm**: a cumulative angular
    state rotates each $(B, C)$ pair per head and dimension, with RMSNorm and
    learned bias terms on both projections (`src/core/ssm_block.cpp:163-243`).
@@ -420,7 +418,7 @@ python scripts/export_mamba_weights.py \
  ├── src/
  │   ├── config.h                 # Compile-time MAX_* dimension limits
  │   ├── core/                    # Core SSM inference engine (static library)
- │   │   ├── ssm_block.h/.cpp     # SSM layer (B/C rotation, RMSNorm, bilinear scan)
+ │   │   ├── ssm_block.h/.cpp     # SSM layer (B/C rotation, RMSNorm, three-term recurrence)
  │   │   ├── ssm_inference_core.h/.cpp # Multi-layer inference coordinator
  │   │   ├── weight_loader.h/.cpp # Memory-mapped zero-copy weight loader
  │   │   └── simd_helpers.h       # AVX2/SSE2/NEON portable vector intrinsics

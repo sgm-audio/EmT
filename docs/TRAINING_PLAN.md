@@ -5,9 +5,11 @@ a local **RTX 4070 laptop** and a cloud **Runpod L4 (24 GB)**. The training code
 lives in `training/` and re-uses the same reference model that
 `scripts/export_mamba_weights.py` and the C++ `WeightLoader` consume.
 
-> The architecture is **Mamba-3-inspired**, not a reproduction of the paper: the
-> recurrence is a two-term bilinear update with a real state, and the MIMO path is
-> inert. See [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md). Train what
+> The architecture is **Mamba-3-inspired**: the recurrence is the paper's
+> three-term exponential-trapezoidal form with a complex (2×2 rotation) state
+> (D1/D2 closed 2026-11-03), but the MIMO path is inert (rank-1 only, D3) and
+> `A` is input-derived rather than learned (D4). See
+> [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md). Train what
 > the plugin runs - the parity test in `tests/test_cpp_parity.cpp` exists to keep
 > the Python reference and the C++ inference path honest with each other.
 

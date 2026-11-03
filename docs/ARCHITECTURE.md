@@ -15,10 +15,11 @@ are current. ARA classes exist but aren't reachable from a host.
 Main design points:
 - No causal conv1d, so the model has 0 samples of algorithmic latency (Mamba-1/2's
   conv is also streamable with no look-ahead; dropping it saves compute, not latency).
-- Bilinear (Tustin) discretization of a real pole: A-stable, two-term. Not the
-  paper's exponential-trapezoidal recurrence (D1).
-- Multi-head real state with a data-dependent rotation of B and C. The complex
-  state update isn't implemented (D2).
+- Exponential-trapezoidal (Tustin) discretization, three-term with an
+  input-history term: `h_t = α h_{t-1} + β B_{t-1} x_{t-1} + γ B_t x_t` (D1, closed
+  2026-11-03).
+- Multi-head complex state realized as per-element 2×2 rotation blocks, with a
+  data-dependent rotation of B and C (D2, closed 2026-11-03).
 - AVX2/FMA in the projection dot products; the per-state recurrence loop is
   still scalar.
 - 8 voices sharing one inference core; each voice's state is passed by reference.

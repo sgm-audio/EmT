@@ -134,7 +134,7 @@ $$	ext{in\_proj\_out} = 2 \cdot d\_inner + 2 \cdot nheads \cdot mimo\_rank \cdot
 Where:
 - $2 \cdot d\_inner$: Projections for gate $z$ and input $x$
 - $2 \cdot nheads \cdot mimo\_rank \cdot d\_state$: Projections for $B$ and $C$
-- $3 \cdot nheads$: Projections for $\Delta$, decay $A$, and trapezoidal parameter $lpha$
+- $3 \cdot nheads$: Projections for $\Delta$, decay $A$, and the `trap` row. The `trap` row is **reserved and unused**: the D1 closure (2026-11-03) sets $\beta = \gamma = (\Delta/2)/(1 - A\Delta/2)$ (the Tustin average) rather than learning a separate split, so no learned trapezoid parameter is read from the file. See `docs/ARCHITECTURE_FIDELITY.md` D1.
 - $	ext{MAX\_NUM\_ROPE\_ANGLES}$: Angular velocity parameters for Rotary Position Embedding
 
 ---

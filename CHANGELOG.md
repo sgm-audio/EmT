@@ -2,6 +2,35 @@
 
 All notable changes to the EmT CLAP/ARA Plugin Suite (EmT).
 
+## [Unreleased] - D1 + D2 closure (three-term recurrence + complex state)
+
+The paper's exponential-trapezoidal three-term recurrence (D1) and the
+complex-valued state as per-element 2×2 rotation blocks (D2) are now
+implemented in C++ and all three Python forward passes, closing the last two
+open deviations. All six deviations are now CLOSED.
+
+- `src/core/recurrence_kernel.h` (new): `trapezoidal_coeffs` (α/β/γ),
+  `rotation_scalars` (cos/sin θ), `three_term_element` (pure per-element update).
+  `step_recurrence` is a thin loop over state slices that calls it and writes
+  `ssm_real`/`ssm_imag` each sample.
+- `SSMState` gained `x_prev` (per-head input history) and reuses `k_state` as
+  the B history; `reset()` clears both, so a reset block is bit-identical to a
+  fresh one.
+- Same change mirrored in `scripts/reference_mamba3.py`,
+  `scripts/reference_forward.py`, `scripts/export_mamba_weights.py`
+  (Step 5 in each).
+- New tests: `Recurrence.ThreeTermInputHistoryChangesImpulseResponse`,
+  `Recurrence.ResonancePreservation` (oscillates at the expected θ-per-sample
+  frequency over 10⁵ samples, no blow-up), `Recurrence.ResetClearsHistory`, plus
+  `RecurrenceKernel.*` coefficient/rotation/element pins.
+- `scripts/verify_deviations.py`: D2 now matches multi-index `ssm_imag[h][d][s]`
+  writes; D5 numeric check updated for the 6-value `mamba3_process_sample`
+  signature.
+
+Measured (2026-11-03, Windows 11, Ryzen AI 7 350, MSVC 19.51 Release /arch:AVX2):
+`verify_deviations.py` → 6 closed / 0 open / 0 failing; ctest 131/131 (clap-validator
+excluded); C++↔NumPy parity max abs 1.19e-07 over 256 elements.
+
 ## [Unreleased] - Phase 1, item #8 (see REFACTORING_PLAN.md)
 
 RT DSP helpers extracted to header-only `src/dsp/`. Behavior-preserving:

@@ -196,7 +196,9 @@ def check_d1() -> Result:
 def check_d2() -> Result:
     r = Result("D2", "2x2 rotational state dynamics (complex state)", OPEN_PENDING)
     body = recurrence_body()
-    writes_imag = bool(re.search(r"ssm_imag\[[^\]]*\]\s*[+\-*/]?=", body))
+    # ssm_imag is written as `state.ssm_imag[h][d][s] = ...` (multi-index), so
+    # allow one or more [..] groups before the assignment operator.
+    writes_imag = bool(re.search(r"ssm_imag\[[^\]]*\](?:\[[^\]]*\])*\s*[+\-*/]?=", body))
     r.evidence.append(
         f"recurrence writes ssm_imag (rotational dynamics): {writes_imag}")
     src = read(CORE / "ssm_block.cpp")
@@ -368,16 +370,21 @@ def measure_d5(samples: int = 9000) -> dict:
 
     case = build_steady_state_h4_case()
     nheads, headdim, d_state = case["nheads"], case["headdim"], case["d_state"]
+    mimo_rank = case["mimo_rank"]
     num_rope_angles = d_state // 2
 
     def trajectory(legacy_renorm: bool):
         ssm_real = np.zeros((nheads, headdim, d_state), dtype=np.float32)
+        ssm_imag = np.zeros((nheads, headdim, d_state), dtype=np.float32)
+        k_state = np.zeros((mimo_rank, nheads, d_state), dtype=np.float32)
+        x_prev = np.zeros((nheads, headdim), dtype=np.float32)
         angle_state = np.zeros((nheads, num_rope_angles), dtype=np.float32)
         ys = np.zeros(samples, dtype=np.float64)
         max_h = 0.0
         for n in range(samples):
-            out, ssm_real, angle_state = mamba3_process_sample(
-                1.0, **case, ssm_real=ssm_real, angle_state=angle_state)
+            out, ssm_real, ssm_imag, k_state, x_prev, angle_state = mamba3_process_sample(
+                1.0, **case, ssm_real=ssm_real, ssm_imag=ssm_imag,
+                k_state=k_state, x_prev=x_prev, angle_state=angle_state)
             ys[n] = out[0]
             max_h = max(max_h, float(np.max(np.abs(ssm_real))))
             if legacy_renorm and (n + 1) % 4096 == 0:

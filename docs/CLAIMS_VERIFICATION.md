@@ -10,10 +10,10 @@
 ## 0. Post-review closure addendum (2026-10-04, second pass)
 
 The technical findings below were correct when written and are kept as the
-historical record.  Four of the six register deviations were then closed by code
-changes (D3, D4, D5, D6); D1/D2 remain open.  Current state is machine-checked by
-`python3 scripts/verify_deviations.py`, and the full ledger lives in
-`ARCHITECTURE_FIDELITY.md` §2 / §4c:
+historical record.  All six register deviations have since been closed by code
+changes (D3, D4, D5, D6 on 2026-10-04; D1, D2 on 2026-11-03).  Current state is
+machine-checked by `python3 scripts/verify_deviations.py`, and the full ledger
+lives in `ARCHITECTURE_FIDELITY.md` §2 / §4c:
 
 | Deviation | Finding in this report | Now |
 |---|---|---|
@@ -21,8 +21,8 @@ changes (D3, D4, D5, D6); D1/D2 remain open.  Current state is machine-checked b
 | D4 — input-derived `A` | §1 table "Deviation" | **CLOSED** — documented as a project variant; §1.2 of the register forbids describing it as the paper's parameterization |
 | D5 — periodic state renormalization | §1 table "Deviation / stability workaround"; appendix row 9 | **CLOSED** — the guard is removed from C++ and both references; stability now follows from the A-stable update, and a continuity + long-run test guards it.  The appendix's "characterised, not fixed" note below is superseded |
 | D6 — `dt_film_proj_w` unused | not covered by this report | **CLOSED** — Δ-FiLM is applied in the C++, NumPy and PyTorch forward passes with one convention, only when conditioning is active |
-| D1 — no exponential-trapezoidal recurrence | §1 table "Not reproduced" | **OPEN** — F4 in `ARCHITECTURE_FIDELITY.md` §5 |
-| D2 — complex state inactive | §1 table "Inactive" | **OPEN** — F4; the claim policy in `ARCHITECTURE_FIDELITY.md` §1.2 still applies ("Mamba-3-inspired" until this lands) |
+| D1 — no exponential-trapezoidal recurrence | §1 table "Not reproduced" | **CLOSED 2026-11-03** — three-term α/β/γ recurrence in C++ + all three Python definitions |
+| D2 — complex state inactive | §1 table "Inactive" | **CLOSED 2026-11-03** — `ssm_imag` written every sample (per-element 2×2 rotation) |
 
 The LoRA finding (no implementation; GUI mockup only) is unchanged and still
 binds: `ARCHITECTURE_FIDELITY.md` §1.2 forbids "runtime LoRA adapters".

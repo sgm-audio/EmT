@@ -1,23 +1,23 @@
 # Mamba-1 → Mamba-3 Migration Plan
 
-> **⚠️ Status correction (2026-10-04).** This document records a migration *plan*
-> and the shape of the target API. It overstated what shipped. Verified state:
-> the **bilinear (Tustin) recurrence, RMSNorm+biases on B/C, and the data-dependent
-> rotation of B/C are implemented**, but the
-> **complex-valued state update and rank-R MIMO coupling are NOT active in the
-> forward pass** (`ssm_imag` is never written; the recurrence indexes rank 0 and
-> never touches `mimo_o`), and the paper's **exponential-trapezoidal three-term
-> recurrence is not implemented** (what is implemented is the classical trapezoidal
-> rule on a real pole). See [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md)
-> for the deviation register and tests. Passing statements below should be read as
-> "API/format reserved for", not "runtime implemented".
+> **⚠️ Status correction (2026-11-03).** This document records a migration *plan*
+> and the shape of the target API. Verified state: the **three-term
+> exponential-trapezoidal recurrence, the complex-valued state (2×2 rotation
+> blocks), RMSNorm+biases on B/C, and the data-dependent rotation of B/C are
+> implemented** (deviations D1 and D2 closed 2026-11-03; D3–D6 closed
+> 2026-10-04). **Rank-R MIMO coupling is still not active** — the recurrence
+> indexes rank 0 and never touches `mimo_o`; a file with `mimo_rank > 1` is
+> refused at load. See [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md)
+> for the deviation register and tests. Passing statements below should be read
+> as "API/format reserved for", not "runtime implemented".
 >
 > **Closures applied later the same day (deviations D3–D6):** rank-R MIMO files are
 > now **refused at load** (`-16`) instead of silently running rank 1; the periodic
 > state renormalization is **removed** (D5); `dt_film_proj_w` is **read** by the
 > forward pass (D6); the input-derived `A` is **documented** as a project variant
-> (D4).  D1/D2 (below) remain the only open fidelity work; see
-> [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md) §5 (F4).
+> (D4).  D1/D2 are now also **closed** (2026-11-03): the three-term
+> exponential-trapezoidal recurrence and the complex 2×2 rotation state are
+> implemented (see [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md) §5 F4).
 
 **Date:** 2026-06-14  
 **Last updated:** 2026-06-15 — **Phases 1-4 complete, core + CLAP builds**
@@ -35,7 +35,7 @@
 | 4 | CLAP Plugin Shell (`clap_plugin.cpp`, `clap_latency.cpp`, `conditioning_frame.h`) | ✅ **DONE** |
 | 5 | Python Export Pipeline (`export_mamba_weights.py`, `validate_export.py`) | ✅ **DONE** |
 | 6 | Tests (6 files) | ✅ **DONE** — 40/40 passing |
-| 7 | ss_block.cpp `process_sample()` Mamba-3-inspired forward pass (two-term bilinear, real state, rank-1) | ✅ **DONE** |
+| 7 | ss_block.cpp `process_sample()` Mamba-3-inspired forward pass (three-term exponential-trapezoidal, complex 2×2 state, rank-1) | ✅ **DONE** |
 
 **Build status:** Core library + CLAP plugin (`mamba_synth`) compiles and links. **40/40 tests pass** (the suite has since grown to 64). The 1.79 us/sample single-layer / 3.73 us/sample 2-layer figures were measured on the *toy* benchmark shape (d_state 16, d_model 16, d_inner 32, 2 heads); the shapes this repo's own training configs produce cost 4.3 us (laptop config) to ~19 us (RunPod L4 config) per sample per layer. Use `tests/benchmark_ssm_block.cpp` and quote its JSON.
 
@@ -57,12 +57,11 @@ This project implements Mamba-1 (arxiv 2312.00752):
 
 The Mamba-3 paper changes these things relative to Mamba-1 (status in this repo noted per item):
 - **No conv1d** — removes the stateful delay line; note Mamba-1/2's causal conv is *already* zero-look-ahead in streaming form, so this is a compute/simplification win rather than a latency win
-- **Caveat:** the shipped recurrence is two-term bilinear, not the paper's exponential-trapezoidal form
-- **(paper feature — NOT implemented)** exponential-trapezoidal discretization; the shipped rule is the classical two-term trapezoidal/bilinear update above, which is stable and cheap but carries no input-history (β) term
+- **Exponential-trapezoidal three-term recurrence** — implemented (D1 closed 2026-11-03): `h_t = α h_{t-1} + β B_{t-1} x_{t-1} + γ B_t x_t` with `α=(1+AΔt/2)/(1-AΔt/2)`, `β=γ=(Δt/2)/(1-AΔt/2)`
 - **A, B, C all input-dependent** — via single `in_proj` layer
-- **Multi-head SSM** — H heads; in this repo each head has a real scalar decay (no complex pole, see below)
-- **Data-dependent rotation of B/C** — implemented (`step_rope_bc`); the *state* itself stays real
-- **(not implemented)** complex-valued state / complex-plane poles per head — `ssm_imag` is allocated but never written
+- **Multi-head SSM** — H heads; each head carries a complex state (2×2 rotation blocks, D2 closed 2026-11-03)
+- **Data-dependent rotation of B/C** — implemented (`step_rope_bc`); the *state* is complex-valued too (per-element rotation)
+- **Complex-valued state / complex-plane poles per head** — implemented (D2 closed 2026-11-03); `ssm_imag` is written every sample
 - **(refused, not executed — D3 closed 2026-10-04)** MIMO — the weight format, exporter and loader still reserve rank R, but the inference path implements rank 0 only. A file with `mimo_rank > 1` is now rejected at load (`-16`), at export, and at training-config validation; `mimo_o` is never applied.
 - **FiLM conditioning** — Feature-wise Linear Modulation from cross-track semantic + f0 + loudness context
 - **RMSNorm** on B and C for stable training/inference
@@ -90,8 +89,9 @@ Input: u ∈ ℝ^d_model
    Apply sin/cos rotation using angle_state and angles projection
    This rotates B and C in the complex plane (the paper's efficient real
    realisation of a *complex state*). In this repo the rotation is applied to
-   the B/C vectors, but the carried state `h` stays real - `ssm_imag` is never
-   written. See ARCHITECTURE_FIDELITY.md D2.
+   the B/C vectors **and** the carried state `h` is itself complex (2×2 rotation
+   blocks, `ssm_imag` written every sample). See ARCHITECTURE_FIDELITY.md D2
+   (closed 2026-11-03).
 
 4. SSM recurrence (per head, per d_state dimension):
    h_t = A_t · h_{t-1} + B_t · x_t    (MIMO: B_t ∈ ℝ^[R, headdim, d_state])
@@ -110,10 +110,10 @@ Input: u ∈ ℝ^d_model
 
 ### Trapezoidal vs ZOH
 
-> Scope note: this section describes the *paper's* discretization. What the repo
-> implements is the two-term bilinear form, i.e. the trapezoidal rule applied to
-> a real pole without the input-history term; the numerical-stability argument
-> carries over, the second-order accuracy argument does not.
+> Scope note: this section describes the *paper's* discretization. The repo now
+> implements the same three-term exponential-trapezoidal form (D1/D2 closed
+> 2026-11-03): `h_t = α h_{t-1} + β B_{t-1} x_{t-1} + γ B_t x_t` with `α`, `β`,
+> `γ` as above, on a complex (2×2 rotation) state.
 
 | | ZOH (Mamba-1) | Trapezoidal (Mamba-3) |
 |---|---|---|
@@ -368,11 +368,10 @@ for (size_t s = 0; s < d_state_; ++s) {
     float B_val = B_rope_[h * d_state_ + s];  // RoPE'd
     float C_val = C_rope_[h * d_state_ + s];  // RoPE'd
     
-    // State update (complex via RoPE, but recurrence on real state)
+    // State update (complex 2×2 rotation + three-term recurrence, D1/D2 closed)
     state_.ssm_real[h][d][s] = A_bar * state_.ssm_real[h][d][s]
                                + B_bar_scale * B_val * x_head_val;
-    state_.ssm_imag[h][d][s] = A_bar * state_.ssm_imag[h][d][s]
-                               + B_bar_scale * B_val * x_head_val;  // simplified
+    state_.ssm_imag[h][d][s] = A_bar * state_.ssm_imag[h][d][s];  // illustrative
     
     // Output contribution
     y_head_[h][d] += C_val * state_.ssm_real[h][d][s];

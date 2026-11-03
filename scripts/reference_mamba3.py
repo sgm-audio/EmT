@@ -50,6 +50,9 @@ def mamba3_process_sample(
     dt_film_proj_w: np.ndarray,     # [2*nheads, d_cond]
     # State (mutated)
     ssm_real: np.ndarray,           # [nheads, headdim, d_state]
+    ssm_imag: np.ndarray,           # [nheads, headdim, d_state]  (D2: written every sample)
+    k_state: np.ndarray,            # [mimo_rank, nheads, d_state]  B history, rank 0 (D1)
+    x_prev: np.ndarray,             # [nheads, headdim]  input history x_{t-1} (D1)
     angle_state: np.ndarray,        # [nheads, num_rope_angles]
     # Conditioning
     cond: np.ndarray,               # [d_cond]
@@ -181,14 +184,20 @@ def mamba3_process_sample(
                 C_norm[h, r, s0] = C0 * cos_a + C1 * sin_a
                 C_norm[h, r, s1] = -C0 * sin_a + C1 * cos_a
 
-    # === Step 5: Multi-head SSM recurrence (trapezoidal) ===
+    # === Step 5: Multi-head SSM recurrence (exponential-trapezoidal + 2x2 rotation) ===
     y_head = np.zeros(d_inner, dtype=np.float32)
 
     for h in range(nheads):
         half_a = A_t[h] * DT_t[h] * 0.5
         inv_denom = 1.0 / (1.0 - half_a)
-        A_bar = (1.0 + half_a) * inv_denom
-        B_bar_scale = DT_t[h] * inv_denom
+        alpha = (1.0 + half_a) * inv_denom
+        beta = DT_t[h] * 0.5 * inv_denom
+        gamma = DT_t[h] * 0.5 * inv_denom
+
+        # D2: theta per head, from the first RoPE angle.
+        theta = angle_state[h, 0]
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
 
         for d in range(headdim):
             x_hd = x[h * headdim + d]
@@ -197,10 +206,24 @@ def mamba3_process_sample(
                 # Use rank 0
                 B_val = B_norm[h, 0, s]
                 C_val = C_norm[h, 0, s]
+                B_prev = k_state[0, h, s]
+                x_prev_val = x_prev[h, d]
 
-                ssm_real[h, d, s] = (A_bar * ssm_real[h, d, s]
-                                     + B_bar_scale * B_val * x_hd)
+                # D2: rotate the previous complex state by R(theta).
+                rot_re = cos_t * ssm_real[h, d, s] - sin_t * ssm_imag[h, d, s]
+                rot_im = sin_t * ssm_real[h, d, s] + cos_t * ssm_imag[h, d, s]
+
+                # D1: three-term update; history and current input enter on the
+                # real axis (identical to the C++ recurrence_kernel.h).
+                ssm_real[h, d, s] = (alpha * rot_re
+                                     + beta * (B_prev * x_prev_val)
+                                     + gamma * (B_val * x_hd))
+                ssm_imag[h, d, s] = alpha * rot_im
                 y_head[h * headdim + d] += C_val * ssm_real[h, d, s]
+
+        # Save this sample's B and x as next sample's history (D1).
+        k_state[0, h, :] = B_norm[h, 0, :]
+        x_prev[h, :] = x[h * headdim:(h + 1) * headdim]
 
     # === Step 6: MIMO combine (SiLU z-gating) ===
     for h in range(nheads):
@@ -226,7 +249,7 @@ def mamba3_process_sample(
     # A <= -1, so the state is bounded without mutating it.  The old 4096-sample
     # guard produced a measured 14.8 % output gain step at each boundary.
 
-    return out, ssm_real, angle_state
+    return out, ssm_real, ssm_imag, k_state, x_prev, angle_state
 
 
 # === Test vector generation ===
@@ -342,6 +365,9 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
 
     # === Run Python reference on multiple samples ===
     ssm_real = np.zeros((nheads, headdim, d_state), dtype=np.float32)
+    ssm_imag = np.zeros((nheads, headdim, d_state), dtype=np.float32)
+    k_state = np.zeros((mimo_rank, nheads, d_state), dtype=np.float32)
+    x_prev = np.zeros((nheads, headdim), dtype=np.float32)
     angle_state = np.zeros((nheads, num_rope_angles), dtype=np.float32)
     cond = np.zeros(d_cond, dtype=np.float32)
     cond[0] = 0.5  # non-zero conditioning
@@ -353,11 +379,12 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
 
     results = {}
     for i, val in enumerate(test_inputs):
-        out, ssm_real, angle_state = mamba3_process_sample(
+        out, ssm_real, ssm_imag, k_state, x_prev, angle_state = mamba3_process_sample(
             val, d_state, d_model, d_inner, nheads, headdim, mimo_rank,
             num_bc_heads, d_cond, in_proj_w, dt_bias, B_bias, C_bias,
             B_norm_weight, C_norm_weight, D_proj, out_proj_w, film_proj_w,
-            dt_film_proj_w, ssm_real, angle_state, cond, True)
+            dt_film_proj_w, ssm_real, ssm_imag, k_state, x_prev, angle_state,
+            cond, True)
         results[f'out_{i}'] = out.astype(np.float32)
 
     # Write expected outputs

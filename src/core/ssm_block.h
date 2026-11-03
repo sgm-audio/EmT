@@ -10,25 +10,33 @@ namespace mamba {
 
 // === Mamba-3 Complex Multi-Head State ===
 //
-// Per-head complex-valued SSM state (real + imag), RoPE angle state,
-// and cached B projection.  alignas(64) prevents false sharing.
+// Per-head complex-valued SSM state (real + imag) realized as per-element
+// 2×2 rotation blocks, the B history for the three-term recurrence, the
+// input history x_{t-1}, and the RoPE angle state.  alignas(64) prevents
+// false sharing.
 //
-// DEVIATION D2 (open): the recurrence currently updates `ssm_real` only;
-// `ssm_imag` is allocated and scaled but never written by a rotational state
-// update.  Until D2 lands, describe the state as real with a data-dependent
-// rotary rotation applied to B and C — never as a complex-valued state.
+// DEVIATION D2 (closed 2026-11-03): step_recurrence now writes `ssm_imag`
+// every sample — the state is genuinely complex (rotational), not real with
+// a data-dependent rotary rotation applied only to B and C.
+//
+// DEVIATION D1 (closed 2026-11-03): step_recurrence uses the three-term
+// exponential-trapezoidal recurrence.  `k_state` holds the B history
+// (B_{t-1}, rank 0 only — the runtime executes rank 0, see D3) and `x_prev`
+// holds the per-head input history x_{t-1}.
 //
 // Memory footprint at MAX config:
 //   ssm_real/imag: 8 * 64 * 32 * 2 = 32,768 floats ≈ 131 KB
 //   k_state:       4 * 8 * 32 = 1,024 floats ≈ 4 KB
+//   x_prev:        8 * 64 = 512 floats ≈ 2 KB
 //   angle_state:   8 * 16 = 128 floats ≈ 0.5 KB
-//   Total: ~135 KB per layer
+//   Total: ~138 KB per layer
 
 struct alignas(64) SSMState {
     float ssm_real[MAX_NHEADS][MAX_HEADDIM][MAX_D_STATE];
     float ssm_imag[MAX_NHEADS][MAX_HEADDIM][MAX_D_STATE];
-    float k_state[MAX_MIMO_RANK][MAX_NHEADS][MAX_D_STATE];  // cached B
-    float angle_state[MAX_NHEADS][MAX_NUM_ROPE_ANGLES];      // RoPE phase
+    float k_state[MAX_MIMO_RANK][MAX_NHEADS][MAX_D_STATE];  // B history, rank 0 [D1]
+    float x_prev[MAX_NHEADS][MAX_HEADDIM];                  // input history x_{t-1} [D1]
+    float angle_state[MAX_NHEADS][MAX_NUM_ROPE_ANGLES];      // RoPE phase / θ source [D2]
 };
 
 // === Mamba-3 Weight Struct ===
@@ -96,13 +104,13 @@ struct SSMBlockParams {
 // === Single Mamba-3 SSM Layer ===
 //
 // No conv1d — 0 samples algorithmic latency.
-// Multi-head SSM with a real (rank-1) state, bilinear/trapezoidal
-// discretization, RoPE rotary embeddings on B/C, and FiLM conditioning.
+// Multi-head SSM with a complex (rank-1) state realized as 2×2 rotation
+// blocks, exponential-trapezoidal three-term discretization, RoPE rotary
+// embeddings on B/C, and FiLM conditioning.
 //
 // Claim policy (see ARCHITECTURE_FIDELITY.md):
-//   D1 open — two-term update, not the paper's exponential-trapezoidal
-//             three-term recurrence.
-//   D2 open — no rotational (complex) dynamics inside the state.
+//   D1 closed (2026-11-03) — three-term exponential-trapezoidal recurrence.
+//   D2 closed (2026-11-03) — rotational (complex) dynamics inside the state.
 //   D4 closed (documented) — A is input-derived, not a learned parameter.
 
 class SSMBlock {

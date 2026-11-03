@@ -201,9 +201,15 @@ class Mamba3Block(nn.Module):
         B = B_rot.view(batch, seq_len, self.nheads, self.mimo_rank, self.d_state)
         C = C_rot.view(batch, seq_len, self.nheads, self.mimo_rank, self.d_state)
 
-        # State: (B, nheads, headdim, d_state)
-        h = torch.zeros(batch, self.nheads, self.headdim, self.d_state,
-                        device=device)
+        # State: (B, nheads, headdim, d_state) — complex (re, im)
+        h_re = torch.zeros(batch, self.nheads, self.headdim, self.d_state,
+                           device=device)
+        h_im = torch.zeros(batch, self.nheads, self.headdim, self.d_state,
+                           device=device)
+        # D1 history: B_{t-1} (rank 0) and x_{t-1} per head; zero for the first
+        # sample so a reset model matches a fresh instance.
+        B_prev = torch.zeros(batch, self.nheads, self.d_state, device=device)
+        x_prev = torch.zeros(batch, self.nheads, self.headdim, device=device)
 
         y_heads = []
         for t in range(seq_len):
@@ -212,20 +218,41 @@ class Mamba3Block(nn.Module):
             xt = x_proj[:, t, :]
             xt_h = xt.view(batch, self.nheads, self.headdim)
 
-            # Step 5: Trapezoidal discretization
+            # Step 5: exponential-trapezoidal three-term + 2x2 rotation (D1 + D2)
             half_a = at * dtt / 2.0
             inv_denom = 1.0 / (1.0 - half_a)
-            A_bar = (1.0 + half_a) * inv_denom
-            B_bar_scale = dtt * inv_denom
+            alpha = (1.0 + half_a) * inv_denom
+            beta = dtt * 0.5 * inv_denom
+            gamma = dtt * 0.5 * inv_denom
 
-            B_t = B[:, t, :, 0, :]  # rank 0
+            B_t = B[:, t, :, 0, :]  # rank 0, (B, nheads, d_state)
             C_t = C[:, t, :, 0, :]
 
-            h = (A_bar.unsqueeze(2).unsqueeze(3) * h +
-                 B_bar_scale.unsqueeze(2).unsqueeze(3) *
-                 B_t.unsqueeze(2) * xt_h.unsqueeze(3))
+            # D2: theta per head from the first RoPE angle.  angle_state is
+            # (B, S, nra); the angle projection is shared across heads (same as
+            # C++ step_rope_bc), so theta is a per-batch scalar broadcast over
+            # heads and headdim.
+            theta = angle_state[:, t, 0]  # (B,)
+            cos_t = torch.cos(theta).view(batch, 1, 1, 1)
+            sin_t = torch.sin(theta).view(batch, 1, 1, 1)
 
-            y_t = (C_t.unsqueeze(2) * h).sum(dim=-1)  # (B, nheads, headdim)
+            # Rotate the previous complex state by R(theta).
+            rot_re = cos_t * h_re - sin_t * h_im
+            rot_im = sin_t * h_re + cos_t * h_im
+
+            # D1: three-term update; history + current input on the real axis.
+            h_re = (alpha.unsqueeze(2).unsqueeze(3) * rot_re +
+                    beta.unsqueeze(2).unsqueeze(3) *
+                    B_prev.unsqueeze(2) * x_prev.unsqueeze(3) +
+                    gamma.unsqueeze(2).unsqueeze(3) *
+                    B_t.unsqueeze(2) * xt_h.unsqueeze(3))
+            h_im = alpha.unsqueeze(2).unsqueeze(3) * rot_im
+
+            y_t = (C_t.unsqueeze(2) * h_re).sum(dim=-1)  # (B, nheads, headdim)
+
+            # Save history for the next sample (D1).
+            B_prev = B_t
+            x_prev = xt_h
 
             # Step 6: SiLU z-gating
             z_t = z[:, t, :].view(batch, self.nheads, self.headdim)

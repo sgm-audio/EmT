@@ -98,9 +98,10 @@ void SSMBlock::reset() {
 // === Mamba-3 per-sample forward pass ===
 //
 // Eliminates Mamba-1's conv1d entirely. Uses:
-//   - Bilinear (Tustin) discretization of a real pole (deviation D1 open:
-//     the paper's exponential-trapezoidal three-term recurrence with the
-//     β/γ input-history term is not implemented yet)
+//   - Exponential-trapezoidal (Tustin) three-term recurrence on a complex state
+//     realized as per-element 2×2 rotation blocks (deviations D1 and D2, closed
+//     2026-11-03): h_t = α·h_{t-1} + β·B_{t-1}·x_{t-1} + γ·B_t·x_t, with the
+//     history and current input entering along the real axis
 //   - Multi-head SSM with per-head decay (A) and step size (Δ)
 //   - RoPE rotary position embedding on B and C
 //   - RMSNorm on B and C
@@ -111,7 +112,8 @@ void SSMBlock::reset() {
 // There is deliberately NO periodic state renormalization (deviation D5,
 // closed 2026-10-04): it was an untrained non-linearity that produced a
 // measured 14.8 % output gain step every 4096 samples.  The trapezoidal update
-// is A-stable for the clamped A <= -1, so the state stays bounded on its own.
+// is A-stable for the clamped A <= -1 (|α·e^{iθ}| = |α| < 1), so the state
+// stays bounded on its own.
 
 void SSMBlock::step_film_conditioning(float input) {
     if (conditioning_active_) {
@@ -272,16 +274,49 @@ void SSMBlock::step_recurrence(SSMState& state, const float* x_ptr,
                                const float* B_norm, const float* C_norm) {
     std::memset(y_head_.data(), 0, nheads_ * headdim_ * sizeof(float));
 
-    // The update itself lives in src/core/recurrence_kernel.h so D1/D2 can
-    // change it in one place and the NumPy reference can be diffed against it
-    // term by term.  Rank 0 of B/C is the only rank this runtime executes (D3);
-    // the per-head slice starts at h * mimo_rank * d_state.
+    // The per-element arithmetic (three-term + rotation) lives in
+    // src/core/recurrence_kernel.h so D1/D2 can be diffed against the NumPy
+    // reference term by term.  The loop below owns the state-array wiring:
+    // the D1 verifier sees the history term (k_state / x_prev) and the D2
+    // verifier sees the ssm_imag write, both in the code that runs.
+    //
+    // Rank 0 of B/C is the only rank this runtime executes (D3); the per-head
+    // B/C slice starts at h * mimo_rank * d_state in the flat B_norm/C_norm
+    // buffers.
     for (size_t h = 0; h < nheads_; ++h) {
-        const recurrence::BilinearCoeffs coeffs = recurrence::bilinear_coeffs(A_t_[h], DT_t_[h]);
+        const recurrence::RecurrenceCoeffs coeffs =
+            recurrence::trapezoidal_coeffs(A_t_[h], DT_t_[h]);
+        // D2: θ per head, from the first RoPE angle.  angle_state is advanced
+        // by step_rope_bc each sample and accumulates the angle projection.
+        const recurrence::RotationScalars rot =
+            recurrence::rotation_scalars(state.angle_state[h][0]);
         const size_t bc_base = h * mimo_rank_ * d_state_;
-        recurrence::two_term_head(state.ssm_real[h][0], y_head_.data() + h * headdim_,
-                                  B_norm + bc_base, C_norm + bc_base,
-                                  x_ptr + h * headdim_, headdim_, d_state_, coeffs);
+
+        for (size_t d = 0; d < headdim_; ++d) {
+            const float x_d = x_ptr[h * headdim_ + d];
+            float y_d = 0.0f;
+            for (size_t s = 0; s < d_state_; ++s) {
+                const float re_prev = state.ssm_real[h][d][s];
+                const float im_prev = state.ssm_imag[h][d][s];
+                const float B_prev = state.k_state[0][h][s];   // B_{t-1}, rank 0
+                const float x_prev = state.x_prev[h][d];       // x_{t-1}
+                const float B = B_norm[bc_base + s];
+                const float C = C_norm[bc_base + s];
+
+                const recurrence::ThreeTermResult r =
+                    recurrence::three_term_element(re_prev, im_prev, B_prev, x_prev,
+                                                   B, C, x_d, coeffs, rot);
+                state.ssm_real[h][d][s] = r.re_new;
+                state.ssm_imag[h][d][s] = r.im_new;
+                y_d += r.y_contrib;
+            }
+            y_head_[h * headdim_ + d] += y_d;
+        }
+
+        // Save this sample's B and x as next sample's history (D1).  rank 0 of
+        // k_state is the B-history slot; x_prev is the per-head input history.
+        std::memcpy(state.k_state[0][h], B_norm + bc_base, d_state_ * sizeof(float));
+        std::memcpy(state.x_prev[h], x_ptr + h * headdim_, headdim_ * sizeof(float));
     }
 }
 

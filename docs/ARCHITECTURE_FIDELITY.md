@@ -1,8 +1,9 @@
 # Architecture Fidelity & Claim Policy
 
-**Status:** current as of 2026-10-04.  Deviation closure pass applied the same
-day: **D3, D4, D5, D6 are closed** (see the per-entry *Status* lines and §4c);
-**D1 and D2 remain open** (scope in F4, §5).  Re-verify with
+**Status:** current as of 2026-11-03.  Deviation closure pass of 2026-10-04 closed
+**D3, D4, D5, D6**; the 2026-11-03 pass closed **D1 and D2** (three-term
+exponential-trapezoidal recurrence + complex 2×2 rotation state).  All six
+deviations are closed (see the per-entry *Status* lines).  Re-verify with
 `python3 scripts/verify_deviations.py`.
 **Reference paper:** *Mamba-3: Improved Sequence Modeling using State Space Principles*, arXiv:2603.15569 (ICLR 2026)
 **Reference code:** `state-spaces/mamba` (Mamba-3 released 2026-03-17)
@@ -27,7 +28,9 @@ wants (audio developers who read code and papers). The rule from here on:
 |---|---|
 | Causal, streaming, zero-look-ahead core | No conv1d and no future-index reads: `src/core/ssm_block.cpp:325-373` processes one sample per step using only carried state |
 | Real-time cost is measurable and gated on demand | `tests/benchmark_ssm_block.cpp` (percentage-of-one-core reporting + non-zero exit on budget failure); the gate is wired into CI (**Actions has not started since 2026-09-14** — see §4b, so it is not currently enforced by CI) |
-| C++ inference matches the Python reference | `tests/test_cpp_parity.cpp`, max abs error **1.19e-07** over 256 elements (measured 2026-10-04 with generated vectors) |
+| C++ inference matches the Python reference | `tests/test_cpp_parity.cpp`, max abs error **1.19e-07** over 256 elements (measured 2026-11-03 with freshly generated vectors after the D1/D2 closure) |
+| Three-term exponential-trapezoidal recurrence (D1 closed) | `src/core/recurrence_kernel.h` → `trapezoidal_coeffs`/`three_term_element`; the α/β/γ split is identical across `src/core/ssm_block.cpp`, `scripts/reference_mamba3.py`, `scripts/reference_forward.py`, `scripts/export_mamba_weights.py` |
+| Complex-valued SSM state as per-element 2×2 rotation blocks (D2 closed) | `step_recurrence` writes `ssm_imag` every sample (`src/core/ssm_block.cpp`); `tests/test_recurrence_kernel.cpp` → `ResonancePreservation` (expected-frequency oscillation, no blow-up over 10⁵ samples) |
 | Audio-thread discipline is enforced structurally | Lock-free SPSC/seqlock paths, `-fno-exceptions -fno-rtti`, no heap in `process_sample`; `tests/test_realtime_safety.cpp` (7/7) |
 | Real-time-safe plugin host integration with honest latency reporting | `src/clap/clap_latency.cpp`; CLAP plugin builds; a `clap-validator` step exists in CI (see §4b on CI not starting) |
 | The conditional-emission parts of Mamba-2/3 are present | Input-dependent Δ, B, C via a single `in_proj` (`src/core/ssm_block.cpp:123-161`), RMSNorm on B/C (`:163-206`), B/C bias terms, data-dependent rotation applied to B/C (`:211-243`) |
@@ -39,10 +42,8 @@ wants (audio developers who read code and papers). The rule from here on:
 
 | Do not claim | Why | Use instead |
 |---|---|---|
-| "Implements Mamba-3" | The recurrence is a two-term bilinear/Tustin update with a real scalar state; the paper's contribution is a three-term *exponential-trapezoidal* recurrence with a complex state. See D1/D2. | "Mamba-3-**inspired** causal SSM" / "Mamba-family SSM adapted for real-time audio" |
-| "Complex-valued state" | `ssm_imag` is allocated (`src/core/ssm_block.h`) but never written by the recurrence (the only writer was the periodic renormalization, removed in the D5 closure) | "data-dependent rotary rotation applied to B and C" |
+| "Implements Mamba-3" | The recurrence and complex state are now faithful (D1/D2 closed 2026-11-03), but `A` is input-derived not learned (D4) and MIMO `rank > 1` is refused rather than executed (D3). | "Mamba-3-**inspired** causal SSM with the paper's three-term exponential-trapezoidal recurrence and complex (2×2 rotation) state" |
 | "MIMO" | The recurrence indexes rank 0 only; `mimo_x/mimo_z/mimo_o` are carried in the file format but never read. Since the D3 closure (2026-10-04) a file with `mimo_rank > 1` is **refused at load** (error `-16`), at export, and at training-config validation | "rank-1 SISO per head; rank-R MIMO files are rejected, not silently downgraded" |
-| "Exponential-trapezoidal discretization" | Implemented rule is classical trapezoidal on a real pole. See D1 | "bilinear (Tustin) discretization" |
 | "Zero algorithmic latency *because* Mamba-3 removed conv1d" | Mamba-1/2's causal conv is already streamable with zero look-ahead (`causal_conv1d_update`); removing it is a compute/simplification win, not a latency win | "no conv1d: simpler and cheaper than Mamba-1/2, and no look-ahead" |
 | Any per-sample CPU figure that is not reproduced by the harness on the target machine | The published 1.79 us/sample was measured on the toy shape; the shapes this repo's own training configs produce are 5-65x more expensive (§3) | Run `benchmark_ssm_block --config train4070,trainl4 --json bench.json` and quote the JSON |
 | "Runtime LoRA adapters" | No LoRA code exists. `packages/emt_lora_matrix_companion/` is a GUI asset pack (mockups + layout spec). See `assets/gui/README.md` | "planned"; or "per-preset merged weights", which is what the format supports today |
@@ -76,8 +77,8 @@ Status summary (checked automatically by `scripts/verify_deviations.py`):
 
 | Dev | Subject | Status |
 |---|---|---|
-| D1 | three-term exponential-trapezoidal recurrence | **OPEN** — scoped as F4 (§5) |
-| D2 | 2×2 rotational (complex) state dynamics | **OPEN** — scoped as F4 (§5) |
+| D1 | three-term exponential-trapezoidal recurrence | **CLOSED 2026-11-03** — α/β/γ split in C++ + all three Python definitions |
+| D2 | 2×2 rotational (complex) state dynamics | **CLOSED 2026-11-03** — `ssm_imag` written every sample (per-element rotation) |
 | D3 | rank-R MIMO carried but unused | **CLOSED 2026-10-04** — rank > 1 refused at load/export/training |
 | D4 | `A` is input-derived, not a learned parameter | **CLOSED 2026-10-04** — documented as a project variant (code + doc) |
 | D5 | periodic state renormalization gain step | **CLOSED 2026-10-04** — guard removed; continuity + long-run tests |
@@ -86,18 +87,41 @@ Status summary (checked automatically by `scripts/verify_deviations.py`):
 ### D1 — Discretization is bilinear, not exponential-trapezoidal
 
 - **Paper:** `h_t = α_t h_{t-1} + β_t B_{t-1} x_{t-1} + γ_t B_t x_t`, i.e. a *three-term* recurrence with an input-history term, derived from a second-order (trapezoidal) discretization of the continuous system.
-- **Repo:** `A_t = -softplus(dd_A)` clamped to `A_t <= -1` (`ssm_block.cpp:151-155`), then
+- **Repo (was):** `A_t = -softplus(dd_A)` clamped to `A_t <= -1` (`ssm_block.cpp:151-155`), then
   `half = A_t·Δt/2`, `Ā = (1+half)/(1-half)`, `B̄ = Δt/(1-half)`,
-  applied as a **two-term** update `h ← Ā·h + B̄·(B_t ⊙ x_t)` (`:249-272`).
-- **Consequence:** a valid and stable discretization, but it has no `β` input-history term, so it cannot reproduce the paper's implicit-convolution behaviour or its ablation result (that the short conv becomes redundant). Note also that `A_t <= -1` pins the continuous pole at |A| ≥ 1, which (with `B` normalized to unit RMS) makes the steady-state state magnitude ≈ `1 + |B_bias|` — see D5 for why that matters.
-- **Close it:** add the `β`/`γ` split (including `B_{t-1}x_{t-1}` state) to `SSMBlock`, `scripts/reference_mamba3.py`, and the exporter; keep parity green; re-benchmark (the extra term costs one multiply-add per state element).
+  applied as a **two-term** update `h ← Ā·h + B̄·(B_t ⊙ x_t)`.
+- **Status: CLOSED 2026-11-03.** The recurrence now implements the three-term
+  form with `inv = 1/(1 - A_t·Δt/2)`:
+  `α = (1 + A_t·Δt/2)·inv`, `β = (Δt/2)·inv`, `γ = (Δt/2)·inv`,
+  `h_t = α·h_{t-1} + β·(B_{t-1} ⊙ x_{t-1}) + γ·(B_t ⊙ x_t)`.
+  The coefficients live in `src/core/recurrence_kernel.h`
+  (`trapezoidal_coeffs`); the history state is `SSMState::k_state` (B history,
+  rank 0) and a new `SSMState::x_prev` (per-head input history), both cleared
+  by `reset()`.  β and γ are equal (Tustin/trapezoidal average); the `trap`
+  projection row remains reserved/unused because the paper does not split β/γ
+  into separately learned parameters (documented in `WEIGHT_FORMAT_SPEC.md`).
+  Guards: `tests/test_recurrence_kernel.cpp` →
+  `ThreeTermInputHistoryChangesImpulseResponse` (β term changes the response by
+  exactly `β·B_{t-1}·x_{t-1}`) and `ResetClearsHistory`; `verify_deviations.py`
+  flips D1 when the history term disappears.
 
 ### D2 — The state is real; the complex path is inert
 
 - **Paper:** complex-valued state update, shown equivalent to a real state with 2×2 rotation blocks, realized efficiently as a *data-dependent* rotary embedding on B and C.
-- **Repo:** rotation is applied to B and C (`:211-243`) with a cumulative angle state — but the recurrence (`:266-269`) updates `ssm_real` only. `ssm_imag` is dead.
-- **Consequence:** the B/C rotation is present (that part is faithful in spirit), but there is no rotational dynamics *inside* the state, so none of the paper's state-tracking results follow. The claimed "complex-valued state" headline is unsupported.
-- **Close it:** implement the 2×2 block update `(h_re, h_im) ← R(θ)·(Ā h_re, Ā h_im) + B̄·(B x)` with per-head θ derived from Δ, in both C++ and the reference, and add a test that a state-space oscillation is preserved (e.g. an impulse response with a known resonant frequency).
+- **Repo (was):** rotation is applied to B and C with a cumulative angle state — but the recurrence updated `ssm_real` only; `ssm_imag` was dead.
+- **Status: CLOSED 2026-11-03.** The recurrence now writes `ssm_imag` every
+  sample.  The complex state is realized as per-element 2×2 rotation blocks:
+  `(h_re, h_im)_t = α·R(θ)·(h_re, h_im)_{t-1} + [input along the real axis]`,
+  with `R(θ) = [[cos θ, -sin θ], [sin θ, cos θ]]`.  θ is per head, taken from
+  the first RoPE angle (`SSMState::angle_state[h][0]`, advanced by
+  `step_rope_bc`); the input terms (current and history) are added along the
+  real axis, not rotated with the state.  The B/C RoPE (`step_rope_bc`) is
+  retained.  `|α·e^{iθ}| = |α| < 1` for the clamped `A <= 0`, so the state stays
+  bounded with no renormalization (D5 invariant preserved).  Guard:
+  `tests/test_recurrence_kernel.cpp` → `ResonancePreservation` (impulse into a
+  rotating state oscillates at the expected `θ`-per-sample frequency over 10⁵
+  samples, never exceeds unit magnitude, no NaN/Inf); `verify_deviations.py`
+  flips D2 when `ssm_imag` is no longer assigned.
 
 ### D3 — MIMO is carried but unused
 
@@ -282,7 +306,7 @@ benchmarkable. Until F1-F3 land, the honest description is
 | F1 | Rename claims (no code): README/MIGRATION/paper-links say "Mamba-3-inspired"; publish this document | No claim in the repo contradicts §1.2 | hours — **done 2026-10-04** (`README.md`, `MIGRATION_TO_MAMBA3.md`, register published; D3-D6 rows re-checked the same day) |
 | F2 | Fix D5 (renormalization): remove or make it non-mutating | A continuity test across the renorm boundary passes for a model with `|h| > 1`; listening test on the constructed case | 1 day — **done 2026-10-04** (§4c) |
 | F3 | Implement D3 properly *or* refuse `mimo_rank != 1` at load | Loader rejects unimplemented ranks with a clear error, or a rank-2 model matches a reference implementation | 1-3 days — **done 2026-10-04 (refusal path)**; the rank-R implementation is scoped in `Prompts/DEVIATION_RESOLUTION/D3_MIMO_RANK.md` |
-| F4 | Implement D1 (β/γ three-term recurrence) + D2 (2×2 rotation state) in both C++ and the Python reference | Parity green; benchmark shows the added cost; a resonance-preservation test passes | 1-2 weeks — **prompt ready**: `Prompts/DEVIATION_RESOLUTION/D1_D2_TRAPEZOIDAL_COMPLEX_STATE.md` |
+| F4 | Implement D1 (β/γ three-term recurrence) + D2 (2×2 rotation state) in both C++ and the Python reference | Parity green; benchmark shows the added cost; a resonance-preservation test passes | 1-2 weeks — **done 2026-11-03** (D1/D2 closed; parity 1.19e-07; `ResonancePreservation` + `ThreeTermInputHistoryChangesImpulseResponse` + `ResetClearsHistory` tests) |
 | F5 | Re-benchmark with the SIMD block path and publish per-shape CPU/latency tables | `benchmark_ssm_block --config train4070 --layers 1,3 --budget-pct 25` passes on a 2020-era laptop | 1-2 weeks — unchanged |
 
 F2 and F3 are cheap and remove the two most embarrassing gaps. F4 is the real
