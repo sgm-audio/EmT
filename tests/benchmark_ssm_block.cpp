@@ -39,6 +39,11 @@
 #include "config.h"
 
 #if defined(_WIN32)
+// windows.h defines min/max as macros unless NOMINMAX is set, which breaks
+// every std::max/std::min call below (MSVC C2589).
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <intrin.h>
 #else
@@ -568,7 +573,7 @@ int main(int argc, char** argv) {
                for (const Result& r : results) worst = std::max(worst, r.us_per_sample);
                return worst;
            }(),
-           results.empty() ? 0.0 : results.front().sample_rate,
+           results.empty() ? 0.0 : results.front().sample_rate / 1000.0,
            [&] {
                double worst = 0.0;
                for (const Result& r : results) worst = std::max(worst, r.core_pct);
