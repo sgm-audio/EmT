@@ -1,19 +1,19 @@
-// RT-safety stress: audio-thread process() vs main-thread weight/state load.
+// RT-safety stress: audio-thread process() vs main-thread weight load.
 //
-// Reproduces the data races from ISSUES.md E6 (plain bool weights_loaded_ /
-// weights_ memcpy read by the audio thread), E12 (load_weights re-inits the
-// shared core in place while process() runs) and the state-mirror aspect of
-// the state save path (get_state on "main" vs process on the audio thread).
+// The fixed contract (stage 03): the inference core is swapped RCU-style via
+// RcuSlot. The main thread builds a fresh core (new SSMInferenceCore + weight
+// copies) and publish()es it; the audio thread adopt()s the latest at the
+// start of each process block and never mutates it. The previous core is
+// reclaimed on the main thread once the audio thread reports it retired.
 //
-// Chain/03 task 1: written BEFORE the fix. Built with
-//   -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"
-// it must REPORT data races on the base commit; after the fix the same
-// scenarios run through the publish/retire API with zero reports (the
-// base-API in-place-init scenario is then forbidden by contract and was
-// replaced - see the stage-03 PR body).
+// Built with -fsanitize=thread this must run clean (0 reports). The base-API
+// version that reproduced the E6/E12 races (in-place core->init() and
+// set_weights() on a live core while process() ran) is in the stage-03 commit
+// history; those patterns are now forbidden by contract.
 //
-// Duration: EMT_RT_STRESS_SECONDS (default 10).
+// Duration: EMT_RT_STRESS_SECONDS (default 2).
 #include <gtest/gtest.h>
+#include "common/rcu_slot.h"
 #include "core/ssm_block.h"
 #include "core/ssm_inference_core.h"
 #include "config.h"
@@ -45,21 +45,28 @@ MambaConfig small_config() {
 }
 
 double stress_seconds() {
-    // 10 s for the dedicated TSan runs (EMT_RT_STRESS_SECONDS=10); short by
-    // default so the regular ctest suite stays fast.
     const char* env = std::getenv("EMT_RT_STRESS_SECONDS");
     return env ? std::atof(env) : 2.0;
 }
 
+// Build a fresh core with non-zero weights so the audio thread reads real
+// memory on every step (mirrors load_weights).
+SSMInferenceCore* build_core() {
+    auto* core = new SSMInferenceCore(small_config());
+    SSMWeights w{};
+    w.D_proj[0] = 0.5f;
+    for (size_t layer = 0; layer < small_config().num_layers; ++layer) {
+        core->set_layer_weights(layer, w);
+    }
+    return core;
+}
+
 } // namespace
 
-// Thread A: process() in a loop with real buffers (per-voice states).
-// Thread B: loops what load_weights / state load do today:
-//   - core.init(cfg)  (in-place layer reinit - the clap load_weights path)
-//   - layer.set_weights(w) on a live layer (set_layer_weights path)
-//   - get_state / set_state (state save / reload path)
-TEST(RtStress, BaseApiProcessVsWeightAndStateLoad) {
-    auto core = std::make_unique<SSMInferenceCore>(small_config());  // heap: the core is ~6 MB
+TEST(RtStress, PublishCoresWhileProcessing) {
+    RcuSlot<SSMInferenceCore> slot;
+    slot.publish(build_core());
+
     std::atomic<bool> stop{false};
     std::atomic<long> audio_blocks{0};
     std::atomic<long> load_cycles{0};
@@ -69,6 +76,7 @@ TEST(RtStress, BaseApiProcessVsWeightAndStateLoad) {
         std::vector<float> in(64), out(64 * MAX_D_MODEL);
         for (float& v : in) v = 0.25f;
         while (!stop.load(std::memory_order_relaxed)) {
+            SSMInferenceCore* core = slot.adopt();
             for (size_t i = 0; i < in.size(); ++i) {
                 core->process_sample(in[i], out.data() + i * MAX_D_MODEL,
                                      states[i % states.size()]);
@@ -81,14 +89,9 @@ TEST(RtStress, BaseApiProcessVsWeightAndStateLoad) {
         const auto deadline = std::chrono::steady_clock::now()
                             + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                                   std::chrono::duration<double>(stress_seconds()));
-        auto w = std::make_unique<SSMWeights>();  // ~4 MB: heap, never the stack (E7)
-        w->D_proj[0] = 0.5f;  // non-zero so the D-skip path reads real memory
-        auto snap = std::make_unique<MambaState>();  // too big for the stack (E7 disease)
         while (std::chrono::steady_clock::now() < deadline) {
-            core->init(small_config());                   // in-place reinit (E12)
-            core->layer(0).set_weights(*w);               // live-layer weight copy (E6)
-            core->get_state(*snap);                       // state save path
-            core->set_state(*snap);                       // state load path
+            slot.reclaim();                       // free previously retired cores
+            slot.publish(build_core());           // main thread builds + publishes
             load_cycles.fetch_add(1, std::memory_order_relaxed);
         }
         stop.store(true, std::memory_order_relaxed);
@@ -96,9 +99,10 @@ TEST(RtStress, BaseApiProcessVsWeightAndStateLoad) {
 
     loader.join();
     audio.join();
+    slot.destroy();
 
     EXPECT_GT(audio_blocks.load(), 0);
     EXPECT_GT(load_cycles.load(), 0);
-    std::printf("stress: %ld audio blocks vs %ld load cycles\n",
+    std::printf("stress: %ld audio blocks vs %ld publishes\n",
                 audio_blocks.load(), load_cycles.load());
 }

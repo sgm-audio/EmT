@@ -4,6 +4,7 @@
 #include <clap/clap.h>
 #include "clap/clap_plugin.h"
 #include "common/aligned_storage.h"
+#include "common/rcu_slot.h"
 #include "core/ssm_inference_core.h"
 #include "core/weight_loader.h"
 #include <atomic>
@@ -21,11 +22,11 @@ enum FxParamId : clap_id {
 
 struct alignas(64) FxState {
     const clap_host_t* host;
-    // alignas lives on the member (not only on the struct): core_storage
-    // follows a pointer, so a bare std::byte[] would land 8 bytes off a
-    // 64-byte boundary and fault in the SSMInferenceCore constructor.
-    alignas(64) AlignedStorage<SSMInferenceCore, 64> core_storage;
-    SSMInferenceCore* core;
+    // Inference engine, swapped RCU-style (see RcuSlot in common/rcu_slot.h):
+    // the main thread builds a fresh heap core and publish()es it; the audio
+    // thread adopt()s the latest per block; the old core is reclaimed on the
+    // main thread (E12, E7).
+    RcuSlot<SSMInferenceCore> core;
     MambaConfig core_cfg;
     double sample_rate;
     uint32_t block_size;

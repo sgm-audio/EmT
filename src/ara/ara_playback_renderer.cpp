@@ -105,8 +105,8 @@ void PlaybackRenderer_render_chunked(PlaybackRenderer* renderer,
     auto* ctx = static_cast<PlaybackRendererContext*>(renderer->user_data);
     if (!ctx->core) return;
 
-    // Apply real-time denormal flags
-    SSMBlock::apply_ftz_daz();
+    // Apply real-time denormal flags (restored when this scope exits)
+    ScopedFtzDaz ftz_guard;
 
     if (chunk_size == 0 || chunk_size > MAX_CHUNK_SIZE) {
         chunk_size = MAX_CHUNK_SIZE;
