@@ -70,7 +70,10 @@ struct ModelDims {
 // Small: what the repo's benchmarks have historically reported. Cheap enough
 // for a CI gate.
 const ModelDims kSmall = {
-    "small", 16, 16, 32, 2, 16, MAX_MIMO_RANK, MAX_NUM_BC_HEADS, 8, COND_DIM
+    // mimo_rank is 1: the loader refuses mimo_rank > 1 (deviation D3), so a
+    // benchmark config using MAX_MIMO_RANK=4 described a model the plugin
+    // could not actually load (E14).
+    "small", 16, 16, 32, 2, 16, 1, MAX_NUM_BC_HEADS, 8, COND_DIM
 };
 
 // Training-config shapes: these mirror training/configs/*.yaml, i.e. the models

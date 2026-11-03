@@ -469,3 +469,12 @@ TEST(WeightLoaderPath, MultiLayerModelIsLoadable) {
     EXPECT_FALSE(WeightLoader::fits_in_static_weights_with(hdr))
         << "a model with more layers than MAX_LAYERS must be rejected";
 }
+
+TEST(WeightLoaderPath, DefaultPathIsModuleRelative) {
+    char path[1024];
+    resolve_default_weight_path(path, sizeof(path));
+    // The default must be anchored to the module (bundle) dir, not the bare
+    // CWD-relative "models/test_model.bin" (E11).
+    EXPECT_NE(std::strcmp(path, "models/test_model.bin"), 0);
+    EXPECT_NE(std::strstr(path, "models/test_model.bin"), nullptr);
+}
