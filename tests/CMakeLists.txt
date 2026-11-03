@@ -84,6 +84,14 @@ target_link_libraries(test_rt_stress PRIVATE Threads::Threads)
 # Stage 03 acceptance: MXCSR restore + per-instance conditioning.
 emt_add_test(test_rt_safety test_rt_safety.cpp)
 
+# Stage 05: state save -> load -> save byte-equality (E3).
+emt_add_test(test_state_roundtrip
+    test_state_roundtrip.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_state.cpp)
+target_link_libraries(test_state_roundtrip PRIVATE Threads::Threads)
+target_include_directories(test_state_roundtrip PRIVATE
+    ${PROJECT_SOURCE_DIR}/extern/clap/include)
+
 emt_add_test(test_realtime_safety
     test_realtime_safety.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/clap_fx_plugin.cpp
