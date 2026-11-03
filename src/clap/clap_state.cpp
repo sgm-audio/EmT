@@ -56,7 +56,9 @@ static bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream
 
     if (!stream_write_u32(stream, PARAM_COUNT)) return false;
     for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
-        if (!stream_write_f64(stream, m->param_values[i].load(std::memory_order_acquire))) return false;
+        double pv = m->param_values[i].load(std::memory_order_acquire);
+        fprintf(stderr, "[state_save] param %u = %g\n", i, pv);
+        if (!stream_write_f64(stream, pv)) return false;
     }
     if (!stream_write_u32(stream, m->bypass_target.load(std::memory_order_acquire) ? 1u : 0u)) return false;
     if (!stream_write_f32(stream, m->bypass_fade.load(std::memory_order_relaxed))) return false;
@@ -130,7 +132,12 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
     double pv[PARAM_COUNT] = {0};
     for (uint32_t i = 0; i < param_count; ++i) {
         if (!stream_read_f64(stream, pv[i]) || !std::isfinite(pv[i]) ||
-            pv[i] < m->params[i].min_value || pv[i] > m->params[i].max_value) return false;
+            pv[i] < m->params[i].min_value || pv[i] > m->params[i].max_value) {
+            fprintf(stderr, "[state_load] REJECT param %u pv=%g min=%g max=%g\n",
+                    i, pv[i], m->params[i].min_value, m->params[i].max_value);
+            return false;
+        }
+        fprintf(stderr, "[state_load] param %u = %g\n", i, pv[i]);
     }
 
     uint32_t bypass_int = 0;
@@ -251,6 +258,17 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
         std::memcpy(slot->weight_path, m->weight_path, std::strlen(m->weight_path));
         m->state_mirror.end_write();
         m->state_mirror.swap();
+    }
+
+    // Parameter values changed outside the flush/process path, so tell the
+    // host to rescan them (CLAP requires it; the validator's
+    // state-reproducibility test fails otherwise, E3).
+    if (m->host && m->host->get_extension) {
+        const auto* hp = static_cast<const clap_host_params_t*>(
+            m->host->get_extension(m->host, CLAP_EXT_PARAMS));
+        if (hp && hp->rescan) {
+            hp->rescan(m->host, CLAP_PARAM_RESCAN_VALUES);
+        }
     }
 
     return true;
