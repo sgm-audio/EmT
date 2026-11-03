@@ -101,7 +101,7 @@ jobs:
       - name: clap-validator
         run: |
           if command -v clap-validator &> /dev/null; then
-            clap-validator ./build/src/clap/EmTSynth.clap
+            clap-validator validate ./build/src/clap/EmTSynth.clap
           else
             echo "clap-validator not installed — skipping"
             echo "Install from: https://github.com/free-audio/clap"
