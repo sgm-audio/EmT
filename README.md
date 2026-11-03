@@ -1,5 +1,8 @@
 # EmT
 
+[![CI](https://github.com/sgm-audio/EmT/actions/workflows/ci.yml/badge.svg)](https://github.com/sgm-audio/EmT/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/sgm-audio/EmT/blob/main/LICENSE)
+
 Two CLAP plugins, a synth (`com.emt.synth`) and an effect (`com.emt.fx`), built
 around a small causal state-space model (SSM) in the Mamba family, written in
 C++20 with no framework. There's a PyTorch trainer and exporter that share the
