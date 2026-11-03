@@ -14,26 +14,6 @@ namespace {
 
 static constexpr float PI_f = 3.14159265358979323846f;
 
-void set_mxcsr_ftz_daz_impl() {
-#if defined(_MSC_VER) && (defined(__x86_64__) || defined(_M_X64) || defined(__i386__))
-    unsigned int mxcsr = _mm_getcsr();
-    mxcsr |= 0x8040;
-    _mm_setcsr(mxcsr);
-#elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
-    unsigned int mxcsr;
-    __asm__ __volatile__ ("stmxcsr %0" : "=m"(mxcsr));
-    mxcsr |= 0x8040;
-    __asm__ __volatile__ ("ldmxcsr %0" : "=m"(mxcsr));
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    // ARM: Flush-to-Zero (FZ) bit in FPCR, bit 24.
-    // DAZ is not needed on ARM — FZ alone flushes all denormals.
-    uint64_t fpcr;
-    __asm__ __volatile__ ("mrs %0, fpcr" : "=r"(fpcr));
-    fpcr |= (uint64_t{1} << 24);  // FZ: flush-to-zero
-    __asm__ __volatile__ ("msr fpcr, %0" : : "r"(fpcr));
-#endif
-}
-
 inline float softplus(float x) {
     if (x > 20.0f) return x;
     if (x < -20.0f) return 0.0f;
@@ -82,6 +62,10 @@ SSMBlock::SSMBlock(size_t d_state, size_t d_model, size_t d_inner,
     params_.mix = 1.0f;
     conditioning_active_ = false;
     weights_loaded_ = false;
+    // weights_loaded_ / weights_ are only mutated before a core is published
+    // (see RcuSlot in common/rcu_slot.h); once published, the audio thread
+    // reads them while the main thread never writes to this object again, so
+    // no atomics are needed here (E6).
 }
 
 void SSMBlock::reset() {
@@ -300,7 +284,9 @@ void SSMBlock::step_out_proj_residual(const float* x_ptr, float* output) {
     for (size_t j = 0; j < d_model_; ++j) {
         float sum = simd::dot_product(weights_.out_proj_w[j], y_head_.data(), d_inner_);
         if (j < nheads_) {
-            sum += weights_.D_proj[j] * x_ptr[j * headdim_];
+            // D-skip: channel j's own input x_ptr[j], not head j's channel 0
+            // (E9). The old x_ptr[j * headdim_] was cross-wired.
+            sum += weights_.D_proj[j] * x_ptr[j];
         }
         sum += u_film_[j];
         out_[j] = sum;
@@ -417,10 +403,6 @@ void SSMBlock::set_conditioning(const float* cond_vector) {
         std::memset(cond_.data(), 0, cond_.size() * sizeof(float));
         conditioning_active_ = false;
     }
-}
-
-void SSMBlock::apply_ftz_daz() {
-    set_mxcsr_ftz_daz_impl();
 }
 
 } // namespace mamba

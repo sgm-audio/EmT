@@ -7,102 +7,50 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
           # libx11-dev: src/clap/CMakeLists.txt does find_package(X11 REQUIRED)
-          # for the Linux GUI backend -- without these headers CMake configure fails.
+          # for the Linux GUI backend.
           sudo apt-get install -y cmake ninja-build g++ python3 python3-pip libx11-dev
 
       - name: Install Python dependencies
         run: |
-          pip3 install --break-system-packages numpy pyyaml
-          # CPU wheel first (small, no CUDA payload); fall back to the default
-          # index if the PyTorch index is unavailable.
+          pip3 install --break-system-packages numpy pyyaml ruff
+          # CPU wheel first; fall back to the default index if unavailable.
           pip3 install --break-system-packages --index-url https://download.pytorch.org/whl/cpu torch \
             || pip3 install --break-system-packages torch
 
-      - name: Configure CMake
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        run: cmake --build build --parallel $(nproc)
-
-      # The CppParity test loads vectors produced by the NumPy reference. Generate
-      # them before ctest, otherwise the test silently skips and a "green" run
-      # proves nothing about C++/Python agreement.
-      - name: Generate parity vectors (C++ <-> NumPy reference)
+      - name: Install clap-validator 0.4.1
         run: |
-          python3 scripts/reference_mamba3.py --generate --output-dir build
-          ls -l build/parity_test_weights.bin build/parity_expected.bin
+          # Not on crates.io; use the official GitHub release (ubuntu-22.04 zip
+          # contains a tarball with the binary).
+          curl -fsSL -o /tmp/cv.zip \
+            https://github.com/free-audio/clap-validator/releases/download/0.4.1/clap-validator-0.4.1-127-g152b982-ubuntu-22.04.zip
+          cd /tmp && unzip -o cv.zip && tar xzf clap-validator-*.tar.gz
+          sudo install -m 0755 /tmp/clap-validator /usr/local/bin/clap-validator
+          clap-validator --version
 
-      # A real 2-layer export, so the FX model-load path is exercised for real:
-      # the plugin must accept multi-layer files that fit the compiled limits.
-      - name: Generate test weights
-        run: |
-          python3 scripts/export_mamba_weights.py \
-            --state-dim 16 --model-dim 16 --inner-dim 32 --nheads 2 \
-            --layers 2 --random-init \
-            --output models/ci_test_model.bin
-          python3 scripts/validate_export.py models/ci_test_model.bin
-
-      - name: Run tests
+      # The whole gate lives in scripts/ci.sh so a local run == a CI run:
+      # versions -> configure/build (-Werror) -> parity vectors -> ctest ->
+      # ruff -> python gates -> benchmark -> clap-validator.
+      - name: Run ci.sh
         env:
-          MAMBA_PARITY_DIR: ${{ github.workspace }}/build
-          MAMBA_REQUIRE_PARITY: "1"   # a missing vector file is a failure, not a skip
-          MAMBA_TEST_WEIGHTS: ${{ github.workspace }}/models/ci_test_model.bin
-        run: ctest --test-dir build --output-on-failure --timeout 120
-
-      # Properties of the objective (SI-SDR scale invariance, silent-target
-      # handling, noisy-reference caveat, gradient flow, MRSTFT sanity).
-      - name: Objective self-test
-        run: python3 training/losses.py
-
-      - name: Trainer smoke test (task-matched objective)
-        run: |
-          python3 training/train.py --smoke-test --steps 1 --loss hybrid \
-            --output-dir /tmp/emt_smoke
-          test -f /tmp/emt_smoke/plugin_weights.bin
-
-      # Regression tripwire. This gates the small benchmark shape at 40% of one
-      # core; it is NOT a product claim. Product-level gates belong on the target
-      # machine at the budget you actually sell against (see --budget-pct).
-      - name: Real-time cost gate
-        run: |
-          ./build/tests/benchmark_ssm_block \
-            --config small --layers 1,2 --sample-rate 48000 \
-            --budget-pct 40 --repeats 5 --seconds 0.1
-
-      # Report-only: the shapes the training configs actually produce. These are
-      # expected to be expensive; publishing the numbers is the point.
-      - name: Real-time cost report (training-config shapes, no gate)
-        run: |
-          ./build/tests/benchmark_ssm_block \
-            --config train4070,trainl4 --layers 1,3,6 --sample-rate 48000 \
-            --budget-pct 40 --no-gate --seconds 0.1 --repeats 3 \
-            --json bench-training-shapes.json || true
-          cat bench-training-shapes.json
-
-      - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-results
-          path: bench-training-shapes.json
-          if-no-files-found: warn
-
-      - name: clap-validator
-        run: |
-          if command -v clap-validator &> /dev/null; then
-            clap-validator validate ./build/src/clap/EmTSynth.clap
-          else
-            echo "clap-validator not installed — skipping"
-            echo "Install from: https://github.com/free-audio/clap"
-          fi
+          PYTHON: python3
+        run: bash scripts/ci.sh

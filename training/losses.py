@@ -49,6 +49,7 @@ EPS = 1e-8
 # Time domain
 # ---------------------------------------------------------------------------
 
+
 def pre_emphasis(x: torch.Tensor, coeff: float = 0.97) -> torch.Tensor:
     """First-order high-pass y[n] = x[n] - coeff * x[n-1]. Shape [B, 1, T]."""
     if coeff <= 0.0:
@@ -72,6 +73,7 @@ class PreEmphL1Loss(nn.Module):
 # SI-SDR
 # ---------------------------------------------------------------------------
 
+
 def si_sdr(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """
     Scale-invariant signal-to-distortion ratio in dB, per item. Shape [B, 1, T].
@@ -83,14 +85,14 @@ def si_sdr(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch
     pred = pred.reshape(pred.shape[0], -1)
     target = target.reshape(target.shape[0], -1)
 
-    tgt_energy = (target ** 2).sum(dim=-1)
+    tgt_energy = (target**2).sum(dim=-1)
     silent = tgt_energy < eps * 100  # ill-defined case: nothing to separate
 
-    scale = (pred * target).sum(dim=-1) / (tgt_energy + eps)          # alpha
+    scale = (pred * target).sum(dim=-1) / (tgt_energy + eps)  # alpha
     s_target = scale.unsqueeze(-1) * target
     e_noise = pred - s_target
 
-    ratio = (s_target ** 2).sum(dim=-1) / ((e_noise ** 2).sum(dim=-1) + eps)
+    ratio = (s_target**2).sum(dim=-1) / ((e_noise**2).sum(dim=-1) + eps)
     out = 10.0 * torch.log10(ratio + eps)
     return torch.where(silent, torch.full_like(out, float("nan")), out)
 
@@ -111,7 +113,7 @@ class SISDRLoss(nn.Module):
         vals = si_sdr(pred, target)
         valid = ~torch.isnan(vals)
         if valid.any():
-            term = -vals[valid].mean() / 20.0      # ~O(1) scale for mixing
+            term = -vals[valid].mean() / 20.0  # ~O(1) scale for mixing
         else:
             term = pred.new_zeros(())
         if not valid.all():
@@ -124,6 +126,7 @@ class SISDRLoss(nn.Module):
 # Multi-resolution STFT
 # ---------------------------------------------------------------------------
 
+
 class MultiResSTFTLoss(nn.Module):
     """
     Sum over resolutions of (spectral convergence + log-magnitude L1).
@@ -132,10 +135,9 @@ class MultiResSTFTLoss(nn.Module):
     WaveGAN; auraloss.freq.MultiResolutionSTFTLoss) using torch.stft only.
     """
 
-    def __init__(self,
-                 fft_sizes=(512, 1024, 2048),
-                 hop_sizes=(128, 256, 512),
-                 win_lengths=(512, 1024, 2048)):
+    def __init__(
+        self, fft_sizes=(512, 1024, 2048), hop_sizes=(128, 256, 512), win_lengths=(512, 1024, 2048)
+    ):
         super().__init__()
         assert len(fft_sizes) == len(hop_sizes) == len(win_lengths)
         self.fft_sizes = list(fft_sizes)
@@ -149,18 +151,25 @@ class MultiResSTFTLoss(nn.Module):
         if x.dim() == 2:
             return x
         if x.dim() == 3:
-            if x.shape[1] == 1:          # [B, 1, T]
+            if x.shape[1] == 1:  # [B, 1, T]
                 return x[:, 0, :]
-            if x.shape[2] == 1:          # [B, T, 1]
+            if x.shape[2] == 1:  # [B, T, 1]
                 return x[:, :, 0]
-            b, c, t = x.shape            # multi-channel: fold channels into batch
+            b, c, t = x.shape  # multi-channel: fold channels into batch
             return x.reshape(b * c, t)
         raise ValueError(f"expected 2D or 3D audio tensor, got shape {tuple(x.shape)}")
 
     def _mag(self, x: torch.Tensor, n_fft: int, hop: int, win: int) -> torch.Tensor:
         window = torch.hann_window(win, device=x.device, dtype=x.dtype)
-        spec = torch.stft(x, n_fft=n_fft, hop_length=hop, win_length=win,
-                          window=window, center=True, return_complex=True)
+        spec = torch.stft(
+            x,
+            n_fft=n_fft,
+            hop_length=hop,
+            win_length=win,
+            window=window,
+            center=True,
+            return_complex=True,
+        )
         return spec.abs().clamp_min(1e-7)
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -169,12 +178,13 @@ class MultiResSTFTLoss(nn.Module):
         t = self._to_2d(target)
 
         total = pred.new_zeros(())
-        for n_fft, hop, win in zip(self.fft_sizes, self.hop_sizes, self.win_lengths):
+        for n_fft, hop, win in zip(self.fft_sizes, self.hop_sizes, self.win_lengths, strict=True):
             mp = self._mag(p, n_fft, hop, win)
             mt = self._mag(t, n_fft, hop, win)
             # spectral convergence
-            sc = torch.linalg.vector_norm(mt - mp, dim=(-2, -1)) / \
-                 (torch.linalg.vector_norm(mt, dim=(-2, -1)) + EPS)
+            sc = torch.linalg.vector_norm(mt - mp, dim=(-2, -1)) / (
+                torch.linalg.vector_norm(mt, dim=(-2, -1)) + EPS
+            )
             # log-magnitude L1
             lm = F.l1_loss(torch.log(mp), torch.log(mt))
             total = total + sc.mean() + lm
@@ -185,12 +195,20 @@ class MultiResSTFTLoss(nn.Module):
 # Composite
 # ---------------------------------------------------------------------------
 
+
 class CompositeLoss(nn.Module):
     """weighted combination of pre-emph L1, SI-SDR and MRSTFT."""
 
-    def __init__(self, time_weight=1.0, sisdr_weight=1.0, stft_weight=1.0,
-                 preemph=0.97, fft_sizes=(512, 1024, 2048),
-                 hop_sizes=(128, 256, 512), win_lengths=(512, 1024, 2048)):
+    def __init__(
+        self,
+        time_weight=1.0,
+        sisdr_weight=1.0,
+        stft_weight=1.0,
+        preemph=0.97,
+        fft_sizes=(512, 1024, 2048),
+        hop_sizes=(128, 256, 512),
+        win_lengths=(512, 1024, 2048),
+    ):
         super().__init__()
         self.w_time = float(time_weight)
         self.w_sisdr = float(sisdr_weight)
@@ -216,8 +234,9 @@ class CompositeLoss(nn.Module):
             return {
                 "time": float(self.time(pred, target)),
                 "sisdr_loss": float(self.sisdr(pred, target)),
-                "sisdr_db": float(torch.nanmean(vals)) if (~torch.isnan(vals)).any()
-                            else float("nan"),
+                "sisdr_db": float(torch.nanmean(vals))
+                if (~torch.isnan(vals)).any()
+                else float("nan"),
                 "stft": float(self.stft(pred, target)),
             }
 
@@ -272,6 +291,7 @@ def build_loss(name: str, cfg: dict | None = None, device: str = "cpu") -> nn.Mo
 # Self-test
 # ---------------------------------------------------------------------------
 
+
 def _self_test() -> int:
     torch.manual_seed(0)
     failures = []
@@ -287,7 +307,7 @@ def _self_test() -> int:
     T = 8192
     t = torch.arange(T, dtype=torch.float32)
     clean = torch.sin(2 * math.pi * 440.0 * t / 48000.0).reshape(1, 1, -1)
-    noise = (0.1 * torch.randn(1, 1, T))
+    noise = 0.1 * torch.randn(1, 1, T)
     noisy = clean + noise
 
     # --- SI-SDR properties -------------------------------------------------
@@ -297,35 +317,46 @@ def _self_test() -> int:
     near = float(si_sdr(0.95 * clean + 0.05 * noise, clean))
     clean_ref = float(si_sdr(clean, clean))
     far = float(si_sdr(noise, clean))
-    check("si_sdr rewards the closer estimate", clean_ref > near > far,
-          f"(exact={clean_ref:.1f} > near={near:.1f} > noise={far:.1f} dB)")
+    check(
+        "si_sdr rewards the closer estimate",
+        clean_ref > near > far,
+        f"(exact={clean_ref:.1f} > near={near:.1f} > noise={far:.1f} dB)",
+    )
     # Use an imperfect estimate: for an exact match the ratio is 0/0 up to
     # float32 rounding, so the raw dB value is numerically meaningless.
     est = 0.95 * clean + 0.05 * noise
     scaled = float(si_sdr(3.0 * est, clean))
-    check("si_sdr is scale invariant", abs(scaled - near) < 0.5,
-          f"(1x={near:.2f} vs 3x={scaled:.2f})")
+    check(
+        "si_sdr is scale invariant", abs(scaled - near) < 0.5, f"(1x={near:.2f} vs 3x={scaled:.2f})"
+    )
     # Documented limitation, asserted so it cannot surprise us later: with a
     # NOISY reference, an estimate that reproduces the reference noise scores
     # higher than a clean one (arXiv:2508.14623). This is why SI-SDR is never
     # used alone here.
     noisy_ref_clean = float(si_sdr(clean, noisy))
     noisy_ref_noisy = float(si_sdr(noisy, noisy))
-    check("documents the noisy-reference caveat", noisy_ref_noisy > noisy_ref_clean,
-          f"(reproducing reference noise={noisy_ref_noisy:.1f} dB vs clean={noisy_ref_clean:.1f} dB)")
+    check(
+        "documents the noisy-reference caveat",
+        noisy_ref_noisy > noisy_ref_clean,
+        f"(reproducing reference noise={noisy_ref_noisy:.1f} dB vs clean={noisy_ref_clean:.1f} dB)",
+    )
     silent = si_sdr(noise, torch.zeros_like(noise))
     check("si_sdr flags silent targets as NaN", bool(torch.isnan(silent).all()))
-    check("SISDRLoss stays finite on silent targets",
-          bool(torch.isfinite(SISDRLoss()(noise, torch.zeros_like(noise)))))
+    check(
+        "SISDRLoss stays finite on silent targets",
+        bool(torch.isfinite(SISDRLoss()(noise, torch.zeros_like(noise)))),
+    )
 
     # --- MRSTFT ------------------------------------------------------------
-    mrstft = MultiResSTFTLoss(fft_sizes=(256, 512), hop_sizes=(64, 128),
-                              win_lengths=(256, 512))
+    mrstft = MultiResSTFTLoss(fft_sizes=(256, 512), hop_sizes=(64, 128), win_lengths=(256, 512))
     identical = float(mrstft(clean, clean))
     different = float(mrstft(noise, clean))
     check("mrstft(x, x) is ~0", identical < 1e-3, f"({identical:.2e})")
-    check("mrstft separates noise from tone", different > identical + 1.0,
-          f"({different:.3f} vs {identical:.2e})")
+    check(
+        "mrstft separates noise from tone",
+        different > identical + 1.0,
+        f"({different:.3f} vs {identical:.2e})",
+    )
 
     # --- gradients flow ----------------------------------------------------
     for name in _LOSS_NAMES:
@@ -333,19 +364,28 @@ def _self_test() -> int:
         p = noisy.clone().requires_grad_(True)
         val = loss_fn(p, clean)
         val.backward()
-        check(f"{name}: finite value and gradient",
-              bool(torch.isfinite(val)) and p.grad is not None and
-              bool(torch.isfinite(p.grad).all()), f"(value={float(val.detach()):.4f})")
+        check(
+            f"{name}: finite value and gradient",
+            bool(torch.isfinite(val)) and p.grad is not None and bool(torch.isfinite(p.grad).all()),
+            f"(value={float(val.detach()):.4f})",
+        )
 
     # --- registered config path -------------------------------------------
-    composite = build_loss("hybrid", {"loss_weights": {"time": 2.0, "sisdr": 0.5, "stft": 1.5},
-                                      "loss_preemph": 0.9}, "cpu")
-    check("hybrid honours config weights",
-          composite.w_time == 2.0 and composite.w_sisdr == 0.5 and composite.w_stft == 1.5)
+    composite = build_loss(
+        "hybrid",
+        {"loss_weights": {"time": 2.0, "sisdr": 0.5, "stft": 1.5}, "loss_preemph": 0.9},
+        "cpu",
+    )
+    check(
+        "hybrid honours config weights",
+        composite.w_time == 2.0 and composite.w_sisdr == 0.5 and composite.w_stft == 1.5,
+    )
     comps = composite.components(noisy, clean)
-    check("components() reports every term",
-          set(comps) == {"time", "sisdr_loss", "sisdr_db", "stft"},
-          f"({', '.join(f'{k}={v:.3f}' for k, v in comps.items())})")
+    check(
+        "components() reports every term",
+        set(comps) == {"time", "sisdr_loss", "sisdr_db", "stft"},
+        f"({', '.join(f'{k}={v:.3f}' for k, v in comps.items())})",
+    )
 
     print()
     if failures:

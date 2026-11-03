@@ -77,6 +77,21 @@ emt_add_test(test_dsp_helpers test_dsp_helpers.cpp)
 
 emt_add_test(test_stability test_stability.cpp)
 
+# Audio-thread vs main-thread stress (TSan target; see test_rt_stress.cpp).
+emt_add_test(test_rt_stress test_rt_stress.cpp)
+target_link_libraries(test_rt_stress PRIVATE Threads::Threads)
+
+# Stage 03 acceptance: MXCSR restore + per-instance conditioning.
+emt_add_test(test_rt_safety test_rt_safety.cpp)
+
+# Stage 05: state save -> load -> save byte-equality (E3).
+emt_add_test(test_state_roundtrip
+    test_state_roundtrip.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_state.cpp)
+target_link_libraries(test_state_roundtrip PRIVATE Threads::Threads)
+target_include_directories(test_state_roundtrip PRIVATE
+    ${PROJECT_SOURCE_DIR}/extern/clap/include)
+
 # Recurrence kernel pins (F1 §a extraction): coefficients, per-element and
 # per-head arithmetic bit-identical to the pre-extraction inline loop, slice
 # isolation, and decay for every clamped pole.

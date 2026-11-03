@@ -31,8 +31,12 @@ static bool params_get_info(const clap_plugin_t* plugin, uint32_t param_index, c
     info->max_value = desc.max_value;
     info->default_value = desc.default_value;
     info->flags = desc.clap_flags;
-    std::strncpy(info->name, desc.name, CLAP_NAME_SIZE);
-    std::strncpy(info->module, desc.module, CLAP_PATH_SIZE);
+    // Bounded copy that always NUL-terminates (-Wstringop-truncation under
+    // -Werror, E29).
+    std::memset(info->name, 0, CLAP_NAME_SIZE);
+    std::strncpy(info->name, desc.name, CLAP_NAME_SIZE - 1);
+    std::memset(info->module, 0, CLAP_PATH_SIZE);
+    std::strncpy(info->module, desc.module, CLAP_PATH_SIZE - 1);
     return true;
 }
 

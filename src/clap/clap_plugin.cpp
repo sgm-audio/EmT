@@ -74,7 +74,7 @@ static bool plugin_init(const clap_plugin_t* plugin) {
     auto* m = get_synth(plugin);
     m->core_cfg = MambaConfig::max_config();
     m->core_cfg.num_layers = 1;
-    m->core = new (m->core_storage.data) SSMInferenceCore(m->core_cfg);
+    m->core.publish(new SSMInferenceCore(m->core_cfg));
     m->sample_rate = 48000.0;
     m->block_size = 512;
     m->is_active = false;
@@ -146,10 +146,7 @@ static bool plugin_init(const clap_plugin_t* plugin) {
 
 static void plugin_destroy(const clap_plugin_t* plugin) {
     auto* m = get_synth(plugin);
-    if (m->core) {
-        m->core->~SSMInferenceCore();
-        m->core = nullptr;
-    }
+    m->core.destroy();
     delete m;
     delete plugin;
 }
@@ -166,7 +163,7 @@ static bool plugin_activate(const clap_plugin_t* plugin,
 
     recompute_smooth_coefficients(m);
 
-    m->core->reset();
+    if (auto* c = m->core.published()) c->reset();
     m->bypass_state.store(BYPASS_PROCESSING, std::memory_order_relaxed);
     m->bypass_fade.store(0.0f, std::memory_order_relaxed);
 
@@ -214,7 +211,7 @@ static void plugin_stop_processing(const clap_plugin_t* plugin) {
 
 static void plugin_reset(const clap_plugin_t* plugin) {
     auto* m = get_synth(plugin);
-    m->core->reset();
+    if (auto* c = m->core.published()) c->reset();
     m->bypass_state.store(BYPASS_PROCESSING, std::memory_order_relaxed);
     m->bypass_fade.store(0.0f, std::memory_order_relaxed);
     m->bypass_target.store(
@@ -328,7 +325,7 @@ static void start_voice(MambaSynth* m, uint32_t v, int32_t key, int32_t channel,
 
 // Build a conditioning frame from the most recently pressed voice
 // (highest note_id in ATTACK or SUSTAIN) and ARA context.
-static void refresh_conditioning(MambaSynth* m) {
+static void refresh_conditioning(MambaSynth* m, SSMInferenceCore* core) {
     ConditioningFrame cf{};
     cf.tempo_bpm = 120.0f;
     cf.key_sig = 0.0f;
@@ -361,7 +358,7 @@ static void refresh_conditioning(MambaSynth* m) {
         std::memcpy(cf.chord_one_hot, ara_cf.chord_one_hot, sizeof(cf.chord_one_hot));
     }
 
-    m->core->set_conditioning(&cf.tempo_bpm);
+    core->set_conditioning(&cf.tempo_bpm);
 }
 
 // Push a fresh state-mirror snapshot to the double-buffer seqlock. The
@@ -425,7 +422,7 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
     if (!plugin || !process || !process->audio_outputs || process->audio_outputs_count == 0)
         return CLAP_PROCESS_ERROR;
     auto* m = get_synth(plugin);
-    SSMBlock::apply_ftz_daz();
+    ScopedFtzDaz ftz_guard;  // FTZ/DAZ for the block; MXCSR restored on exit (E8/E19)
     m->thread_check.mark_audio_thread();
 
     clap_audio_buffer_t& out_bus = process->audio_outputs[0];
@@ -434,8 +431,13 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
     if ((!out_bus.data32 && !out_bus.data64) || out_bus.channel_count == 0)
         return CLAP_PROCESS_ERROR;
 
+    // Adopt the latest published core for the whole block (stable across the
+    // per-sample loop); the main thread may publish a newer one mid-block and
+    // we simply pick it up next block (E12).
+    SSMInferenceCore* core = m->core.adopt();
+
     update_bypass_state_machine(m, process->frames_count);
-    refresh_conditioning(m);
+    refresh_conditioning(m, core);
 
     const uint32_t frames = process->frames_count;
     const float fade = m->bypass_fade.load(std::memory_order_relaxed);
@@ -501,7 +503,7 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
                 m->voice_atomics[v].env.store(voice.env, std::memory_order_relaxed);
                 if (voice.env <= 0.0f) continue;
                 alignas(64) float outbuf[MAX_D_MODEL];
-                m->core->process_sample(mono, outbuf, voice.ssm_state);
+                core->process_sample(mono, outbuf, voice.ssm_state);
                 voice_sum += outbuf[0] * voice.env * voice.velocity;
             }
             const float wet = voice_sum * static_cast<float>(cur_gain);
@@ -567,7 +569,10 @@ static const void* plugin_get_extension(const clap_plugin_t* plugin, const char*
 
 static void plugin_on_main_thread(const clap_plugin_t* plugin) {
     auto* m = get_synth(plugin);
-    if (m) m->thread_check.set_host(m->host);
+    if (m) {
+        m->thread_check.set_host(m->host);
+        m->core.reclaim();  // free cores the audio thread has retired (E12)
+    }
 }
 
 static const clap_plugin_t s_plugin_class = {
@@ -611,37 +616,49 @@ bool MambaSynth::load_weights(const char* path) {
     if (hdr.version == 2) {
         core_cfg.num_layers = hdr.num_layers;
     }
-    core->init(core_cfg);
+
+    // Build the new engine fully OFF the audio path, then publish it. The
+    // audio thread keeps running on the old core until it adopt()s this one
+    // at the next block start; the old core is freed by reclaim() once the
+    // audio thread reports it retired (E12). A failed load leaves the old
+    // core running, unlike the previous in-place init that could destroy it
+    // mid-flight.
+    auto* new_core = new SSMInferenceCore(core_cfg);
 
     // Load weights: 13 arrays per layer (Mamba-3 layout)
+    auto w = std::make_unique<SSMWeights>();  // ~4 MB: heap, never the stack (E7)
     for (uint32_t layer = 0; layer < core_cfg.num_layers; ++layer) {
         WeightLayerPointers ptrs;
         if (weight_loader.get_layer_pointers(layer, ptrs) != LoadError::Ok) {
+            delete new_core;
             weight_loader.unload();
             return false;
         }
 
-        SSMWeights w{};
+        std::memset(w.get(), 0, sizeof(SSMWeights));
         size_t in_proj_out = core_cfg.d_inner * 2
                            + core_cfg.nheads * MAX_MIMO_RANK * core_cfg.d_state * 2
                            + core_cfg.nheads * 3
                            + MAX_NUM_ROPE_ANGLES;
-        std::memcpy(w.in_proj_w,      ptrs.in_proj_w,      in_proj_out * core_cfg.d_model * sizeof(float));
-        std::memcpy(w.dt_bias,        ptrs.dt_bias,        core_cfg.nheads * sizeof(float));
-        std::memcpy(w.B_bias,         ptrs.B_bias,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.d_state * sizeof(float));
-        std::memcpy(w.C_bias,         ptrs.C_bias,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.d_state * sizeof(float));
-        std::memcpy(w.B_norm_weight,  ptrs.B_norm_weight,  core_cfg.d_state * sizeof(float));
-        std::memcpy(w.C_norm_weight,  ptrs.C_norm_weight,  core_cfg.d_state * sizeof(float));
-        std::memcpy(w.mimo_x,         ptrs.mimo_x,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.headdim * sizeof(float));
-        std::memcpy(w.mimo_z,         ptrs.mimo_z,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.headdim * sizeof(float));
-        std::memcpy(w.mimo_o,         ptrs.mimo_o,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.headdim * sizeof(float));
-        std::memcpy(w.D_proj,         ptrs.D_proj,         core_cfg.nheads * sizeof(float));
-        std::memcpy(w.out_proj_w,     ptrs.out_proj_w,     core_cfg.d_model * core_cfg.d_inner * sizeof(float));
-        std::memcpy(w.film_proj_w,    ptrs.film_proj_w,    2 * core_cfg.d_model * core_cfg.cond_dim * sizeof(float));
-        std::memcpy(w.dt_film_proj_w, ptrs.dt_film_proj_w, 2 * core_cfg.nheads * core_cfg.cond_dim * sizeof(float));
+        std::memcpy(w->in_proj_w,      ptrs.in_proj_w,      in_proj_out * core_cfg.d_model * sizeof(float));
+        std::memcpy(w->dt_bias,        ptrs.dt_bias,        core_cfg.nheads * sizeof(float));
+        std::memcpy(w->B_bias,         ptrs.B_bias,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.d_state * sizeof(float));
+        std::memcpy(w->C_bias,         ptrs.C_bias,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.d_state * sizeof(float));
+        std::memcpy(w->B_norm_weight,  ptrs.B_norm_weight,  core_cfg.d_state * sizeof(float));
+        std::memcpy(w->C_norm_weight,  ptrs.C_norm_weight,  core_cfg.d_state * sizeof(float));
+        std::memcpy(w->mimo_x,         ptrs.mimo_x,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.headdim * sizeof(float));
+        std::memcpy(w->mimo_z,         ptrs.mimo_z,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.headdim * sizeof(float));
+        std::memcpy(w->mimo_o,         ptrs.mimo_o,         core_cfg.nheads * MAX_MIMO_RANK * core_cfg.headdim * sizeof(float));
+        std::memcpy(w->D_proj,         ptrs.D_proj,         core_cfg.nheads * sizeof(float));
+        std::memcpy(w->out_proj_w,     ptrs.out_proj_w,     core_cfg.d_model * core_cfg.d_inner * sizeof(float));
+        std::memcpy(w->film_proj_w,    ptrs.film_proj_w,    2 * core_cfg.d_model * core_cfg.cond_dim * sizeof(float));
+        std::memcpy(w->dt_film_proj_w, ptrs.dt_film_proj_w, 2 * core_cfg.nheads * core_cfg.cond_dim * sizeof(float));
 
-        core->set_layer_weights(layer, w);
+        new_core->set_layer_weights(layer, *w);
     }
+
+    core.reclaim();   // free any previously retired core (main thread)
+    core.publish(new_core);
     weights_loaded.store(true, std::memory_order_release);
 
     // Record the loaded path so state save can round-trip it.
@@ -655,7 +672,6 @@ const clap_plugin_t* mamba_synth_create(const clap_host_t* host) {
     auto* m = new (std::nothrow) MambaSynth();
     if (!m) return nullptr;
     m->host = host;
-    m->core = nullptr;
     m->weights_loaded.store(false, std::memory_order_relaxed);
     m->block_size = 512;
     m->is_active = false;

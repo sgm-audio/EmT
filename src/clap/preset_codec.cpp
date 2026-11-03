@@ -446,9 +446,10 @@ bool load_preset(MambaSynth* m, const char* path) {
             m->voice_atomics[v].velocity.store(saved.velocity, std::memory_order_relaxed);
             m->next_note_id = std::max(m->next_note_id, saved.note_id + 1);
         }
-        // Set voice 0 into core as starting state
-        if (m->core) {
-            m->core->set_state(vstates[0].ssm_state);
+        // Set voice 0 into core as starting state (main thread; audio is
+        // stopped while a preset/state load runs - CLAP contract).
+        if (auto* c = m->core.published()) {
+            c->set_state(vstates[0].ssm_state);
         }
     }
 

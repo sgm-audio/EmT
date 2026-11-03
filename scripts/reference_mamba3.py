@@ -13,6 +13,7 @@ import argparse
 import math
 import os
 import sys
+
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -23,8 +24,8 @@ from emt_format import (  # noqa: E402
     make_header,
 )
 
-
 # === Step-by-step match for C++ SSMBlock::process_sample() ===
+
 
 def softplus(x: np.ndarray) -> np.ndarray:
     """Matches C++ softplus: smooth approximation with stability cutoffs."""
@@ -33,32 +34,36 @@ def softplus(x: np.ndarray) -> np.ndarray:
 
 
 def mamba3_process_sample(
-    input_scalar: float,            # C++: float input
-    d_state: int, d_model: int, d_inner: int,
-    nheads: int, headdim: int, mimo_rank: int,
-    num_bc_heads: int, d_cond: int,
+    input_scalar: float,  # C++: float input
+    d_state: int,
+    d_model: int,
+    d_inner: int,
+    nheads: int,
+    headdim: int,
+    mimo_rank: int,
+    num_bc_heads: int,
+    d_cond: int,
     # Weights
-    in_proj_w: np.ndarray,          # [in_proj_out, d_model]
-    dt_bias: np.ndarray,            # [nheads]
-    B_bias: np.ndarray,             # [nheads, mimo_rank, d_state]
-    C_bias: np.ndarray,             # [nheads, mimo_rank, d_state]
-    B_norm_weight: np.ndarray,      # [d_state]
-    C_norm_weight: np.ndarray,      # [d_state]
-    D_proj: np.ndarray,             # [nheads]
-    out_proj_w: np.ndarray,         # [d_model, d_inner]
-    film_proj_w: np.ndarray,        # [2*d_model, d_cond]
-    dt_film_proj_w: np.ndarray,     # [2*nheads, d_cond]
+    in_proj_w: np.ndarray,  # [in_proj_out, d_model]
+    dt_bias: np.ndarray,  # [nheads]
+    B_bias: np.ndarray,  # [nheads, mimo_rank, d_state]
+    C_bias: np.ndarray,  # [nheads, mimo_rank, d_state]
+    B_norm_weight: np.ndarray,  # [d_state]
+    C_norm_weight: np.ndarray,  # [d_state]
+    D_proj: np.ndarray,  # [nheads]
+    out_proj_w: np.ndarray,  # [d_model, d_inner]
+    film_proj_w: np.ndarray,  # [2*d_model, d_cond]
+    dt_film_proj_w: np.ndarray,  # [2*nheads, d_cond]
     # State (mutated)
-    ssm_real: np.ndarray,           # [nheads, headdim, d_state]
-    angle_state: np.ndarray,        # [nheads, num_rope_angles]
+    ssm_real: np.ndarray,  # [nheads, headdim, d_state]
+    angle_state: np.ndarray,  # [nheads, num_rope_angles]
     # Conditioning
-    cond: np.ndarray,               # [d_cond]
+    cond: np.ndarray,  # [d_cond]
     conditioning_active: bool,
 ):
     num_rope_angles = d_state // 2
     bc_size = nheads * mimo_rank * d_state
-    in_proj_out = (d_inner * 2 + nheads * mimo_rank * d_state * 2
-                   + nheads * 3 + num_rope_angles)
+    in_proj_out = d_inner * 2 + nheads * mimo_rank * d_state * 2 + nheads * 3 + num_rope_angles
 
     # === Step 0: FiLM conditioning ===
     u_film = np.zeros(d_model, dtype=np.float32)
@@ -68,7 +73,7 @@ def mamba3_process_sample(
             beta = 0.0
             for k in range(d_cond):
                 gamma += film_proj_w[2 * j, k] * cond[k]
-                beta  += film_proj_w[2 * j + 1, k] * cond[k]
+                beta += film_proj_w[2 * j + 1, k] * cond[k]
             u_film[j] = input_scalar * (1.0 + gamma) + beta
     else:
         u_film[:] = input_scalar
@@ -83,14 +88,21 @@ def mamba3_process_sample(
 
     # Split components
     idx = 0
-    z = in_proj_out_arr[idx:idx + d_inner]; idx += d_inner
-    x = in_proj_out_arr[idx:idx + d_inner]; idx += d_inner
-    B_flat = in_proj_out_arr[idx:idx + bc_size]; idx += bc_size
-    C_flat = in_proj_out_arr[idx:idx + bc_size]; idx += bc_size
-    dd_dt = in_proj_out_arr[idx:idx + nheads]; idx += nheads
-    dd_A = in_proj_out_arr[idx:idx + nheads]; idx += nheads
-    trap = in_proj_out_arr[idx:idx + nheads]; idx += nheads
-    angles = in_proj_out_arr[idx:idx + num_rope_angles]
+    z = in_proj_out_arr[idx : idx + d_inner]
+    idx += d_inner
+    x = in_proj_out_arr[idx : idx + d_inner]
+    idx += d_inner
+    B_flat = in_proj_out_arr[idx : idx + bc_size]
+    idx += bc_size
+    C_flat = in_proj_out_arr[idx : idx + bc_size]
+    idx += bc_size
+    dd_dt = in_proj_out_arr[idx : idx + nheads]
+    idx += nheads
+    dd_A = in_proj_out_arr[idx : idx + nheads]
+    idx += nheads
+    _trap = in_proj_out_arr[idx : idx + nheads]
+    idx += nheads  # unused slice (E26)
+    angles = in_proj_out_arr[idx : idx + num_rope_angles]
 
     # Reshape B, C: flat → [nheads, mimo_rank, d_state]
     # C++ layout: (g * nheads + h) * mimo_rank * d_state + r * d_state + s
@@ -143,8 +155,7 @@ def mamba3_process_sample(
             rms = math.sqrt(rms / d_state + 1e-5)
             inv_rms = 1.0 / rms
             for s in range(d_state):
-                B_norm[h, r, s] = (B[h, r, s] * inv_rms * B_norm_weight[s]
-                                    + B_bias[h, r, s])
+                B_norm[h, r, s] = B[h, r, s] * inv_rms * B_norm_weight[s] + B_bias[h, r, s]
             # C RMSNorm
             rms = 0.0
             for s in range(d_state):
@@ -152,8 +163,7 @@ def mamba3_process_sample(
             rms = math.sqrt(rms / d_state + 1e-5)
             inv_rms = 1.0 / rms
             for s in range(d_state):
-                C_norm[h, r, s] = (C[h, r, s] * inv_rms * C_norm_weight[s]
-                                    + C_bias[h, r, s])
+                C_norm[h, r, s] = C[h, r, s] * inv_rms * C_norm_weight[s] + C_bias[h, r, s]
 
     # === Step 4: RoPE on B and C ===
     for h in range(nheads):
@@ -198,8 +208,7 @@ def mamba3_process_sample(
                 B_val = B_norm[h, 0, s]
                 C_val = C_norm[h, 0, s]
 
-                ssm_real[h, d, s] = (A_bar * ssm_real[h, d, s]
-                                     + B_bar_scale * B_val * x_hd)
+                ssm_real[h, d, s] = A_bar * ssm_real[h, d, s] + B_bar_scale * B_val * x_hd
                 y_head[h * headdim + d] += C_val * ssm_real[h, d, s]
 
     # === Step 6: MIMO combine (SiLU z-gating) ===
@@ -217,7 +226,10 @@ def mamba3_process_sample(
         for i in range(d_inner):
             s += out_proj_w[j, i] * y_head[i]
         if j < nheads:
-            s += D_proj[j] * x[j * headdim]
+            # D-skip: each output channel j gets D_proj[j] times its OWN
+            # input channel x[j]. The previous x[j * headdim] read head j's
+            # channel 0 for every j - cross-wired (E9).
+            s += D_proj[j] * x[j]
         s += u_film[j]
         out[j] = s
 
@@ -231,8 +243,10 @@ def mamba3_process_sample(
 
 # === Test vector generation ===
 
-def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
-                          nheads=2, headdim=None, mimo_rank=1):
+
+def generate_test_vectors(
+    output_dir: str, d_state=16, d_model=16, d_inner=32, nheads=2, headdim=None, mimo_rank=1
+):
     """Generate weight file and expected outputs for C++ parity test."""
     if headdim is None:
         headdim = d_inner // nheads
@@ -246,15 +260,14 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
     rng = np.random.RandomState(42)
 
     # Generate random weights for actual mimo_rank (used by forward pass)
-    in_proj_out = (d_inner * 2 + nheads * mimo_rank * d_state * 2
-                   + nheads * 3 + num_rope_angles)
+    in_proj_out = d_inner * 2 + nheads * mimo_rank * d_state * 2 + nheads * 3 + num_rope_angles
 
     in_proj_w = rng.randn(in_proj_out, d_model).astype(np.float32) * 0.1
     dt_bias = rng.randn(nheads).astype(np.float32) * 0.1
     B_bias = rng.randn(nheads, mimo_rank, d_state).astype(np.float32) * 0.1
     C_bias = rng.randn(nheads, mimo_rank, d_state).astype(np.float32) * 0.1
-    B_norm_weight = (1.0 + rng.randn(d_state).astype(np.float32) * 0.1)
-    C_norm_weight = (1.0 + rng.randn(d_state).astype(np.float32) * 0.1)
+    B_norm_weight = 1.0 + rng.randn(d_state).astype(np.float32) * 0.1
+    C_norm_weight = 1.0 + rng.randn(d_state).astype(np.float32) * 0.1
     D_proj = rng.randn(nheads).astype(np.float32) * 0.1
     out_proj_w = rng.randn(d_model, d_inner).astype(np.float32) * 0.1
     film_proj_w = rng.randn(2 * d_model, d_cond).astype(np.float32) * 0.01
@@ -273,28 +286,31 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
 
     # Write weight file (with MAX_MIMO_RANK layout)
     os.makedirs(output_dir, exist_ok=True)
-    weight_path = os.path.join(output_dir, 'parity_test_weights.bin')
+    weight_path = os.path.join(output_dir, "parity_test_weights.bin")
 
-    in_proj_out_file = (d_inner * 2 + nheads * MAX_MIMO_RANK * d_state * 2
-                        + nheads * 3 + MAX_NUM_ROPE_ANGLES)
-    fpl = floats_per_layer(d_state, d_model, d_inner, nheads,
-                           headdim, d_cond)
+    in_proj_out_file = (
+        d_inner * 2 + nheads * MAX_MIMO_RANK * d_state * 2 + nheads * 3 + MAX_NUM_ROPE_ANGLES
+    )
+    fpl = floats_per_layer(d_state, d_model, d_inner, nheads, headdim, d_cond)
 
     # Expand in_proj_w to MAX_MIMO_RANK + MAX_NUM_ROPE_ANGLES layout for weight file
-    # Layout: [z(d_inner), x(d_inner), B(nh*MAX_MIMO_RANK*ds), C(nh*MAX_MIMO_RANK*ds), dd_dt(nh), dd_A(nh), trap(nh), angles(MAX_NUM_ROPE_ANGLES)]
+    # Layout: [z(d_inner), x(d_inner), B(nh*MAX_MIMO_RANK*ds), C(nh*MAX_MIMO_RANK*ds),
+    #          dd_dt(nh), dd_A(nh), trap(nh), angles(MAX_NUM_ROPE_ANGLES)]
     # B/C stride: (g*nheads+h)*MAX_MIMO_RANK*d_state + r*d_state + s  (g=0, r varies)
     #   head h, rank r: h*MAX_MIMO_RANK*d_state + r*d_state + s
     # Original (mimo_rank=1):  h*1*d_state + 0*d_state + s = h*d_state + s
     in_proj_w_file = np.zeros((in_proj_out_file, d_model), dtype=np.float32)
     # z and x portions are the same size (d_inner each)
-    in_proj_w_file[:d_inner * 2, :] = in_proj_w[:d_inner * 2, :]
+    in_proj_w_file[: d_inner * 2, :] = in_proj_w[: d_inner * 2, :]
 
     # B portion: expand padding between heads (rank 0 data, ranks 1-3 are zeros)
     b_start = d_inner * 2
     for h_idx in range(nheads):
         old_offset = b_start + h_idx * d_state  # h*d_state (mimo_rank=1 layout)
         new_offset = b_start + h_idx * MAX_MIMO_RANK * d_state  # h*MAX_MIMO_RANK*d_state
-        in_proj_w_file[new_offset:new_offset + d_state, :] = in_proj_w[old_offset:old_offset + d_state, :]
+        in_proj_w_file[new_offset : new_offset + d_state, :] = in_proj_w[
+            old_offset : old_offset + d_state, :
+        ]
 
     # C portion: same expansion (zero-padded ranks 1-3 between heads)
     c_start = b_start + nheads * MAX_MIMO_RANK * d_state
@@ -302,23 +318,30 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
     for h_idx in range(nheads):
         old_offset = c_start_orig + h_idx * d_state
         new_offset = c_start + h_idx * MAX_MIMO_RANK * d_state
-        in_proj_w_file[new_offset:new_offset + d_state, :] = in_proj_w[old_offset:old_offset + d_state, :]
+        in_proj_w_file[new_offset : new_offset + d_state, :] = in_proj_w[
+            old_offset : old_offset + d_state, :
+        ]
 
     # dd_dt, dd_A, trap, angles portions (contiguous, same sizes)
     rest_start_new = c_start + nheads * MAX_MIMO_RANK * d_state
     rest_start_old = c_start_orig + nheads * d_state
     dt_a_trap_size = nheads * 3
     angles_size = num_rope_angles
-    in_proj_w_file[rest_start_new:rest_start_new + dt_a_trap_size, :] = in_proj_w[rest_start_old:rest_start_old + dt_a_trap_size, :]
+    in_proj_w_file[rest_start_new : rest_start_new + dt_a_trap_size, :] = in_proj_w[
+        rest_start_old : rest_start_old + dt_a_trap_size, :
+    ]
     angles_start_new = rest_start_new + dt_a_trap_size
     angles_start_old = rest_start_old + dt_a_trap_size
-    in_proj_w_file[angles_start_new:angles_start_new + angles_size, :] = in_proj_w[angles_start_old:angles_start_old + angles_size, :]
+    in_proj_w_file[angles_start_new : angles_start_new + angles_size, :] = in_proj_w[
+        angles_start_old : angles_start_old + angles_size, :
+    ]
 
-    with open(weight_path, 'wb') as f:
+    with open(weight_path, "wb") as f:
         # Header: 12 uint32 + uint64 (weight_data_size) + uint32 mimo_rank
         # + uint32 reserved = 64 bytes.  mimo_rank is 1 for the parity vectors.
-        f.write(make_header(d_state, d_model, d_inner, nheads, headdim,
-                            1, d_cond, fpl * 4, mimo_rank))
+        f.write(
+            make_header(d_state, d_model, d_inner, nheads, headdim, 1, d_cond, fpl * 4, mimo_rank)
+        )
 
         # Write weights in C++ order (MAX_MIMO_RANK layout)
         def w(data):
@@ -348,23 +371,59 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
     cond[1] = -0.25
 
     # Test inputs: [0.0, 1.0, -1.0, 0.5, -0.5, ...]
-    test_inputs = [0.0, 1.0, -1.0, 0.5, -0.5, 0.25, -0.25, 0.75,
-                   0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    test_inputs = [
+        0.0,
+        1.0,
+        -1.0,
+        0.5,
+        -0.5,
+        0.25,
+        -0.25,
+        0.75,
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+        0.8,
+    ]
 
     results = {}
     for i, val in enumerate(test_inputs):
         out, ssm_real, angle_state = mamba3_process_sample(
-            val, d_state, d_model, d_inner, nheads, headdim, mimo_rank,
-            num_bc_heads, d_cond, in_proj_w, dt_bias, B_bias, C_bias,
-            B_norm_weight, C_norm_weight, D_proj, out_proj_w, film_proj_w,
-            dt_film_proj_w, ssm_real, angle_state, cond, True)
-        results[f'out_{i}'] = out.astype(np.float32)
+            val,
+            d_state,
+            d_model,
+            d_inner,
+            nheads,
+            headdim,
+            mimo_rank,
+            num_bc_heads,
+            d_cond,
+            in_proj_w,
+            dt_bias,
+            B_bias,
+            C_bias,
+            B_norm_weight,
+            C_norm_weight,
+            D_proj,
+            out_proj_w,
+            film_proj_w,
+            dt_film_proj_w,
+            ssm_real,
+            angle_state,
+            cond,
+            True,
+        )
+        results[f"out_{i}"] = out.astype(np.float32)
 
     # Write expected outputs
-    expect_path = os.path.join(output_dir, 'parity_expected.bin')
-    with open(expect_path, 'wb') as f:
+    expect_path = os.path.join(output_dir, "parity_expected.bin")
+    with open(expect_path, "wb") as f:
         for i in range(len(test_inputs)):
-            f.write(results[f'out_{i}'].tobytes())
+            f.write(results[f"out_{i}"].tobytes())
 
     print(f"Wrote {expect_path} ({len(test_inputs)} outputs)")
     return weight_path, expect_path, test_inputs
@@ -372,25 +431,25 @@ def generate_test_vectors(output_dir: str, d_state=16, d_model=16, d_inner=32,
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--generate', action='store_true',
-                   help='Generate test vectors for C++ parity test')
-    p.add_argument('--output-dir', default='build',
-                   help='Output directory for test vectors')
-    p.add_argument('--state-dim', type=int, default=16)
-    p.add_argument('--model-dim', type=int, default=16)
-    p.add_argument('--inner-dim', type=int, default=32)
-    p.add_argument('--nheads', type=int, default=2)
+    p.add_argument(
+        "--generate", action="store_true", help="Generate test vectors for C++ parity test"
+    )
+    p.add_argument("--output-dir", default="build", help="Output directory for test vectors")
+    p.add_argument("--state-dim", type=int, default=16)
+    p.add_argument("--model-dim", type=int, default=16)
+    p.add_argument("--inner-dim", type=int, default=32)
+    p.add_argument("--nheads", type=int, default=2)
     args = p.parse_args()
 
     if args.generate:
-        generate_test_vectors(args.output_dir,
-                              args.state_dim, args.model_dim, args.inner_dim,
-                              args.nheads)
+        generate_test_vectors(
+            args.output_dir, args.state_dim, args.model_dim, args.inner_dim, args.nheads
+        )
         return 0
 
     print("Run with --generate to create test vectors")
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())
