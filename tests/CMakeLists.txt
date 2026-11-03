@@ -77,6 +77,11 @@ emt_add_test(test_dsp_helpers test_dsp_helpers.cpp)
 
 emt_add_test(test_stability test_stability.cpp)
 
+# Recurrence kernel pins (F1 §a extraction): coefficients, per-element and
+# per-head arithmetic bit-identical to the pre-extraction inline loop, slice
+# isolation, and decay for every clamped pole.
+emt_add_test(test_recurrence_kernel test_recurrence_kernel.cpp)
+
 emt_add_test(test_realtime_safety
     test_realtime_safety.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/clap_fx_plugin.cpp
