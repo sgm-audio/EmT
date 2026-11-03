@@ -16,6 +16,7 @@
 #include "common/conditioning_frame.h"
 #include "common/double_buffer_seqlock.h"
 #include "common/aligned_storage.h"
+#include "common/rcu_slot.h"
 #include "dsp/bypass_fader.h"
 #include "dsp/voice_envelope.h"
 #include "clap/clap_thread_check.h"
@@ -123,8 +124,13 @@ struct alignas(64) VoiceAtomics {
 struct MambaSynth {
     const clap_host_t* host;
 
-    alignas(64) AlignedStorage<SSMInferenceCore, 64> core_storage;
-    SSMInferenceCore* core;
+    // The inference engine is swapped RCU-style: the main thread builds a new
+    // core and publish()es it; the audio thread adopt()s the latest at the
+    // start of each process() block and never sees a half-built core. The
+    // previous core is freed on the main thread once the audio thread reports
+    // it retired (E12). The core is heap-allocated (~6 MB) so it never sits
+    // on a small host stack (E7).
+    RcuSlot<SSMInferenceCore> core;
     MambaConfig core_cfg;
 
     double sample_rate;

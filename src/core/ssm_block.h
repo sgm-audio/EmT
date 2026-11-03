@@ -6,7 +6,48 @@
 #include <cstdint>
 #include <array>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
+#include <xmmintrin.h>
+#endif
+
 namespace mamba {
+
+// Save / set FTZ+DAZ for the current thread, restore on scope exit.
+//
+// The audio thread must run with denormals flushed (FTZ/DAZ) so a near-zero
+// input can't drive the SSM into denormal arithmetic and a CPU-time stall.
+// The host does not expect the plugin to leave the FPU in a modified state,
+// so the previous MXCSR is captured and restored on every exit path (E8).
+// Using the _mm_getcsr/_mm_setcsr intrinsics also drops the inline asm whose
+// output-only "=m" constraint was flagged (E19).
+class ScopedFtzDaz {
+public:
+    ScopedFtzDaz() {
+#if defined(_MSC_VER) || defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
+        saved_ = _mm_getcsr();
+        _mm_setcsr(saved_ | 0x8040u);
+#elif defined(__aarch64__) || defined(_M_ARM64)
+        // ARM: Flush-to-Zero is FPCR bit 24; DAZ is not needed on ARM.
+        __asm__ __volatile__ ("mrs %0, fpcr" : "=r"(saved_));
+        uint64_t set = saved_ | (uint64_t{1} << 24);
+        __asm__ __volatile__ ("msr fpcr, %0" : : "r"(set));
+#endif
+    }
+    ~ScopedFtzDaz() { restore(); }
+    ScopedFtzDaz(const ScopedFtzDaz&) = delete;
+    ScopedFtzDaz& operator=(const ScopedFtzDaz&) = delete;
+    void restore() {
+#if defined(_MSC_VER) || defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
+        _mm_setcsr(static_cast<unsigned int>(saved_));
+#elif defined(__aarch64__) || defined(_M_ARM64)
+        __asm__ __volatile__ ("msr fpcr, %0" : : "r"(saved_));
+#endif
+    }
+private:
+    uint64_t saved_ = 0;  // MXCSR (x86) or FPCR (ARM)
+};
 
 // === Mamba-3 Complex Multi-Head State ===
 //
@@ -131,8 +172,6 @@ public:
     // Mamba-3 conditioning: FiLM feature-wise linear modulation.
     // cond_vector is d_cond_ floats.
     void set_conditioning(const float* cond_vector);
-
-    static void apply_ftz_daz();
 
     // Accessors
     size_t get_d_state() const { return d_state_; }
