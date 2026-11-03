@@ -288,6 +288,11 @@ inline float fp16_to_fp32(uint16_t h) {
     return result;
 }
 
+// Resolve the default weight path for an empty path argument, independent of
+// the host's CWD: <module dir>/models/test_model.bin when the module location
+// can be determined, else the bare models/test_model.bin dev fallback (E11).
+void resolve_default_weight_path(char* out, size_t out_size);
+
 } // namespace mamba
 
 #endif

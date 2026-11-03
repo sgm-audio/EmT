@@ -217,7 +217,10 @@ def mamba3_process_sample(
         for i in range(d_inner):
             s += out_proj_w[j, i] * y_head[i]
         if j < nheads:
-            s += D_proj[j] * x[j * headdim]
+            # D-skip: each output channel j gets D_proj[j] times its OWN
+            # input channel x[j]. The previous x[j * headdim] read head j's
+            # channel 0 for every j - cross-wired (E9).
+            s += D_proj[j] * x[j]
         s += u_film[j]
         out[j] = s
 

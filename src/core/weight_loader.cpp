@@ -2,6 +2,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <string>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -10,11 +11,44 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <dlfcn.h>
 #endif
 
 namespace mamba {
 
 namespace {
+
+// Directory the running module was loaded from (the plugin bundle in a host,
+// the test binary in unit tests). Used so the default weight path does not
+// depend on the host's CWD (E11).
+void get_module_dir(char* out, size_t out_size) {
+    out[0] = '\0';
+    std::string p;
+#if defined(_WIN32)
+    HMODULE h = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<const char*>(&get_module_dir), &h);
+    if (h) {
+        char path[MAX_PATH];
+        if (GetModuleFileNameA(h, path, MAX_PATH) > 0) p = path;
+    }
+    const char* sep = "\\/";
+#else
+    Dl_info info;
+    if (dladdr(reinterpret_cast<const void*>(&get_module_dir), &info) &&
+        info.dli_fname) {
+        p = info.dli_fname;
+    }
+    const char* sep = "/";
+#endif
+    if (!p.empty()) {
+        size_t slash = p.find_last_of(sep);
+        if (slash != std::string::npos) p = p.substr(0, slash);
+        std::strncpy(out, p.c_str(), out_size - 1);
+        out[out_size - 1] = '\0';
+    }
+}
 
 struct LayerQMetaRaw {
     float    scale;
@@ -44,11 +78,26 @@ bool resolve_path(const char* path, char* out, size_t out_size) {
         std::snprintf(out, out_size, "%s", env);
         return true;
     }
-    std::snprintf(out, out_size, "models/test_model.bin");
+    // Default next to the loaded module (the plugin bundle), not the host's
+    // CWD. A plugin whose host has an arbitrary CWD still finds its models/
+    // directory (E11).
+    char dir[1024];
+    get_module_dir(dir, sizeof(dir));
+    if (dir[0]) {
+        std::snprintf(out, out_size, "%s/models/test_model.bin", dir);
+    } else {
+        std::snprintf(out, out_size, "models/test_model.bin");
+    }
     return false;
 }
 
 } // namespace
+
+// Exposed for tests (and as the documented default) so the resolution of an
+// empty path can be asserted independent of the host's CWD.
+void resolve_default_weight_path(char* out, size_t out_size) {
+    resolve_path(nullptr, out, out_size);
+}
 
 WeightLoader::WeightLoader()
     : mapped_data_(nullptr), mapped_size_(0), fd_(-1),
