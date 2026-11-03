@@ -1,4 +1,5 @@
 #include "core/ssm_block.h"
+#include "core/recurrence_kernel.h"
 #include "core/simd_helpers.h"
 #include "config.h"
 #include <cstring>
@@ -271,29 +272,16 @@ void SSMBlock::step_recurrence(SSMState& state, const float* x_ptr,
                                const float* B_norm, const float* C_norm) {
     std::memset(y_head_.data(), 0, nheads_ * headdim_ * sizeof(float));
 
+    // The update itself lives in src/core/recurrence_kernel.h so D1/D2 can
+    // change it in one place and the NumPy reference can be diffed against it
+    // term by term.  Rank 0 of B/C is the only rank this runtime executes (D3);
+    // the per-head slice starts at h * mimo_rank * d_state.
     for (size_t h = 0; h < nheads_; ++h) {
-        float A_decay = A_t_[h];
-        float dt = DT_t_[h];
-
-        float half_a = A_decay * dt * 0.5f;
-        float inv_denom = 1.0f / (1.0f - half_a);
-        float A_bar = (1.0f + half_a) * inv_denom;
-        float B_bar_scale = dt * inv_denom;
-
-        for (size_t d = 0; d < headdim_; ++d) {
-            float x_hd = x_ptr[h * headdim_ + d];
-            for (size_t s = 0; s < d_state_; ++s) {
-                size_t bc_idx = (0 * nheads_ + h) * mimo_rank_ * d_state_
-                              + 0 * d_state_ + s;
-                float B_val = B_norm[bc_idx];
-                float C_val = C_norm[bc_idx];
-
-                state.ssm_real[h][d][s] = A_bar * state.ssm_real[h][d][s]
-                                         + B_bar_scale * B_val * x_hd;
-
-                y_head_[h * headdim_ + d] += C_val * state.ssm_real[h][d][s];
-            }
-        }
+        const recurrence::BilinearCoeffs coeffs = recurrence::bilinear_coeffs(A_t_[h], DT_t_[h]);
+        const size_t bc_base = h * mimo_rank_ * d_state_;
+        recurrence::two_term_head(state.ssm_real[h][0], y_head_.data() + h * headdim_,
+                                  B_norm + bc_base, C_norm + bc_base,
+                                  x_ptr + h * headdim_, headdim_, d_state_, coeffs);
     }
 }
 

@@ -92,6 +92,28 @@
   - Configured 16 MB stack flag `/STACK:16777216` in [`tests/CMakeLists.txt`](../tests/CMakeLists.txt) and [`src/clap/CMakeLists.txt`](../src/clap/CMakeLists.txt).
   - All test executables and benchmarks pass with zero stack exhaustion.
 
+- [ ] **RE-OPENED 2026-11-03 — `O-PAUSED-F1-2026-11-03`.** The three claims above
+  do not hold on `main@d212e00`. Left unfixed here because F1 §a is scoped to
+  `src/core/recurrence_kernel.h` + `ssm_block.{h,cpp}` + pins; this is a plugin
+  lifecycle bug, not a recurrence bug.
+  - `src/clap/clap_state.cpp:148` still declares `VoiceSnapshot voice_states[MAX_VOICES]{}`
+    on the stack: 8 × 814,144 B = **6,513,152 B**.
+  - `src/clap/clap_plugin.cpp:624` still declares `SSMWeights w{}` on the stack:
+    **4,014,400 B**.
+  - `src/clap/CMakeLists.txt` sets no stack linker option (`grep -c STACK` → 0), and
+    `src/clap/clap_presets.cpp` (cited as a change site above) does not exist in the tree.
+  - Measured 2026-11-03 with MSVC 19.51 `sizeof` probe: `SSMWeights` 4,014,400;
+    `SSMState` 135,680; `MambaState` 814,080; `VoiceSnapshot` 814,144;
+    `MambaSynth` 44,605,952 (heap-allocated — that one is fine).
+  - Evidence: clap-validator 0.4.1 hosting `build-msvc/src/clap/EmTSynth.clap` →
+    `state-invalid-random`, `state-invalid-empty`, `state-reproducibility-{basic,binary,buffered}`
+    crash with `0xC00000FD` (STATUS_STACK_OVERFLOW); 81 run, 58 passed, 8 failed.
+    A host thread stack is 1 MB by default, so any state load overflows.
+  - The same run also reports three *logical* `state-reproducibility-*` failures that are
+    independent of the crash; not diagnosed.
+  - Fix direction: heap/`unique_ptr` for both objects. Both are main-thread load paths,
+    never the audio thread, so this does not need an RT-safe allocator.
+
 ---
 
 ### 5. Windows Native GUI Implementation (`CLAP_WINDOW_API_WIN32`)
