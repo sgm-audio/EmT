@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 verify_deviations.py — machine-checkable status of the deviation register
-(ARCHITECTURE_FIDELITY.md §2, D1-D6).
+(docs/ARCHITECTURE_FIDELITY.md §2, D1-D6).
 
 The register is the project's honesty ledger: it lists every place where this
 build differs from the Mamba-3 paper.  This script makes each entry checkable so
@@ -9,10 +9,10 @@ that a fixed deviation cannot silently come back, and a still-open deviation
 cannot silently be described as fixed.
 
 Per deviation it runs the static and/or numeric checks that the corresponding
-prompt in Prompts/DEVIATION_RESOLUTION/ is required to satisfy:
+entry in docs/ARCHITECTURE_FIDELITY.md §2 is required to satisfy:
 
-    D1  three-term exponential-trapezoidal recurrence   (OPEN — prompt pending)
-    D2  2x2 rotational (complex) state dynamics         (OPEN — prompt pending)
+    D1  three-term exponential-trapezoidal recurrence   (OPEN)
+    D2  2x2 rotational (complex) state dynamics         (OPEN)
     D3  rank-R MIMO refused at load/export              (closed)
     D4  input-derived A documented as a variant         (closed)
     D5  periodic state renormalization removed          (closed)
@@ -56,7 +56,7 @@ class Result:
     title: str
     status: str
     evidence: List[str] = field(default_factory=list)
-    closed_expected: bool = True  # what the register/prompts claim
+    closed_expected: bool = True  # what the register claims
 
 
 def read(path: Path) -> str:
@@ -108,9 +108,9 @@ def check_d1() -> Result:
     if has_history:
         r.status = CLOSED
         r.evidence.append("D1 appears implemented; re-run the full acceptance "
-                          "suite from Prompts/DEVIATION_RESOLUTION/D1_D2_*.md")
+                          "criteria for D1/D2 in docs/ARCHITECTURE_FIDELITY.md")
     else:
-        r.evidence.append("Implementation deferred to the D1/D2 prompt "
+        r.evidence.append("Implementation deferred "
                           "(F4 in ARCHITECTURE_FIDELITY.md §5)")
     return r
 
@@ -133,7 +133,7 @@ def check_d2() -> Result:
         r.status = CLOSED
     else:
         r.evidence.append("State is real; B/C rotation only.  Deferred to the "
-                          "D1/D2 prompt (F4).")
+                          "D1/D2 work (F4).")
     return r
 
 
@@ -210,7 +210,7 @@ def check_d4() -> Result:
     if not documented:
         r.status = FAIL
 
-    fidelity = read(REPO / "ARCHITECTURE_FIDELITY.md")
+    fidelity = read(REPO / "docs" / "ARCHITECTURE_FIDELITY.md")
     reg = fidelity[fidelity.find("### D4"):fidelity.find("### D5")]
     r.evidence.append(
         f"{'ok  ' if 'CLOSED' in reg else 'MISS'} register entry D4 marked closed")
@@ -473,7 +473,7 @@ def main() -> int:
 
     width = 78
     print("=" * width)
-    print("Deviation register verification — ARCHITECTURE_FIDELITY.md §2")
+    print("Deviation register verification — docs/ARCHITECTURE_FIDELITY.md §2")
     print("=" * width)
     failed = False
     for res in results:
@@ -488,13 +488,13 @@ def main() -> int:
     n_open = sum(1 for r in results if r.status == OPEN_PENDING)
     n_skipped = sum(1 for r in results if r.status == SKIP)
     print("\n" + "-" * width)
-    print(f"{n_closed} closed (verified), {n_open} open (prompt pending), "
+    print(f"{n_closed} closed (verified), {n_open} open, "
           f"{sum(1 for r in results if r.status == FAIL)} failing"
           + (f", {n_skipped} harness(es) skipped (build the tests to check the "
              f"behavioural guards)" if n_skipped else ""))
     if n_open:
-        print("Open deviations are expected — resolve them with the prompts in "
-              "Prompts/DEVIATION_RESOLUTION/ and the register will flip to CLOSED.")
+        print("Open deviations are expected; once one is implemented and its "
+              "checks pass, the register flips it to CLOSED.")
     print("=" * width)
 
     if args.json:

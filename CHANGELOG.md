@@ -147,8 +147,8 @@ parity vectors byte-identical.
 
 ## [Unreleased] - 2026-10-04
 
-Verification-driven fixes. Context: [`CLAIMS_VERIFICATION.md`](CLAIMS_VERIFICATION.md)
-and the new [`ARCHITECTURE_FIDELITY.md`](ARCHITECTURE_FIDELITY.md).
+Verification-driven fixes. Context: [`CLAIMS_VERIFICATION.md`](docs/CLAIMS_VERIFICATION.md)
+and the new [`ARCHITECTURE_FIDELITY.md`](docs/ARCHITECTURE_FIDELITY.md).
 
 ### Fixed
 - **The plugin rejected every multi-layer weight file.** `load_weights()` checked
