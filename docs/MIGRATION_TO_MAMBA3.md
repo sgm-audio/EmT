@@ -488,8 +488,14 @@ Load `Mamba3` from `mamba_ssm.modules.mamba3`, extract weight dict, write flat b
 from mamba_ssm.modules.mamba3 import Mamba3
 
 model = Mamba3(
-    d_model=256, d_state=32, expand=2, headdim=64,
-    ngroups=1, is_mimo=False, mimo_rank=1, chunk_size=64
+    d_model=256,
+    d_state=32,
+    expand=2,
+    headdim=64,
+    ngroups=1,
+    is_mimo=False,
+    mimo_rank=1,
+    chunk_size=64,
 )
 # Extract state_dict()
 # Write flat binary with new WeightFileHeader

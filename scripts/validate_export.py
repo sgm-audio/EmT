@@ -13,8 +13,8 @@ Usage:
 """
 
 import argparse
-import sys
 import os
+import sys
 
 import numpy as np
 import torch
@@ -23,54 +23,53 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from emt_format import (
     HEADER_SIZE,
     MAX_MIMO_RANK,
-    MAX_NUM_ROPE_ANGLES,
     WEIGHT_MAGIC,
     WEIGHT_VERSION,
     floats_per_layer,
     in_proj_out_for,
     parse_header,
 )
-from export_mamba_weights import Mamba3Block, Mamba3Model
+from export_mamba_weights import Mamba3Model
 
 ATOL = 1e-5
 RTOL = 1e-5
 
 
 def load_header(path: str) -> dict:
-    with open(path, 'rb') as f:
+    with open(path, "rb") as f:
         raw = f.read(HEADER_SIZE)
     h = parse_header(raw)
     return {
-        'magic': h.magic,
-        'version': h.version,
-        'd_state': h.d_state,
-        'd_model': h.d_model,
-        'd_inner': h.d_inner,
-        'nheads': h.nheads,
-        'num_layers': h.num_layers,
-        'headdim': h.headdim,
-        'cond_dim': h.cond_dim,
-        'quantization': h.quantization,
-        'q_metadata_size': h.q_metadata_size,
-        'flags': h.flags,
-        'weight_data_size': h.weight_data_size,
+        "magic": h.magic,
+        "version": h.version,
+        "d_state": h.d_state,
+        "d_model": h.d_model,
+        "d_inner": h.d_inner,
+        "nheads": h.nheads,
+        "num_layers": h.num_layers,
+        "headdim": h.headdim,
+        "cond_dim": h.cond_dim,
+        "quantization": h.quantization,
+        "q_metadata_size": h.q_metadata_size,
+        "flags": h.flags,
+        "weight_data_size": h.weight_data_size,
         # Deviation D3: 0 = legacy file written before the field existed
         # (treated as rank 1), 1 = rank-1 SISO.  The runtime refuses > 1.
-        'mimo_rank': h.mimo_rank,
-        'reserved': h.reserved,
+        "mimo_rank": h.mimo_rank,
+        "reserved": h.reserved,
     }
 
 
 def load_weights_into_model(model: Mamba3Model, path: str) -> Mamba3Model:
     """Load MAX_*-padded flat-binary weights into a PyTorch Mamba-3 model."""
     hdr = load_header(path)
-    ds = hdr['d_state']
-    dm = hdr['d_model']
-    di = hdr['d_inner']
-    nh = hdr['nheads']
-    hd = hdr['headdim']
-    nl = hdr['num_layers']
-    cd = hdr['cond_dim']
+    ds = hdr["d_state"]
+    dm = hdr["d_model"]
+    di = hdr["d_inner"]
+    nh = hdr["nheads"]
+    hd = hdr["headdim"]
+    nl = hdr["num_layers"]
+    cd = hdr["cond_dim"]
     mr = model.layers[0].mimo_rank  # model's actual mimo_rank (not MAX_)
 
     in_proj_out_file = in_proj_out_for(di, nh, ds)
@@ -79,10 +78,9 @@ def load_weights_into_model(model: Mamba3Model, path: str) -> Mamba3Model:
     fpl = floats_per_layer(ds, dm, di, nh, hd, cd)
     file_size = os.path.getsize(path)
     expected = HEADER_SIZE + fpl * nl * 4
-    assert file_size == expected, (
-        f"File size mismatch: {file_size} vs expected {expected}")
+    assert file_size == expected, f"File size mismatch: {file_size} vs expected {expected}"
 
-    with open(path, 'rb') as f:
+    with open(path, "rb") as f:
         f.read(HEADER_SIZE)
         raw = f.read()
 
@@ -94,7 +92,7 @@ def load_weights_into_model(model: Mamba3Model, path: str) -> Mamba3Model:
 
         def read(n):
             nonlocal offset
-            data = arr[offset:offset + n].copy()
+            data = arr[offset : offset + n].copy()
             offset += n
             return data
 
@@ -102,30 +100,34 @@ def load_weights_into_model(model: Mamba3Model, path: str) -> Mamba3Model:
         in_proj_file = read(in_proj_out_file * dm).reshape(in_proj_out_file, dm)
         in_proj_model_arr = np.zeros((in_proj_out_model, dm), dtype=np.float32)
         # z and x portions (same size)
-        in_proj_model_arr[:di * 2, :] = in_proj_file[:di * 2, :]
+        in_proj_model_arr[: di * 2, :] = in_proj_file[: di * 2, :]
         # B: extract mr*ds per head from MAX_MIMO_RANK stride
         b_src = di * 2
         b_dst = di * 2
         for h_idx in range(nh):
             src = b_src + h_idx * MAX_MIMO_RANK * ds
             dst = b_dst + h_idx * mr * ds
-            in_proj_model_arr[dst:dst + mr * ds, :] = in_proj_file[src:src + mr * ds, :]
+            in_proj_model_arr[dst : dst + mr * ds, :] = in_proj_file[src : src + mr * ds, :]
         # C: extract mr*ds per head from MAX_MIMO_RANK stride
         c_src = b_src + nh * MAX_MIMO_RANK * ds
         c_dst = b_dst + nh * mr * ds
         for h_idx in range(nh):
             src = c_src + h_idx * MAX_MIMO_RANK * ds
             dst = c_dst + h_idx * mr * ds
-            in_proj_model_arr[dst:dst + mr * ds, :] = in_proj_file[src:src + mr * ds, :]
+            in_proj_model_arr[dst : dst + mr * ds, :] = in_proj_file[src : src + mr * ds, :]
         # dd_dt, dd_A, trap (same size)
         rest_src = c_src + nh * MAX_MIMO_RANK * ds
         rest_dst = c_dst + nh * mr * ds
         rest_size = nh * 3
-        in_proj_model_arr[rest_dst:rest_dst + rest_size, :] = in_proj_file[rest_src:rest_src + rest_size, :]
+        in_proj_model_arr[rest_dst : rest_dst + rest_size, :] = in_proj_file[
+            rest_src : rest_src + rest_size, :
+        ]
         # angles portion
         angles_src = rest_src + rest_size
         angles_dst = rest_dst + rest_size
-        in_proj_model_arr[angles_dst:angles_dst + (ds // 2), :] = in_proj_file[angles_src:angles_src + (ds // 2), :]
+        in_proj_model_arr[angles_dst : angles_dst + (ds // 2), :] = in_proj_file[
+            angles_src : angles_src + (ds // 2), :
+        ]
         block.in_proj.weight.data = torch.from_numpy(in_proj_model_arr)
 
         # 2. dt_bias: (nheads,)
@@ -145,7 +147,7 @@ def load_weights_into_model(model: Mamba3Model, path: str) -> Mamba3Model:
         block.C_norm_weight.data = torch.from_numpy(read(ds))
 
         # 7-9. mimo_x, mimo_z, mimo_o: padded to MAX_MIMO_RANK
-        for attr in ['mimo_x', 'mimo_z', 'mimo_o']:
+        for attr in ["mimo_x", "mimo_z", "mimo_o"]:
             arr_file = read(nh * MAX_MIMO_RANK * hd).reshape(nh, MAX_MIMO_RANK, hd)
             getattr(block, attr).data = torch.from_numpy(arr_file[:, :mr, :].copy())
 
@@ -158,37 +160,44 @@ def load_weights_into_model(model: Mamba3Model, path: str) -> Mamba3Model:
         # 13. dt_film_proj_w: (2*nheads, d_cond)
         block.dt_film_proj.weight.data = torch.from_numpy(read(2 * nh * cd).reshape(2 * nh, cd))
 
-    assert offset == fpl * nl, (
-        f"Read {offset} floats, expected {fpl * nl}")
+    assert offset == fpl * nl, f"Read {offset} floats, expected {fpl * nl}"
     return model
 
 
 def validate(path: str, batch: int = 1, seq_len: int = 64):
     """Validate that flat-binary round-trips through PyTorch correctly."""
     hdr = load_header(path)
-    assert hdr['magic'] == WEIGHT_MAGIC, f"Bad magic: {hdr['magic']:#x}"
-    assert hdr['version'] == WEIGHT_VERSION, (
-        f"Bad version: {hdr['version']} (expected {WEIGHT_VERSION})")
+    assert hdr["magic"] == WEIGHT_MAGIC, f"Bad magic: {hdr['magic']:#x}"
+    assert hdr["version"] == WEIGHT_VERSION, (
+        f"Bad version: {hdr['version']} (expected {WEIGHT_VERSION})"
+    )
 
-    print(f"Header: layers={hdr['num_layers']} ds={hdr['d_state']} "
-          f"dm={hdr['d_model']} di={hdr['d_inner']} "
-          f"nh={hdr['nheads']} hd={hdr['headdim']}")
+    print(
+        f"Header: layers={hdr['num_layers']} ds={hdr['d_state']} "
+        f"dm={hdr['d_model']} di={hdr['d_inner']} "
+        f"nh={hdr['nheads']} hd={hdr['headdim']}"
+    )
 
-    model = Mamba3Model(hdr['d_state'], hdr['d_model'],
-                        hdr['d_inner'], hdr['nheads'], hdr['headdim'],
-                        hdr['num_layers'], cond_dim=hdr['cond_dim'])
+    model = Mamba3Model(
+        hdr["d_state"],
+        hdr["d_model"],
+        hdr["d_inner"],
+        hdr["nheads"],
+        hdr["headdim"],
+        hdr["num_layers"],
+        cond_dim=hdr["cond_dim"],
+    )
     load_weights_into_model(model, path)
     model.eval()
 
     # Run forward pass with random input
-    x = torch.randn(batch, seq_len, hdr['d_model'])
+    x = torch.randn(batch, seq_len, hdr["d_model"])
     with torch.no_grad():
         y = model(x)
 
     assert not torch.isnan(y).any(), "NaN in output!"
     assert not torch.isinf(y).any(), "Inf in output!"
-    assert y.shape == (batch, seq_len, hdr['d_model']), (
-        f"Shape mismatch: {y.shape}")
+    assert y.shape == (batch, seq_len, hdr["d_model"]), f"Shape mismatch: {y.shape}"
 
     # Run a second time to verify determinism
     x2 = x.clone()
@@ -197,20 +206,21 @@ def validate(path: str, batch: int = 1, seq_len: int = 64):
     assert torch.allclose(y, y2, atol=ATOL), "Non-deterministic output!"
 
     output_sum = y.abs().sum().item()
-    print(f"Forward pass OK: shape={list(y.shape)} "
-          f"range=[{y.min().item():.4f}, {y.max().item():.4f}]")
+    print(
+        f"Forward pass OK: shape={list(y.shape)} range=[{y.min().item():.4f}, {y.max().item():.4f}]"
+    )
     print(f"Non-zero output: {output_sum > 0}")
-    print(f"Deterministic: yes")
-    print(f"Validation PASSED")
+    print("Deterministic: yes")
+    print("Validation PASSED")
 
     return output_sum > 0
 
 
 def main():
     p = argparse.ArgumentParser(description="Validate exported Mamba-3 weights")
-    p.add_argument('path', help='Path to .bin weight file')
-    p.add_argument('--batch', type=int, default=1)
-    p.add_argument('--seq-len', type=int, default=64)
+    p.add_argument("path", help="Path to .bin weight file")
+    p.add_argument("--batch", type=int, default=1)
+    p.add_argument("--seq-len", type=int, default=64)
     args = p.parse_args()
 
     if not os.path.exists(args.path):
@@ -221,5 +231,5 @@ def main():
     sys.exit(0 if ok else 1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

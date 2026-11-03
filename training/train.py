@@ -55,12 +55,11 @@ import os
 import random
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Optional
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 import yaml
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -82,11 +81,21 @@ AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".aiff"}
 # Model wrapper (adds conditioning-aware forward to the reference model)
 # ---------------------------------------------------------------------------
 
+
 class AudioMamba(Mamba3Model):
-    def __init__(self, d_state, d_model, d_inner, nheads, headdim, num_layers,
-                 mimo_rank=1, cond_dim=128):
-        super().__init__(d_state, d_model, d_inner, nheads, headdim, num_layers,
-                         mimo_rank=mimo_rank, cond_dim=cond_dim)
+    def __init__(
+        self, d_state, d_model, d_inner, nheads, headdim, num_layers, mimo_rank=1, cond_dim=128
+    ):
+        super().__init__(
+            d_state,
+            d_model,
+            d_inner,
+            nheads,
+            headdim,
+            num_layers,
+            mimo_rank=mimo_rank,
+            cond_dim=cond_dim,
+        )
         self.d_model = d_model
         self.cond_dim = cond_dim
 
@@ -117,6 +126,7 @@ def make_model(cfg: dict) -> AudioMamba:
 # Datasets
 # ---------------------------------------------------------------------------
 
+
 def _resample_linear(x: np.ndarray, sr: int, target_sr: int) -> np.ndarray:
     """Dependency-free linear resample. Fine for smoke tests; for production use
     soundfile/torchaudio so the filter quality is not a variable in your results."""
@@ -132,6 +142,7 @@ def _resample_linear(x: np.ndarray, sr: int, target_sr: int) -> np.ndarray:
 def _load_with_wave_module(path: str) -> tuple:
     """Built-in fallback: uncompressed PCM WAV only, no third-party dependency."""
     import wave as _wave
+
     with _wave.open(path, "rb") as w:
         n_ch = w.getnchannels()
         width = w.getsampwidth()
@@ -162,17 +173,19 @@ def load_audio(path: str, target_sr: int) -> np.ndarray:
 
     try:
         import soundfile as sf  # type: ignore
+
         data, sr = sf.read(path, always_2d=False, dtype="float32")
         if data.ndim > 1:
             data = data.mean(axis=1)
         return _resample_linear(data.astype(np.float32), int(sr), target_sr)
     except ImportError:
         pass
-    except Exception as exc:                      # noqa: BLE001 - try the next backend
+    except Exception as exc:  # noqa: BLE001 - try the next backend
         errors.append(f"soundfile: {exc}")
 
     try:
         import torchaudio  # type: ignore
+
         waveform, sr = torchaudio.load(path)
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
@@ -181,18 +194,19 @@ def load_audio(path: str, target_sr: int) -> np.ndarray:
         return waveform.squeeze(0).numpy().astype(np.float32)
     except ImportError:
         pass
-    except Exception as exc:                      # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         errors.append(f"torchaudio: {exc}")
 
     try:
         data, sr = _load_with_wave_module(path)
         return _resample_linear(data, sr, target_sr)
-    except Exception as exc:                      # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         errors.append(f"wave: {exc}")
 
     raise RuntimeError(
         f"could not decode {path}; install soundfile or torchcodec for compressed "
-        f"formats. Backend errors: " + "; ".join(errors))
+        f"formats. Backend errors: " + "; ".join(errors)
+    )
 
 
 def frame_waveform(wave: np.ndarray, seq_len: int) -> np.ndarray:
@@ -212,8 +226,7 @@ class AudioWaveDataset(torch.utils.data.IterableDataset):
         self.cond_dim = cfg.get("cond_dim", 128)
         self.target_sr = cfg.get("sample_rate", 44100)
         self.files = sorted(
-            p for p in self.root.rglob("*")
-            if p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS
+            p for p in self.root.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS
         )
         if not self.files:
             raise RuntimeError(f"No audio files found in {root}")
@@ -223,7 +236,7 @@ class AudioWaveDataset(torch.utils.data.IterableDataset):
         files = list(self.files)
         if worker_info is not None:
             per_worker = math.ceil(len(files) / worker_info.num_workers)
-            files = files[worker_info.id * per_worker:(worker_info.id + 1) * per_worker]
+            files = files[worker_info.id * per_worker : (worker_info.id + 1) * per_worker]
         else:
             random.Random().shuffle(files)
 
@@ -241,8 +254,7 @@ class AudioWaveDataset(torch.utils.data.IterableDataset):
                     inp = chunk[:-1]
                     tgt = chunk[1:]
                 cond = np.zeros(self.cond_dim, dtype=np.float32)
-                yield (torch.from_numpy(inp), torch.from_numpy(tgt),
-                       torch.from_numpy(cond))
+                yield (torch.from_numpy(inp), torch.from_numpy(tgt), torch.from_numpy(cond))
 
 
 class PairedAudioDataset(torch.utils.data.IterableDataset):
@@ -270,7 +282,8 @@ class PairedAudioDataset(torch.utils.data.IterableDataset):
 
         if not self.dry_dir.is_dir() or not self.wet_dir.is_dir():
             raise RuntimeError(
-                f"paired mode needs '{self.dry_dir}' and '{self.wet_dir}' directories")
+                f"paired mode needs '{self.dry_dir}' and '{self.wet_dir}' directories"
+            )
 
         pairs = []
         for dry_path in sorted(self.dry_dir.rglob("*")):
@@ -279,8 +292,14 @@ class PairedAudioDataset(torch.utils.data.IterableDataset):
             wet_path = self.wet_dir / dry_path.relative_to(self.dry_dir)
             if not wet_path.exists():
                 # try the same stem with any known extension
-                match = next((p for p in self.wet_dir.rglob(dry_path.stem + ".*")
-                              if p.suffix.lower() in AUDIO_EXTENSIONS), None)
+                match = next(
+                    (
+                        p
+                        for p in self.wet_dir.rglob(dry_path.stem + ".*")
+                        if p.suffix.lower() in AUDIO_EXTENSIONS
+                    ),
+                    None,
+                )
                 wet_path = match
             if wet_path is None or not wet_path.exists():
                 print(f"[skip] no wet counterpart for {dry_path.name}")
@@ -300,23 +319,25 @@ class PairedAudioDataset(torch.utils.data.IterableDataset):
             return
         dry = dry[:usable].reshape(-1, self.seq_len)
         wet = wet[:usable].reshape(-1, self.seq_len)
-        for x, y in zip(dry, wet):
+        for x, y in zip(dry, wet, strict=True):
             if self.d_model == 1:
                 inp = x.reshape(-1, 1)
                 tgt = y.reshape(-1, 1)
             else:
                 raise RuntimeError("paired mode currently expects d_model == 1 (raw audio)")
             cond = np.zeros(self.cond_dim, dtype=np.float32)
-            yield (torch.from_numpy(np.ascontiguousarray(inp)),
-                   torch.from_numpy(np.ascontiguousarray(tgt)),
-                   torch.from_numpy(cond))
+            yield (
+                torch.from_numpy(np.ascontiguousarray(inp)),
+                torch.from_numpy(np.ascontiguousarray(tgt)),
+                torch.from_numpy(cond),
+            )
 
     def __iter__(self) -> Iterator[tuple]:
         worker_info = torch.utils.data.get_worker_info()
         pairs = list(self.pairs)
         if worker_info is not None:
             per_worker = math.ceil(len(pairs) / worker_info.num_workers)
-            pairs = pairs[worker_info.id * per_worker:(worker_info.id + 1) * per_worker]
+            pairs = pairs[worker_info.id * per_worker : (worker_info.id + 1) * per_worker]
         else:
             random.Random().shuffle(pairs)
 
@@ -348,24 +369,32 @@ class SyntheticDataset(torch.utils.data.IterableDataset):
             inp = chunk[:-1].reshape(-1, 1) if self.d_model == 1 else chunk[:-1]
             tgt = chunk[1:].reshape(-1, 1) if self.d_model == 1 else chunk[1:]
             cond = np.zeros(self.cond_dim, dtype=np.float32)
-            yield (torch.from_numpy(inp), torch.from_numpy(tgt),
-                   torch.from_numpy(cond))
+            yield (torch.from_numpy(inp), torch.from_numpy(tgt), torch.from_numpy(cond))
 
 
 def collate(batch):
-    return (torch.stack([b[0] for b in batch]),
-            torch.stack([b[1] for b in batch]),
-            torch.stack([b[2] for b in batch]))
+    return (
+        torch.stack([b[0] for b in batch]),
+        torch.stack([b[1] for b in batch]),
+        torch.stack([b[2] for b in batch]),
+    )
 
 
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
 
-def train(cfg: dict, output_dir: Path, dataset_dir: Optional[str] = None,
-          device: Optional[str] = None, use_amp: bool = True,
-          resume: Optional[str] = None, max_steps: Optional[int] = None,
-          validate: bool = False):
+
+def train(
+    cfg: dict,
+    output_dir: Path,
+    dataset_dir: str | None = None,
+    device: str | None = None,
+    use_amp: bool = True,
+    resume: str | None = None,
+    max_steps: int | None = None,
+    validate: bool = False,
+):
     torch.manual_seed(cfg.get("seed", 0))
     np.random.seed(cfg.get("seed", 0))
     random.seed(cfg.get("seed", 0))
@@ -407,8 +436,10 @@ def train(cfg: dict, output_dir: Path, dataset_dir: Optional[str] = None,
     grad_accum = max(1, int(cfg.get("grad_accum", 1)))
     loss_name = cfg.get("loss", "mse")
     criterion = build_loss(loss_name, cfg, device)
-    print(f"objective: {loss_name}"
-          + (f" (weights: {cfg['loss_weights']})" if cfg.get("loss_weights") else ""))
+    print(
+        f"objective: {loss_name}"
+        + (f" (weights: {cfg['loss_weights']})" if cfg.get("loss_weights") else "")
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "config.yaml").write_text(yaml.dump(cfg))
 
@@ -426,7 +457,7 @@ def train(cfg: dict, output_dir: Path, dataset_dir: Optional[str] = None,
     start = time.time()
     done = False
     accum = 0
-    for epoch in range(cfg["epochs"]):
+    for _epoch in range(cfg["epochs"]):
         for x, y, cond in loader:
             x, y, cond = x.to(device), y.to(device), cond.to(device)
 
@@ -449,22 +480,28 @@ def train(cfg: dict, output_dir: Path, dataset_dir: Optional[str] = None,
                     if hasattr(criterion, "components"):
                         try:
                             comps = criterion.components(pred.detach(), y)
-                            extra = ("  [" +
-                                     "  ".join(f"{k}={v:.3f}" for k, v in comps.items()) +
-                                     "]")
+                            extra = (
+                                "  [" + "  ".join(f"{k}={v:.3f}" for k, v in comps.items()) + "]"
+                            )
                         except Exception:
                             extra = ""
-                    print(f"step {step:>6}  loss={loss.item() * grad_accum:.6f}  "
-                          f"lr={optimizer.param_groups[0]['lr']:.2e}  "
-                          f"{time.time() - start:.1f}s{extra}")
+                    print(
+                        f"step {step:>6}  loss={loss.item() * grad_accum:.6f}  "
+                        f"lr={optimizer.param_groups[0]['lr']:.2e}  "
+                        f"{time.time() - start:.1f}s{extra}"
+                    )
 
                 if step % cfg.get("save_every", 1000) == 0:
-                    torch.save({"step": step,
-                                "model_state_dict": model.state_dict(),
-                                "optimizer_state_dict": optimizer.state_dict(),
-                                "scaler_state_dict": scaler.state_dict(),
-                                "config": cfg},
-                               output_dir / f"checkpoint_{step:07d}.pt")
+                    torch.save(
+                        {
+                            "step": step,
+                            "model_state_dict": model.state_dict(),
+                            "optimizer_state_dict": optimizer.state_dict(),
+                            "scaler_state_dict": scaler.state_dict(),
+                            "config": cfg,
+                        },
+                        output_dir / f"checkpoint_{step:07d}.pt",
+                    )
 
                 if max_steps is not None and step >= max_steps:
                     print(f"reached --steps {max_steps}; stopping")
@@ -478,22 +515,31 @@ def train(cfg: dict, output_dir: Path, dataset_dir: Optional[str] = None,
             "no training steps ran - every dataset item was skipped or the split "
             "produced no windows. Check the [skip] messages above (decoding, "
             "length shorter than seq_len, or missing dry/wet counterparts). "
-            "Refusing to export untrained weights.")
+            "Refusing to export untrained weights."
+        )
 
-    torch.save({"model_state_dict": model.state_dict(), "config": cfg},
-               output_dir / "final.pt")
+    torch.save({"model_state_dict": model.state_dict(), "config": cfg}, output_dir / "final.pt")
 
     # Export plugin weights
     b = model.layers[0]
     bin_path = output_dir / "plugin_weights.bin"
     export_model(model, str(bin_path), cond_dim=cfg.get("cond_dim", 128), random_init=False)
-    generate_config_h(b.d_state, b.d_model, b.d_inner, b.nheads, b.headdim,
-                      len(model.layers), cfg.get("cond_dim", 128), b.mimo_rank,
-                      str(output_dir / "config.h"))
+    generate_config_h(
+        b.d_state,
+        b.d_model,
+        b.d_inner,
+        b.nheads,
+        b.headdim,
+        len(model.layers),
+        cfg.get("cond_dim", 128),
+        b.mimo_rank,
+        str(output_dir / "config.h"),
+    )
     print(f"done. exported {bin_path} and {output_dir / 'config.h'}")
 
     if validate:
         import subprocess
+
         validate_script = os.path.join(_SCRIPTS_DIR, "validate_export.py")
         print(f"$ {sys.executable} {validate_script} {bin_path}")
         subprocess.run([sys.executable, validate_script, str(bin_path)], check=True)
@@ -503,6 +549,7 @@ def train(cfg: dict, output_dir: Path, dataset_dir: Optional[str] = None,
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def main():
     p = argparse.ArgumentParser(description="Train Mamba-3 plugin model")
     p.add_argument("--config", default="training/configs/laptop_rtx4070.yaml")
@@ -511,9 +558,13 @@ def main():
     p.add_argument("--device", default=None)
     p.add_argument("--resume", default=None)
     p.add_argument("--smoke-test", action="store_true", help="short synthetic run")
-    p.add_argument("--steps", type=int, default=None,
-                   help="hard cap on optimisation steps (default: 5 with "
-                        "--smoke-test, otherwise run all epochs)")
+    p.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        help="hard cap on optimisation steps (default: 5 with "
+        "--smoke-test, otherwise run all epochs)",
+    )
     p.add_argument("--validate", action="store_true", help="run validate_export.py after export")
 
     # Frequent overrides
@@ -524,11 +575,15 @@ def main():
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--seq-len", type=int, default=None)
-    p.add_argument("--loss", default=None,
-                   choices=["mse", "l1", "sisdr", "mrstft", "hybrid"],
-                   help="objective; 'hybrid' = pre-emph L1 + SI-SDR + multi-res STFT")
-    p.add_argument("--paired", action="store_true",
-                   help="treat --dataset-dir as dry/ + wet/ effect pairs")
+    p.add_argument(
+        "--loss",
+        default=None,
+        choices=["mse", "l1", "sisdr", "mrstft", "hybrid"],
+        help="objective; 'hybrid' = pre-emph L1 + SI-SDR + multi-res STFT",
+    )
+    p.add_argument(
+        "--paired", action="store_true", help="treat --dataset-dir as dry/ + wet/ effect pairs"
+    )
 
     args = p.parse_args()
 
@@ -543,11 +598,17 @@ def main():
             f"mimo_rank={cfg.get('mimo_rank')} is not supported: the runtime "
             "implements rank-1 SISO per head (deviation D3 in "
             "ARCHITECTURE_FIDELITY.md). Use mimo_rank: 1, or implement the "
-            "rank-R reduction first (deviation D3 in docs/ARCHITECTURE_FIDELITY.md).")
+            "rank-R reduction first (deviation D3 in docs/ARCHITECTURE_FIDELITY.md)."
+        )
 
-    for flag, key in [("batch_size", "batch_size"), ("grad_accum", "grad_accum"),
-                      ("num_workers", "num_workers"), ("lr", "lr"),
-                      ("epochs", "epochs"), ("seq_len", "seq_len")]:
+    for flag, key in [
+        ("batch_size", "batch_size"),
+        ("grad_accum", "grad_accum"),
+        ("num_workers", "num_workers"),
+        ("lr", "lr"),
+        ("epochs", "epochs"),
+        ("seq_len", "seq_len"),
+    ]:
         val = getattr(args, flag.replace("_", "_"))
         if val is not None:
             cfg[key] = val
@@ -566,14 +627,16 @@ def main():
         if args.dataset_dir is None:
             print("[smoke] using synthetic data")
 
-    train(cfg,
-          output_dir=Path(args.output_dir),
-          dataset_dir=args.dataset_dir,
-          device=args.device,
-          use_amp=not args.no_amp,
-          resume=args.resume,
-          max_steps=max_steps,
-          validate=args.validate)
+    train(
+        cfg,
+        output_dir=Path(args.output_dir),
+        dataset_dir=args.dataset_dir,
+        device=args.device,
+        use_amp=not args.no_amp,
+        resume=args.resume,
+        max_steps=max_steps,
+        validate=args.validate,
+    )
 
 
 if __name__ == "__main__":

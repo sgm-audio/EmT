@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 WEIGHT_MAGIC = 0x4D424D41  # "MBMA"
 WEIGHT_VERSION = 2  # Mamba-3 format
-HEADER_FMT = '<12IQII'  # 12 x uint32, uint64 wds, uint32 mimo_rank, uint32 reserved
+HEADER_FMT = "<12IQII"  # 12 x uint32, uint64 wds, uint32 mimo_rank, uint32 reserved
 HEADER_SIZE = 64
 
 
@@ -75,8 +75,7 @@ class WeightHeader:
     @classmethod
     def from_bytes(cls, data: bytes) -> "WeightHeader":
         if len(data) < HEADER_SIZE:
-            raise ValueError(
-                f"header truncated: {len(data)} bytes, need {HEADER_SIZE}")
+            raise ValueError(f"header truncated: {len(data)} bytes, need {HEADER_SIZE}")
         return cls(*struct.unpack(HEADER_FMT, data[:HEADER_SIZE]))
 
     def validate(self) -> "WeightHeader":
@@ -84,8 +83,15 @@ class WeightHeader:
             raise ValueError(f"bad magic: {self.magic:#010x}")
         if self.version != WEIGHT_VERSION:
             raise ValueError(f"bad version: {self.version}")
-        for name in ("d_state", "d_model", "d_inner", "nheads",
-                     "headdim", "cond_dim", "num_layers"):
+        for name in (
+            "d_state",
+            "d_model",
+            "d_inner",
+            "nheads",
+            "headdim",
+            "cond_dim",
+            "num_layers",
+        ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"bad {name}: {getattr(self, name)}")
         return self
@@ -101,43 +107,55 @@ def in_proj_out_for(d_inner: int, nheads: int, d_state: int) -> int:
 
     Row groups: z + x + B + C + (dd_dt, dd_A, trap) + angles.
     """
-    return (d_inner * 2
-            + nheads * MAX_MIMO_RANK * d_state * 2
-            + nheads * 3
-            + MAX_NUM_ROPE_ANGLES)
+    return d_inner * 2 + nheads * MAX_MIMO_RANK * d_state * 2 + nheads * 3 + MAX_NUM_ROPE_ANGLES
 
 
-def floats_per_layer(ds: int, dm: int, di: int, nh: int,
-                     hd: int, cd: int) -> int:
+def floats_per_layer(ds: int, dm: int, di: int, nh: int, hd: int, cd: int) -> int:
     """Float32 element count per layer in the ``MAX_*``-padded file layout."""
     in_proj_out = in_proj_out_for(di, nh, ds)
-    return (in_proj_out * dm +       # in_proj_w
-            nh +                      # dt_bias
-            nh * MAX_MIMO_RANK * ds + # B_bias
-            nh * MAX_MIMO_RANK * ds + # C_bias
-            ds +                      # B_norm_weight
-            ds +                      # C_norm_weight
-            nh * MAX_MIMO_RANK * hd + # mimo_x
-            nh * MAX_MIMO_RANK * hd + # mimo_z
-            nh * MAX_MIMO_RANK * hd + # mimo_o
-            nh +                      # D_proj
-            dm * di +                 # out_proj_w
-            2 * dm * cd +             # film_proj_w
-            2 * nh * cd)              # dt_film_proj_w
+    return (
+        in_proj_out * dm  # in_proj_w
+        + nh  # dt_bias
+        + nh * MAX_MIMO_RANK * ds  # B_bias
+        + nh * MAX_MIMO_RANK * ds  # C_bias
+        + ds  # B_norm_weight
+        + ds  # C_norm_weight
+        + nh * MAX_MIMO_RANK * hd  # mimo_x
+        + nh * MAX_MIMO_RANK * hd  # mimo_z
+        + nh * MAX_MIMO_RANK * hd  # mimo_o
+        + nh  # D_proj
+        + dm * di  # out_proj_w
+        + 2 * dm * cd  # film_proj_w
+        + 2 * nh * cd
+    )  # dt_film_proj_w
 
 
-def make_header(ds: int, dm: int, di: int, nh: int, hd: int,
-                nl: int, cd: int, wds: int, mr: int = 1) -> bytes:
+def make_header(
+    ds: int, dm: int, di: int, nh: int, hd: int, nl: int, cd: int, wds: int, mr: int = 1
+) -> bytes:
     """Build the 64-byte ``WeightFileHeader`` (version 2, 12I Q I I layout).
 
     ``mr`` (mimo_rank) is read by ``WeightLoader::load()``: values > 1 are
     refused because the forward pass implements rank-1 SISO only
     (deviation D3).
     """
-    data = struct.pack(HEADER_FMT,
-                       WEIGHT_MAGIC, WEIGHT_VERSION,
-                       ds, dm, di, nh, nl, hd, cd,
-                       0, 0, 0,        # quantization, q_metadata_size, flags
-                       wds, mr, 0)     # weight_data_size, mimo_rank, reserved
+    data = struct.pack(
+        HEADER_FMT,
+        WEIGHT_MAGIC,
+        WEIGHT_VERSION,
+        ds,
+        dm,
+        di,
+        nh,
+        nl,
+        hd,
+        cd,
+        0,
+        0,
+        0,  # quantization, q_metadata_size, flags
+        wds,
+        mr,
+        0,
+    )  # weight_data_size, mimo_rank, reserved
     assert len(data) == HEADER_SIZE
     return data

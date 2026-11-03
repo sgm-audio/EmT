@@ -14,9 +14,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 
-[tool.ruff]
-line-length = 100
-select = ["E", "F", "W"]
+# Ruff settings live in the root ruff.toml (line-length 100, select E,F,W,I,UP,B);
+# keep training/pyproject.toml free of ruff config so the root config applies.
 
 [tool.pytest.ini_options]
 testpaths = ["training"]
