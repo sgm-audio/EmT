@@ -1,4 +1,5 @@
 build/
+dist/
 models/*.bin
 *.pyc
 __pycache__/

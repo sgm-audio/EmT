@@ -1,6 +1,10 @@
 # Normalize line endings to LF on commit; check out native endings.
 * text=auto
 
+# Scripts must remain LF for cross-platform CI (Linux/macOS runners).
+*.sh text eol=lf
+*.py text eol=lf
+
 # Weight files and archives are binary.
 *.bin binary
 *.zip binary
