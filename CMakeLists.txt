@@ -89,17 +89,25 @@ add_subdirectory(tests)
 
 # clap-validator: runs the CLAP plugin validator against the built bundle
 # when the tool is installed; otherwise the target explains the skip.
+# Uses clap_validator_launcher.py which patches a validator copy with
+# a 16 MB stack so child processes can hold EmT's SSM state.
 find_program(CLAP_VALIDATOR_BIN clap-validator)
 if(CLAP_VALIDATOR_BIN)
     # clap-validator 0.4.1 (and every release with subcommands) needs the
     # `validate` subcommand; passing the bundle path alone exits 2 with
     # "unrecognized subcommand".
     add_test(NAME clap-validator
-        COMMAND ${CLAP_VALIDATOR_BIN} validate "$<TARGET_FILE:mamba_synth>")
+        COMMAND ${CMAKE_COMMAND} -E env
+        PYTHONPATH="${PROJECT_SOURCE_DIR}/scripts"
+        python3 "${PROJECT_SOURCE_DIR}/scripts/clap_validator_launcher.py"
+        "${CLAP_VALIDATOR_BIN}" "$<TARGET_FILE:mamba_synth>")
     add_custom_target(clap-validator
-        COMMAND ${CLAP_VALIDATOR_BIN} validate "$<TARGET_FILE:mamba_synth>"
+        COMMAND ${CMAKE_COMMAND} -E env
+        PYTHONPATH="${PROJECT_SOURCE_DIR}/scripts"
+        python3 "${PROJECT_SOURCE_DIR}/scripts/clap_validator_launcher.py"
+        "${CLAP_VALIDATOR_BIN}" "$<TARGET_FILE:mamba_synth>"
         DEPENDS mamba_synth
-        COMMENT "Validating CLAP plugin with clap-validator"
+        COMMENT "Validating CLAP plugin with clap-validator (16 MB stack)"
         VERBATIM)
 else()
     add_custom_target(clap-validator

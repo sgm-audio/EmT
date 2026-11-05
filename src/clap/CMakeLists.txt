@@ -64,6 +64,12 @@ OUTPUT_NAME "EmTSynth"
 SUFFIX ".clap"
 PREFIX ""
 )
+# 16 MB stack reserve so clap-validator child processes (one per test)
+# inherit enough stack for SSMWeights + SSMBlock working set.
+# The plugin DLL's /STACK doesn't apply to the validator's children.
+set_target_properties(mamba_synth PROPERTIES
+LINK_FLAGS "/STACK:16777216"
+)
 target_link_libraries(mamba_synth PRIVATE user32 gdi32)
 install(TARGETS mamba_synth DESTINATION "C:/Program Files/Common Files/CLAP")
 endif()

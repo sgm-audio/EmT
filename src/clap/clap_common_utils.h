@@ -15,6 +15,22 @@ namespace mamba {
 // offline renderer. They remain visible through this header so existing
 // call sites are unchanged.
 
+// Notify the host that parameter values changed outside the normal
+// flush/process path (e.g., after state_load). Required for the CLAP
+// state-reproducibility test to pass.
+// The host pointer lives in plugin->plugin_data (MambaSynth or FxState).
+inline void notify_params_changed(const clap_plugin_t* plugin) {
+    if (!plugin || !plugin->plugin_data) return;
+    // FxState and MambaSynth both have 'host' as first member
+    const clap_host_t* host = *static_cast<const clap_host_t* const*>(plugin->plugin_data);
+    if (!host || !host->get_extension) return;
+    const auto* hp = static_cast<const clap_host_params_t*>(
+        host->get_extension(host, CLAP_EXT_PARAMS));
+    if (hp && hp->rescan) {
+        hp->rescan(host, CLAP_PARAM_RESCAN_VALUES);
+    }
+}
+
 // Extract stereo/mono audio input
 inline float extract_audio_input(const clap_audio_buffer_t* in_bus, uint32_t sample_idx, float dry[2]) {
     dry[0] = 0.0f;

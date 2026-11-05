@@ -308,9 +308,11 @@ TEST(RealtimeSafety, FxAcceptsMultiLayerWeightsWithinLimits) {
 TEST(RealtimeSafety, FxRejectsWeightsExceedingCompiledLimits) {
     char path[512];
     const char* tmpdir = std::getenv("TMPDIR");
+    if (!tmpdir || tmpdir[0] == '\0') tmpdir = std::getenv("TEMP");
+    if (!tmpdir || tmpdir[0] == '\0') tmpdir = std::getenv("TMP");
+    if (!tmpdir || tmpdir[0] == '\0') tmpdir = "/tmp";
     std::snprintf(path, sizeof(path), "%s/mamba_too_big_%d.bin",
-                  tmpdir && tmpdir[0] ? tmpdir : "/tmp",
-                  mamba_test_pid());
+                  tmpdir, mamba_test_pid());
     ASSERT_TRUE(write_raw_header(path, MAX_D_STATE + 1, MAX_D_MODEL, MAX_D_INNER,
                                  MAX_NHEADS, MAX_LAYERS, MAX_HEADDIM, COND_DIM));
 

@@ -97,6 +97,24 @@ target_include_directories(test_state_roundtrip PRIVATE
 # isolation, and decay for every clamped pole.
 emt_add_test(test_recurrence_kernel test_recurrence_kernel.cpp)
 
+# CLAP state extension: value round-trip, byte-identical re-save, prime-byte reads
+emt_add_test(test_clap_state
+    test_clap_state.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_fx_plugin.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_plugin.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/param_table.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_audio_ports.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_latency.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_state.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_params.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_note_ports.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_tail.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/gui_common.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/gui_stub.cpp
+    ${PROJECT_SOURCE_DIR}/src/clap/preset_paths.cpp)
+target_include_directories(test_clap_state PRIVATE
+    ${PROJECT_SOURCE_DIR}/extern/clap/include)
+
 emt_add_test(test_realtime_safety
     test_realtime_safety.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/clap_fx_plugin.cpp
