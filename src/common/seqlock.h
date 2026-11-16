@@ -2,8 +2,10 @@
 #define SEQLOCK_H
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <type_traits>
 
 namespace mamba {
 
@@ -12,20 +14,20 @@ public:
     SeqLock() : seq_(0) {}
 
     void write_lock() {
-        seq_.fetch_add(1, std::memory_order_acq_rel);
+        seq_.fetch_add(1, std::memory_order_seq_cst);
     }
 
     void write_unlock() {
-        seq_.fetch_add(1, std::memory_order_acq_rel);
+        seq_.fetch_add(1, std::memory_order_seq_cst);
     }
 
     bool read_begin(uint64_t& start_seq) const {
-        start_seq = seq_.load(std::memory_order_acquire);
+        start_seq = seq_.load(std::memory_order_seq_cst);
         return (start_seq & 1) == 0;
     }
 
     bool read_retry(uint64_t start_seq) const {
-        uint64_t end_seq = seq_.load(std::memory_order_acquire);
+        uint64_t end_seq = seq_.load(std::memory_order_seq_cst);
         return start_seq != end_seq;
     }
 
@@ -39,25 +41,38 @@ private:
 
 template<typename T>
 struct Seqlocked {
-    alignas(64) T data;
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "Seqlocked<T> requires T to be trivially copyable");
+    static constexpr size_t kWords = (sizeof(T) + sizeof(uint64_t) - 1) / sizeof(uint64_t);
+
+    alignas(64) std::atomic<uint64_t> words[kWords]{};
     SeqLock seqlock;
 
     void write(const T& value) {
+        uint64_t buf[kWords]{};
+        std::memcpy(buf, &value, sizeof(T));
         seqlock.write_lock();
-        data = value;
+        for (size_t i = 0; i < kWords; ++i) {
+            words[i].store(buf[i], std::memory_order_seq_cst);
+        }
         seqlock.write_unlock();
     }
 
     bool read(T& out) const {
-        uint64_t start_seq;
-        for (;;) {
+        uint64_t buf[kWords];
+        for (int attempt = 0; attempt < 4096; ++attempt) {
+            uint64_t start_seq = 0;
             if (seqlock.read_begin(start_seq)) {
-                out = data;
+                for (size_t i = 0; i < kWords; ++i) {
+                    buf[i] = words[i].load(std::memory_order_seq_cst);
+                }
                 if (!seqlock.read_retry(start_seq)) {
+                    std::memcpy(&out, buf, sizeof(T));
                     return true;
                 }
             }
         }
+        return false;
     }
 };
 

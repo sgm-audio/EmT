@@ -11,7 +11,7 @@
 namespace mamba {
 
 static void draw(GuiInstance* g) {
-    if (!g || !g->display || !g->window) return;
+    if (!g || !g->synth || !g->display || !g->window) return;
     XSetForeground(g->display, g->gc, 0x2D2D2D);
     XFillRectangle(g->display, g->window, g->gc, 0, 0, g->width, g->height);
     XSetForeground(g->display, g->gc, 0xFFFFFF);
@@ -39,7 +39,7 @@ static void draw(GuiInstance* g) {
 }
 
 static void pump_events(GuiInstance* g) {
-    if (!g || !g->display || !g->window) return;
+    if (!g || !g->synth || !g->display || !g->window) return;
     XEvent event;
     while (XCheckWindowEvent(g->display, g->window,
            ExposureMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask, &event)) {
@@ -69,7 +69,7 @@ static void pump_events(GuiInstance* g) {
 }
 
 bool gui_backend_is_api_supported(const char* api) {
-    return std::strcmp(api, CLAP_WINDOW_API_X11) == 0;
+    return api && std::strcmp(api, CLAP_WINDOW_API_X11) == 0;
 }
 
 const char* gui_backend_preferred_api() {
@@ -77,23 +77,30 @@ const char* gui_backend_preferred_api() {
 }
 
 bool gui_backend_create(GuiInstance* g) {
+    if (!g) return false;
     g->display = XOpenDisplay(nullptr);
     if (!g->display) return false;
     return true;
 }
 
 void gui_backend_destroy(GuiInstance* g) {
+    if (!g) return;
     if (g->gc && g->display) XFreeGC(g->display, g->gc);
     if (g->window && g->display) XDestroyWindow(g->display, g->window);
     if (g->display) XCloseDisplay(g->display);
+    g->gc = nullptr;
+    g->window = 0;
+    g->display = nullptr;
 }
 
 void gui_backend_set_size(GuiInstance* g, uint32_t w, uint32_t h) {
+    if (!g || !g->display) return;
     if (g->window) XResizeWindow(g->display, g->window, w, h);
     draw(g);
 }
 
 bool gui_backend_set_parent(GuiInstance* g, const clap_window_t* window) {
+    if (!g || !g->display || !window || !window->api) return false;
     if (std::strcmp(window->api, CLAP_WINDOW_API_X11) != 0) return false;
     g->window = XCreateSimpleWindow(g->display, window->x11, 0, 0,
                                     static_cast<unsigned>(g->width), static_cast<unsigned>(g->height),

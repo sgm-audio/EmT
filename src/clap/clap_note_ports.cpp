@@ -11,12 +11,13 @@ return is_input ? 1 : 0;
 
 static bool note_ports_get(const clap_plugin_t* plugin, uint32_t index, bool is_input, clap_note_port_info_t* info) {
 (void)plugin;
-if (!is_input || index != 0) return false;
+if (!info || !is_input || index != 0) return false;
 
+std::memset(info, 0, sizeof(*info));
 info->id = 0;
 info->supported_dialects = CLAP_NOTE_DIALECT_MIDI | CLAP_NOTE_DIALECT_CLAP;
 info->preferred_dialect = CLAP_NOTE_DIALECT_CLAP;
-std::strncpy(info->name, "Note Input", CLAP_NAME_SIZE);
+std::strncpy(info->name, "Note Input", CLAP_NAME_SIZE - 1);
 return true;
 }
 

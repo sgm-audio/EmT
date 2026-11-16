@@ -26,7 +26,9 @@ bool get_preset_directory(char* out, size_t out_size) {
         base = std::string(home) + "/.local/share";
     }
     std::string dir = base + "/clap/presets/com.mamba-ssm.synth";
-    std::filesystem::create_directories(dir);
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) return false;
     std::strncpy(out, dir.c_str(), out_size - 1);
     out[out_size - 1] = '\0';
     return true;
@@ -36,9 +38,11 @@ int scan_presets(const char* dir, char names[][kMaxPresetName], int max_presets)
     int count = 0;
     if (!dir) return 0;
     std::error_code ec;
-    if (!std::filesystem::is_directory(dir, ec)) return 0;
+    if (!std::filesystem::is_directory(dir, ec) || ec) return 0;
     for (auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (!entry.is_regular_file()) continue;
+        if (ec) break;
+        std::error_code file_ec;
+        if (!entry.is_regular_file(file_ec) || file_ec) continue;
         auto path = entry.path();
         if (path.extension() != ".mambapreset" && path.extension() != ".json") continue;
         if (count >= max_presets) break;
@@ -51,10 +55,11 @@ int scan_presets(const char* dir, char names[][kMaxPresetName], int max_presets)
 }
 
 bool resolve_weight_path(const char* path, char* out, size_t out_size) {
-    if (!path || !path[0]) return false;
+    if (!path || !path[0] || !out || out_size == 0) return false;
+    std::error_code ec;
 
     // 1. Try path as-is
-    if (std::filesystem::exists(path)) {
+    if (std::filesystem::exists(path, ec) && !ec) {
         std::strncpy(out, path, out_size - 1);
         out[out_size - 1] = '\0';
         return true;
@@ -64,13 +69,15 @@ bool resolve_weight_path(const char* path, char* out, size_t out_size) {
     char preset_dir[512] = {0};
     if (get_preset_directory(preset_dir, sizeof(preset_dir))) {
         std::string candidate = std::string(preset_dir) + "/" + path;
-        if (std::filesystem::exists(candidate)) {
+        ec.clear();
+        if (std::filesystem::exists(candidate, ec) && !ec) {
             std::strncpy(out, candidate.c_str(), out_size - 1);
             out[out_size - 1] = '\0';
             return true;
         }
         candidate = std::string(preset_dir) + "/../weights/" + path;
-        if (std::filesystem::exists(candidate)) {
+        ec.clear();
+        if (std::filesystem::exists(candidate, ec) && !ec) {
             std::strncpy(out, candidate.c_str(), out_size - 1);
             out[out_size - 1] = '\0';
             return true;
@@ -82,7 +89,8 @@ bool resolve_weight_path(const char* path, char* out, size_t out_size) {
     if (!mwd || !mwd[0]) mwd = std::getenv("MAMBA_WEIGHTS_DIR");
     if (mwd && mwd[0]) {
         std::string candidate = std::string(mwd) + "/" + path;
-        if (std::filesystem::exists(candidate)) {
+        ec.clear();
+        if (std::filesystem::exists(candidate, ec) && !ec) {
             std::strncpy(out, candidate.c_str(), out_size - 1);
             out[out_size - 1] = '\0';
             return true;
@@ -92,7 +100,8 @@ bool resolve_weight_path(const char* path, char* out, size_t out_size) {
     // 4. Try models/ relative to cwd
     {
         std::string candidate = std::string("models/") + path;
-        if (std::filesystem::exists(candidate)) {
+        ec.clear();
+        if (std::filesystem::exists(candidate, ec) && !ec) {
             std::strncpy(out, candidate.c_str(), out_size - 1);
             out[out_size - 1] = '\0';
             return true;

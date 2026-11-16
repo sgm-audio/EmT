@@ -79,7 +79,8 @@ struct alignas(64) Voice {
     float velocity;             // note velocity 0..1
     int32_t key;                // MIDI key
     int32_t channel;            // MIDI channel
-    uint64_t note_id;           // unique note ID for matching note-off
+    int32_t clap_note_id;       // CLAP event note_id (-1 if unspecified)
+    uint64_t note_id;           // unique monotonic ID for voice-steal/recency
 };
 
 // Per-voice snapshot for state save (trivially copyable for seqlock).

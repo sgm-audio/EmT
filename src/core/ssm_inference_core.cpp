@@ -63,6 +63,9 @@ void SSMInferenceCore::reset() {
 
 void SSMInferenceCore::process_sample(float input, float* output, MambaState& state) {
     if (cfg_.num_layers == 0) {
+        if (cfg_.d_model > 1) {
+            std::memset(output, 0, cfg_.d_model * sizeof(float));
+        }
         output[0] = input;
         return;
     }
@@ -81,6 +84,9 @@ void SSMInferenceCore::process_sample(float input, float* output, MambaState& st
 
 void SSMInferenceCore::process_sample(float input, float* output) {
     if (cfg_.num_layers == 0) {
+        if (cfg_.d_model > 1) {
+            std::memset(output, 0, cfg_.d_model * sizeof(float));
+        }
         output[0] = input;
         return;
     }
@@ -99,8 +105,16 @@ void SSMInferenceCore::process_sample(float input, float* output) {
 
 void SSMInferenceCore::process_block(const float* input, float* output, size_t size, MambaState& state) {
     if (cfg_.num_layers == 0) {
-        if (output != input) {
-            std::memcpy(output, input, size * sizeof(float));
+        if (cfg_.d_model == 1) {
+            if (output != input) {
+                std::memcpy(output, input, size * sizeof(float));
+            }
+        } else {
+            for (size_t t = 0; t < size; ++t) {
+                float* dst = output + t * cfg_.d_model;
+                std::memset(dst, 0, cfg_.d_model * sizeof(float));
+                dst[0] = input[t];
+            }
         }
         return;
     }
@@ -110,27 +124,45 @@ void SSMInferenceCore::process_block(const float* input, float* output, size_t s
     }
     alignas(64) float buf_dm[MAX_BLOCK_SIZE * MAX_D_MODEL];
     alignas(64) float buf_mono[MAX_BLOCK_SIZE];
-    layers_[0].process_block(input, buf_dm, size, state.layers[0]);
-    for (size_t i = 1; i < cfg_.num_layers; ++i) {
-        for (size_t t = 0; t < size; ++t) {
-            float sum = 0.0f;
-            for (size_t j = 0; j < cfg_.d_model; ++j) {
-                sum += buf_dm[t * cfg_.d_model + j];
+    size_t offset = 0;
+    while (offset < size) {
+        size_t chunk = size - offset;
+        if (chunk > MAX_BLOCK_SIZE) chunk = MAX_BLOCK_SIZE;
+
+        const float* in_chunk = input + offset;
+        float* out_chunk = output + offset * cfg_.d_model;
+
+        layers_[0].process_block(in_chunk, buf_dm, chunk, state.layers[0]);
+        for (size_t i = 1; i < cfg_.num_layers; ++i) {
+            for (size_t t = 0; t < chunk; ++t) {
+                float sum = 0.0f;
+                for (size_t j = 0; j < cfg_.d_model; ++j) {
+                    sum += buf_dm[t * cfg_.d_model + j];
+                }
+                buf_mono[t] = sum;
             }
-            buf_mono[t] = sum;
+            if (i == cfg_.num_layers - 1) {
+                layers_[i].process_block(buf_mono, out_chunk, chunk, state.layers[i]);
+            } else {
+                layers_[i].process_block(buf_mono, buf_dm, chunk, state.layers[i]);
+            }
         }
-        if (i == cfg_.num_layers - 1) {
-            layers_[i].process_block(buf_mono, output, size, state.layers[i]);
-        } else {
-            layers_[i].process_block(buf_mono, buf_dm, size, state.layers[i]);
-        }
+        offset += chunk;
     }
 }
 
 void SSMInferenceCore::process_block(const float* input, float* output, size_t size) {
     if (cfg_.num_layers == 0) {
-        if (output != input) {
-            std::memcpy(output, input, size * sizeof(float));
+        if (cfg_.d_model == 1) {
+            if (output != input) {
+                std::memcpy(output, input, size * sizeof(float));
+            }
+        } else {
+            for (size_t t = 0; t < size; ++t) {
+                float* dst = output + t * cfg_.d_model;
+                std::memset(dst, 0, cfg_.d_model * sizeof(float));
+                dst[0] = input[t];
+            }
         }
         return;
     }
@@ -140,20 +172,30 @@ void SSMInferenceCore::process_block(const float* input, float* output, size_t s
     }
     alignas(64) float buf_dm[MAX_BLOCK_SIZE * MAX_D_MODEL];
     alignas(64) float buf_mono[MAX_BLOCK_SIZE];
-    layers_[0].process_block(input, buf_dm, size);
-    for (size_t i = 1; i < cfg_.num_layers; ++i) {
-        for (size_t t = 0; t < size; ++t) {
-            float sum = 0.0f;
-            for (size_t j = 0; j < cfg_.d_model; ++j) {
-                sum += buf_dm[t * cfg_.d_model + j];
+    size_t offset = 0;
+    while (offset < size) {
+        size_t chunk = size - offset;
+        if (chunk > MAX_BLOCK_SIZE) chunk = MAX_BLOCK_SIZE;
+
+        const float* in_chunk = input + offset;
+        float* out_chunk = output + offset * cfg_.d_model;
+
+        layers_[0].process_block(in_chunk, buf_dm, chunk);
+        for (size_t i = 1; i < cfg_.num_layers; ++i) {
+            for (size_t t = 0; t < chunk; ++t) {
+                float sum = 0.0f;
+                for (size_t j = 0; j < cfg_.d_model; ++j) {
+                    sum += buf_dm[t * cfg_.d_model + j];
+                }
+                buf_mono[t] = sum;
             }
-            buf_mono[t] = sum;
+            if (i == cfg_.num_layers - 1) {
+                layers_[i].process_block(buf_mono, out_chunk, chunk);
+            } else {
+                layers_[i].process_block(buf_mono, buf_dm, chunk);
+            }
         }
-        if (i == cfg_.num_layers - 1) {
-            layers_[i].process_block(buf_mono, output, size);
-        } else {
-            layers_[i].process_block(buf_mono, buf_dm, size);
-        }
+        offset += chunk;
     }
 }
 

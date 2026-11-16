@@ -18,8 +18,9 @@ static uint32_t params_count(const clap_plugin_t* plugin) {
 }
 
 static bool params_get_info(const clap_plugin_t* plugin, uint32_t param_index, clap_param_info_t* info) {
+    if (!plugin || !info) return false;
     auto* m = get_synth(plugin);
-    if (param_index >= PARAM_COUNT) return false;
+    if (!m || param_index >= PARAM_COUNT) return false;
     std::memset(info, 0, sizeof(*info));
 
     // Range, default, flags, and strings all come from the shared table.
@@ -41,8 +42,9 @@ static bool params_get_info(const clap_plugin_t* plugin, uint32_t param_index, c
 }
 
 static bool params_get_value(const clap_plugin_t* plugin, clap_id param_id, double* out_value) {
+    if (!plugin || param_id >= PARAM_COUNT || !out_value) return false;
     auto* m = get_synth(plugin);
-    if (param_id >= PARAM_COUNT || !out_value) return false;
+    if (!m) return false;
     *out_value = m->param_values[param_id].load(std::memory_order_acquire);
     return true;
 }
@@ -77,18 +79,24 @@ static bool params_text_to_value(const clap_plugin_t* plugin, clap_id param_id, 
 // audio (e.g. when the plugin is not active), we also write directly
 // to the atomics so the host's get_value() reads see the new value.
 static void apply_atom_to_state(MambaSynth* m, const ParamAtom& atom) {
-    if (atom.id >= PARAM_COUNT) return;
-    m->param_values[atom.id].store(atom.value, std::memory_order_release);
-    m->params[atom.id].target.store(atom.value, std::memory_order_release);
+    if (!m || atom.id >= PARAM_COUNT || !std::isfinite(atom.value)) return;
+    const ParamSmooth& p = m->params[atom.id];
+    double value = std::clamp(atom.value, p.min_value, p.max_value);
+    if (p.curve == PARAM_CURVE_STEPPED) {
+        value = value >= 0.5 ? 1.0 : 0.0;
+    }
+    m->param_values[atom.id].store(value, std::memory_order_release);
+    m->params[atom.id].target.store(value, std::memory_order_release);
     if (atom.id == PARAM_BYPASS) {
-        m->bypass_target.store(atom.value > 0.5, std::memory_order_release);
+        m->bypass_target.store(value > 0.5, std::memory_order_release);
     }
 }
 
 static void params_flush(const clap_plugin_t* plugin, const clap_input_events_t* in, const clap_output_events_t* out) {
     (void)out;
+    if (!plugin || !in) return;
     auto* m = get_synth(plugin);
-    if (!in) return;
+    if (!m) return;
 
     const uint32_t count = in->size(in);
     for (uint32_t i = 0; i < count; ++i) {

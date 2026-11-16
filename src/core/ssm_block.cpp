@@ -378,8 +378,10 @@ void SSMBlock::set_weights(const SSMWeights& w) {
     for (size_t r = 0; r < 2 * d_model_; ++r) {
         std::memcpy(weights_.film_proj_w[r], w.film_proj_w[r], d_cond_ * sizeof(float));
     }
-    // dt_film_proj_w: flat copy works (inner dim is COND_DIM, which matches)
-    std::memcpy(weights_.dt_film_proj_w, w.dt_film_proj_w, 2 * nheads_ * d_cond_ * sizeof(float));
+    // Row-by-row for dt_film_proj_w [2*MAX_NHEADS, COND_DIM]
+    for (size_t r = 0; r < 2 * nheads_; ++r) {
+        std::memcpy(weights_.dt_film_proj_w[r], w.dt_film_proj_w[r], d_cond_ * sizeof(float));
+    }
 
     weights_loaded_ = true;
 }

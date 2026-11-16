@@ -17,6 +17,7 @@ static uint32_t audio_ports_count(const clap_plugin_t* plugin, bool is_input) {
 
 static bool audio_ports_get(const clap_plugin_t* plugin, uint32_t index, bool is_input, clap_audio_port_info_t* info) {
     (void)plugin;
+    if (!info) return false;
     std::memset(info, 0, sizeof(*info));
 
     if (is_input) {
@@ -26,7 +27,7 @@ static bool audio_ports_get(const clap_plugin_t* plugin, uint32_t index, bool is
         info->flags = CLAP_AUDIO_PORT_IS_MAIN | CLAP_AUDIO_PORT_SUPPORTS_64BITS;
         info->in_place_pair = 1;
         info->port_type = CLAP_PORT_STEREO;
-        std::strncpy(info->name, "Stereo In", CLAP_NAME_SIZE);
+        std::strncpy(info->name, "Stereo In", CLAP_NAME_SIZE - 1);
     } else {
         if (index >= kNumOutputPorts) return false;
         info->id = 1;
@@ -34,7 +35,7 @@ static bool audio_ports_get(const clap_plugin_t* plugin, uint32_t index, bool is
         info->flags = CLAP_AUDIO_PORT_IS_MAIN | CLAP_AUDIO_PORT_SUPPORTS_64BITS;
         info->in_place_pair = 0;
         info->port_type = CLAP_PORT_STEREO;
-        std::strncpy(info->name, "Stereo Out", CLAP_NAME_SIZE);
+        std::strncpy(info->name, "Stereo Out", CLAP_NAME_SIZE - 1);
     }
     return true;
 }

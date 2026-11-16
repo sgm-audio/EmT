@@ -251,17 +251,14 @@ class Mamba3Block(nn.Module):
         # Step 7: Output projection + D skip + residual
         out = self.out_proj(y_concat)
 
-        # D skip: per-head scalar * x_proj per head
-        x_h = x_proj.view(batch, seq_len, self.nheads, self.headdim)
-        d_skip = (self.D_proj.view(1, 1, -1, 1) * x_h).view(
-            batch, seq_len, self.nheads * self.headdim
-        )
-        # Match d_model: truncate or pad as needed
-        if d_skip.size(-1) < self.d_model:
-            d_skip = F.pad(d_skip, (0, self.d_model - d_skip.size(-1)))
-        elif d_skip.size(-1) > self.d_model:
-            d_skip = d_skip[..., : self.d_model]
-        out = out + d_skip
+        # D skip: channel j's own input x_proj[..., j] for j < min(nheads, d_model)
+        # (matches C++ SSMBlock::step_out_proj_residual and reference_mamba3.py).
+        d_channels = min(self.nheads, self.d_model)
+        if d_channels > 0:
+            d_skip = self.D_proj[:d_channels] * x_proj[..., :d_channels]
+            if d_channels < self.d_model:
+                d_skip = F.pad(d_skip, (0, self.d_model - d_channels))
+            out = out + d_skip
 
         # Residual from FiLM'd input
         out = out + x_film
@@ -289,9 +286,12 @@ class Mamba3Model(nn.Module):
             ]
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        for layer in self.layers:
-            x = layer(x)
+    def forward(self, x: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
+        for idx, layer in enumerate(self.layers):
+            if idx > 0 and x.shape[-1] > 1:
+                # Match C++ SSMInferenceCore inter-layer mono reduction.
+                x = x.sum(dim=-1, keepdim=True).expand_as(x)
+            x = layer(x, cond=cond)
         return x
 
 
@@ -450,7 +450,11 @@ def _random_init(model: Mamba3Model, std: float = 0.02):
 def generate_config_h(
     ds: int, dm: int, di: int, nh: int, hd: int, nl: int, cd: int, mr: int, path: str | None = None
 ) -> str:
-    nra = ds // 2
+    if ds // 2 > MAX_NUM_ROPE_ANGLES:
+        raise ValueError(
+            f"d_state // 2 ({ds // 2}) exceeds MAX_NUM_ROPE_ANGLES ({MAX_NUM_ROPE_ANGLES})"
+        )
+    max_mr = max(int(mr), MAX_MIMO_RANK)
     content = f"""#ifndef CONFIG_H
 #define CONFIG_H
 
@@ -460,12 +464,12 @@ def generate_config_h(
 #define MAX_D_INNER {di}
 #define MAX_HEADDIM {hd}
 #define MAX_NHEADS {nh}
-#define MAX_MIMO_RANK {mr}
+#define MAX_MIMO_RANK {max_mr}
 #define MAX_NUM_BC_HEADS 1
-#define MAX_NUM_ROPE_ANGLES {nra}
+#define MAX_NUM_ROPE_ANGLES {MAX_NUM_ROPE_ANGLES}
 #define MAX_CHUNK_SIZE 128
 #define MAX_LAYERS {nl}
-#define MAX_BLOCK_SIZE 512
+#define MAX_BLOCK_SIZE 4096
 #define MAX_PARAM_ATOMS 256
 #define COND_DIM {cd}
 
