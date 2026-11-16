@@ -82,6 +82,8 @@ private:
     const clap_host_t* host_;
     const clap_host_thread_check_t* ext_;
     std::thread::id main_thread_id_;
+    static_assert(std::atomic<std::thread::id>::is_always_lock_free,
+                  "ThreadCheck requires lock-free std::atomic<std::thread::id>");
     std::atomic<std::thread::id> audio_thread_id_;
     std::atomic<bool> has_audio_id_;
 };

@@ -307,7 +307,6 @@ static TestSynthPtr create_test_synth() {
         }
         slot->bypass_target = false;
         slot->bypass_fade = 0.0f;
-        slot->weight_path[0] = '\0';
         m->state_mirror.end_write();
     }
 

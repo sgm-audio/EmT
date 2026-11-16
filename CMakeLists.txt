@@ -22,7 +22,7 @@ else()
     endif()
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 ${_EMT_ISA_FLAGS} -fno-math-errno -fno-trapping-math -fno-reciprocal-math -fcx-limited-range")
     set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g -fsanitize=address")
-    set(EMT_WARN_FLAGS -Wall -Wextra -Wpedantic)
+    set(EMT_WARN_FLAGS -Wall -Wextra -Wpedantic -Wshadow -Wdouble-promotion -Wfloat-equal)
     # -Werror must be appended AFTER the base flags above (an earlier
     # list(APPEND) was clobbered by this set()).
     if(EMT_WERROR)

@@ -1,5 +1,7 @@
 #include "clap/clap_plugin.h"
 #include <clap/clap.h>
+#include <algorithm>
+#include <cmath>
 
 namespace mamba {
 
@@ -13,12 +15,12 @@ namespace mamba {
 static uint32_t tail_get(const clap_plugin_t* plugin) {
     auto* m = static_cast<MambaSynth*>(plugin->plugin_data);
     if (!m) return 0;
-    // 100ms at the current sample rate, with a small lower bound so
-    // hosts don't think we are tail-less.
     const double sr = m->sample_rate > 1.0 ? m->sample_rate : 48000.0;
-    double tail = 0.100 * sr;
+    const double release_s = m->param_values[PARAM_RELEASE].load(std::memory_order_acquire);
+    const double tail_s = std::max(0.100, (std::isfinite(release_s) && release_s > 0.0) ? release_s : 0.100);
+    double tail = tail_s * sr;
     if (tail < 256.0) tail = 256.0;
-    if (tail > 0xFFFFFFFEu) tail = 0xFFFFFFFEu;
+    if (tail > 4294967294.0) tail = 4294967294.0;
     return static_cast<uint32_t>(tail);
 }
 

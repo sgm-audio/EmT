@@ -115,19 +115,53 @@ void SSMBlock::step_film_conditioning(float input) {
 void SSMBlock::step_in_proj(const float*& z_ptr, const float*& x_ptr,
                             const float*& B_ptr, const float*& C_ptr,
                             const float*& angle_ptr) {
-    size_t in_proj_out_dim = d_inner_ * 2
-                           + nheads_ * mimo_rank_ * d_state_ * 2
-                           + nheads_ * 3
-                           + num_rope_angles_;
-    for (size_t out_idx = 0; out_idx < in_proj_out_dim; ++out_idx) {
-        in_proj_out_[out_idx] = simd::dot_product(
-            weights_.in_proj_w[out_idx], u_film_.data(), d_model_);
+    // weights_.in_proj_w is stored with MAX_MIMO_RANK stride for B and C
+    // (file-layout padding in WeightLoader / SSMWeights). We project only the
+    // active mimo_rank_ rows into the tightly packed in_proj_out_ scratch
+    // buffer so rank-1 models do not waste 4x work or mis-index offsets.
+    size_t dst_idx = 0;
+
+    // 1. z + x (2 * d_inner_)
+    const size_t zx_rows = d_inner_ * 2;
+    for (size_t r = 0; r < zx_rows; ++r) {
+        in_proj_out_[dst_idx++] = simd::dot_product(
+            weights_.in_proj_w[r], u_film_.data(), d_model_);
+    }
+
+    // 2. B (nheads_ * mimo_rank_ * d_state_, read at MAX_MIMO_RANK stride)
+    const size_t b_file_base = zx_rows;
+    const size_t active_bc_per_head = mimo_rank_ * d_state_;
+    const size_t file_bc_per_head = MAX_MIMO_RANK * d_state_;
+    for (size_t h = 0; h < nheads_; ++h) {
+        const size_t src_base = b_file_base + h * file_bc_per_head;
+        for (size_t r = 0; r < active_bc_per_head; ++r) {
+            in_proj_out_[dst_idx++] = simd::dot_product(
+                weights_.in_proj_w[src_base + r], u_film_.data(), d_model_);
+        }
+    }
+
+    // 3. C (nheads_ * mimo_rank_ * d_state_, read at MAX_MIMO_RANK stride)
+    const size_t c_file_base = b_file_base + nheads_ * file_bc_per_head;
+    for (size_t h = 0; h < nheads_; ++h) {
+        const size_t src_base = c_file_base + h * file_bc_per_head;
+        for (size_t r = 0; r < active_bc_per_head; ++r) {
+            in_proj_out_[dst_idx++] = simd::dot_product(
+                weights_.in_proj_w[src_base + r], u_film_.data(), d_model_);
+        }
+    }
+
+    // 4. dd_dt + dd_A + trap (3 * nheads_) + angles (num_rope_angles_)
+    const size_t rest_file_base = c_file_base + nheads_ * file_bc_per_head;
+    const size_t rest_rows = nheads_ * 3 + num_rope_angles_;
+    for (size_t r = 0; r < rest_rows; ++r) {
+        in_proj_out_[dst_idx++] = simd::dot_product(
+            weights_.in_proj_w[rest_file_base + r], u_film_.data(), d_model_);
     }
 
     z_ptr     = in_proj_out_.data();
     x_ptr     = z_ptr + d_inner_;
     B_ptr     = x_ptr + d_inner_;
-    size_t bc_size = nheads_ * mimo_rank_ * d_state_;
+    const size_t bc_size = nheads_ * active_bc_per_head;
     C_ptr     = B_ptr + bc_size;
     const float* dd_dt_ptr = C_ptr + bc_size;
     const float* dd_A_ptr  = dd_dt_ptr + nheads_;
@@ -141,6 +175,8 @@ void SSMBlock::step_preprocess_decay_and_dt(const float* C_ptr) {
     const float* dd_A_ptr  = dd_dt_ptr + nheads_;
 
     static constexpr float A_FLOOR = 1.0f;
+    static constexpr float A_CEIL_MAG = 1e6f;
+    static constexpr float DT_MAX = 1e6f;
     for (size_t h = 0; h < nheads_; ++h) {
         // D4 (closed, documented): A is derived from the input projection and
         // clamped here — a legitimate variant of the Mamba lineage, but NOT the
@@ -148,8 +184,9 @@ void SSMBlock::step_preprocess_decay_and_dt(const float* C_ptr) {
         // Selectivity in this build lives in Δ, B and C.  Do not describe this
         // as the paper's A parameterization in any claim or doc.
         float a_raw = dd_A_ptr[h];
-        float A_t_val = -softplus(a_raw);
-        if (A_t_val > -A_FLOOR) A_t_val = -A_FLOOR;
+        float A_t_val = std::isfinite(a_raw) ? -softplus(a_raw) : -A_FLOOR;
+        if (!(A_t_val <= -A_FLOOR)) A_t_val = -A_FLOOR;
+        if (A_t_val < -A_CEIL_MAG) A_t_val = -A_CEIL_MAG;
 
         float dt_pre = dd_dt_ptr[h] + weights_.dt_bias[h];
 
@@ -165,7 +202,10 @@ void SSMBlock::step_preprocess_decay_and_dt(const float* C_ptr) {
             dt_pre = dt_pre * (1.0f + gamma) + beta;
         }
 
-        DT_t_[h] = softplus(dt_pre);
+        float dt_val = std::isfinite(dt_pre) ? softplus(dt_pre) : 0.0f;
+        if (!(dt_val >= 0.0f)) dt_val = 0.0f;
+        if (dt_val > DT_MAX) dt_val = DT_MAX;
+        DT_t_[h] = dt_val;
         A_t_[h] = A_t_val;
     }
 }
@@ -219,31 +259,41 @@ void SSMBlock::step_rmsnorm_bc(const float* B_ptr, const float* C_ptr,
 }
 
 void SSMBlock::step_rope_bc(SSMState& state, float* B_norm, float* C_norm, const float* angle_ptr) {
-    for (size_t h = 0; h < nheads_; ++h) {
-        for (size_t a = 0; a < num_rope_angles_; ++a) {
-            float angle = state.angle_state[h][a] + angle_ptr[a];
-            angle = std::fmod(angle, 2.0f * PI_f);
+    static constexpr float TWO_PI_f = 2.0f * PI_f;
+    for (size_t a = 0; a < num_rope_angles_; ++a) {
+        const float delta = std::isfinite(angle_ptr[a]) ? angle_ptr[a] : 0.0f;
+        const size_t s0 = a;
+        const size_t s1 = a + num_rope_angles_;
+
+        for (size_t h = 0; h < nheads_; ++h) {
+            float angle = state.angle_state[h][a] + delta;
+            if (!std::isfinite(angle)) {
+                angle = 0.0f;
+            } else if (angle >= TWO_PI_f && angle < 2.0f * TWO_PI_f) {
+                angle -= TWO_PI_f;
+            } else if (angle <= -TWO_PI_f && angle > -2.0f * TWO_PI_f) {
+                angle += TWO_PI_f;
+            } else if (angle >= TWO_PI_f || angle <= -TWO_PI_f) {
+                angle = std::fmod(angle, TWO_PI_f);
+            }
             state.angle_state[h][a] = angle;
 
-            float cos_a = std::cos(angle);
-            float sin_a = std::sin(angle);
+            if (s1 >= d_state_) continue;
+            const float cos_a = std::cos(angle);
+            const float sin_a = std::sin(angle);
 
             for (size_t g = 0; g < num_bc_heads_; ++g) {
                 for (size_t r = 0; r < mimo_rank_; ++r) {
-                    size_t base = (g * nheads_ + h) * mimo_rank_ * d_state_
-                                + r * d_state_;
+                    const size_t base = (g * nheads_ + h) * mimo_rank_ * d_state_
+                                      + r * d_state_;
 
-                    size_t s0 = a;
-                    size_t s1 = a + num_rope_angles_;
-                    if (s1 >= d_state_) continue;
-
-                    float B0 = B_norm[base + s0];
-                    float B1 = B_norm[base + s1];
+                    const float B0 = B_norm[base + s0];
+                    const float B1 = B_norm[base + s1];
                     B_norm[base + s0] = B0 * cos_a - B1 * sin_a;
                     B_norm[base + s1] = B0 * sin_a + B1 * cos_a;
 
-                    float C0 = C_norm[base + s0];
-                    float C1 = C_norm[base + s1];
+                    const float C0 = C_norm[base + s0];
+                    const float C1 = C_norm[base + s1];
                     C_norm[base + s0] = C0 * cos_a + C1 * sin_a;
                     C_norm[base + s1] = -C0 * sin_a + C1 * cos_a;
                 }
@@ -273,8 +323,12 @@ void SSMBlock::step_silu_gate(const float* z_ptr) {
     for (size_t h = 0; h < nheads_; ++h) {
         for (size_t d = 0; d < headdim_; ++d) {
             float z_val = z_ptr[h * headdim_ + d];
-            float z_sig = 1.0f / (1.0f + std::exp(-z_val));
-            float z_gated = z_val * z_sig;
+            if (!std::isfinite(z_val)) z_val = 0.0f;
+            float z_gated = 0.0f;
+            if (z_val >= -80.0f) {
+                const float z_sig = (z_val > 80.0f) ? 1.0f : (1.0f / (1.0f + std::exp(-z_val)));
+                z_gated = z_val * z_sig;
+            }
             y_head_[h * headdim_ + d] *= z_gated;
         }
     }
@@ -298,6 +352,12 @@ void SSMBlock::process_sample(float input, float* output, SSMState& state) {
     if (!weights_loaded_) {
         std::memset(output, 0, d_model_ * sizeof(float));
         return;
+    }
+
+    if (!std::isfinite(input)) {
+        input = 0.0f;
+    } else {
+        input = std::clamp(input, -1e6f, 1e6f);
     }
 
     step_film_conditioning(input);
@@ -335,6 +395,7 @@ void SSMBlock::process_block(const float* input, float* output, size_t size, SSM
         return;
     }
 
+    ScopedFtzDaz ftz_guard;
     for (size_t t = 0; t < size; ++t) {
         process_sample(input[t], output + t * d_model_, state);
     }
@@ -347,7 +408,8 @@ void SSMBlock::process_block(const float* input, float* output, size_t size) {
 void SSMBlock::set_weights(const SSMWeights& w) {
     // Row-by-row copy for in_proj_w: flat memcpy won't work because
     // SSMWeights.in_proj_w has stride MAX_D_MODEL, not d_model.
-    size_t in_proj_rows = d_inner_ * 2 + nheads_ * mimo_rank_ * d_state_ * 2
+    // B/C blocks in w.in_proj_w use MAX_MIMO_RANK file stride.
+    size_t in_proj_rows = d_inner_ * 2 + nheads_ * MAX_MIMO_RANK * d_state_ * 2
                         + nheads_ * 3 + num_rope_angles_;
     for (size_t r = 0; r < in_proj_rows; ++r) {
         std::memcpy(weights_.in_proj_w[r], w.in_proj_w[r], d_model_ * sizeof(float));
@@ -398,7 +460,7 @@ void SSMBlock::set_conditioning(const float* cond_vector) {
         std::memcpy(cond_.data(), cond_vector, n * sizeof(float));
         bool any_nonzero = false;
         for (size_t i = 0; i < n; ++i) {
-            if (cond_[i] != 0.0f) { any_nonzero = true; break; }
+            if (std::fabs(cond_[i]) > 0.0f) { any_nonzero = true; break; }
         }
         conditioning_active_ = any_nonzero;
     } else {

@@ -106,7 +106,6 @@ TEST(StateRoundtrip, SaveLoadSaveIsByteIdentical) {
         }
         slot->bypass_target = a->bypass_target.load(std::memory_order_acquire);
         slot->bypass_fade = 0.0f;
-        std::memset(slot->weight_path, 0, sizeof(slot->weight_path));
         for (uint32_t v = 0; v < MAX_VOICES; ++v) {
             std::memset(&slot->voice_snapshots[v], 0, sizeof(slot->voice_snapshots[v]));
             slot->voice_snapshots[v].key = -1;

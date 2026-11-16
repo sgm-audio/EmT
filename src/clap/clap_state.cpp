@@ -185,8 +185,15 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
     }
     path_buf[path_len] = '\0';
 
-    if (path_len > 0 && std::strcmp(path_buf, m->weight_path) != 0 && !m->load_weights(path_buf))
-        return false;
+    if (path_len > 0 && std::strcmp(path_buf, m->weight_path) != 0) {
+        std::FILE* probe = std::fopen(path_buf, "rb");
+        if (probe) {
+            std::fclose(probe);
+            if (!m->load_weights(path_buf)) return false;
+        } else {
+            m->weights_loaded.store(false, std::memory_order_release);
+        }
+    }
 
     // Apply.
     for (uint32_t i = 0; i < param_count; ++i) {
@@ -257,12 +264,9 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
             }
             slot->bypass_target = m->bypass_target.load(std::memory_order_acquire);
             slot->bypass_fade = m->bypass_fade.load(std::memory_order_relaxed);
-            std::memset(slot->weight_path, 0, sizeof(slot->weight_path));
-            const char* nul = static_cast<const char*>(
-                std::memchr(m->weight_path, '\0', sizeof(slot->weight_path) - 1));
-            const size_t wp_len = nul ? static_cast<size_t>(nul - m->weight_path)
-                                      : sizeof(slot->weight_path) - 1;
-            if (wp_len > 0) std::memcpy(slot->weight_path, m->weight_path, wp_len);
+            for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+                m->mirror_zeroed_count[v] = (m->voices[v].stage == VOICE_IDLE) ? 1 : 0;
+            }
             m->state_mirror.end_write();
             m->state_mirror.swap();
         }

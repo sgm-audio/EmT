@@ -277,7 +277,17 @@ inline float fp16_to_fp32(uint16_t h) {
     uint32_t out;
 
     if (exponent == 0u) {
-        out = sign << 31;
+        if (mantissa == 0u) {
+            out = sign << 31;
+        } else {
+            uint32_t exp32 = 127u - 15u + 1u;
+            while ((mantissa & 0x400u) == 0u) {
+                mantissa <<= 1;
+                --exp32;
+            }
+            mantissa &= 0x3FFu;
+            out = (sign << 31) | (exp32 << 23) | (mantissa << 13);
+        }
     } else if (exponent == 0x1Fu) {
         out = (sign << 31) | 0x7F800000u | (mantissa << 13);
     } else {

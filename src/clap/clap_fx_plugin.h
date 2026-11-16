@@ -31,7 +31,7 @@ struct alignas(64) FxState {
     double sample_rate;
     uint32_t block_size;
     bool is_active;
-    bool is_processing;
+    std::atomic<bool> is_processing{false};
     std::atomic<bool> weights_loaded;
 
     // Param smoothing (shared with synth's infrastructure for simplicity)

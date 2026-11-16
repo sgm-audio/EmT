@@ -81,6 +81,7 @@ struct alignas(64) Voice {
     int32_t channel;            // MIDI channel
     int32_t clap_note_id;       // CLAP event note_id (-1 if unspecified)
     uint64_t note_id;           // unique monotonic ID for voice-steal/recency
+    float last_out[2];          // last stereo output sample for de-click on voice steal
 };
 
 // Per-voice snapshot for state save (trivially copyable for seqlock).
@@ -108,7 +109,6 @@ struct alignas(64) StateMirror {
     double param_values[PARAM_COUNT];
     bool bypass_target;
     float bypass_fade;
-    char weight_path[kMaxWeightPath];
 };
 
 // Per-voice atomic flags visible to the main thread. NOT part of
@@ -137,7 +137,7 @@ struct MambaSynth {
     double sample_rate;
     uint32_t block_size;
     bool is_active;
-    bool is_processing;
+    std::atomic<bool> is_processing{false};
 
     std::atomic<bool> weights_loaded;
 
@@ -162,6 +162,8 @@ struct MambaSynth {
     alignas(64) Voice voices[MAX_VOICES];
     alignas(64) VoiceAtomics voice_atomics[MAX_VOICES];
     uint64_t next_note_id;      // monotonic, for matching note-on/off
+    float steal_residual[2];    // decaying residual on voice steal to avoid clicks
+    uint8_t mirror_zeroed_count[MAX_VOICES]; // tracks double-buffer zeroing of idle voices
 
     static constexpr float VOICE_ATTACK_RATE  = 1.0f / 1024.0f;
     static constexpr float VOICE_RELEASE_RATE = 1.0f / 4096.0f;

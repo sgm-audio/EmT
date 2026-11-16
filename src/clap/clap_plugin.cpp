@@ -83,7 +83,7 @@ static bool plugin_init(const clap_plugin_t* plugin) {
     m->sample_rate = 48000.0;
     m->block_size = 512;
     m->is_active = false;
-    m->is_processing = false;
+    m->is_processing.store(false, std::memory_order_relaxed);
     m->latency = 0;  // Mamba-3: no conv1d
 
     init_param_metadata(m);
@@ -103,6 +103,8 @@ static bool plugin_init(const clap_plugin_t* plugin) {
 
     // Initialize voice pool
     m->next_note_id = 1;
+    m->steal_residual[0] = 0.0f;
+    m->steal_residual[1] = 0.0f;
     for (uint32_t v = 0; v < MAX_VOICES; ++v) {
         auto& voice = m->voices[v];
         std::memset(&voice, 0, sizeof(voice));
@@ -112,6 +114,9 @@ static bool plugin_init(const clap_plugin_t* plugin) {
         voice.clap_note_id = -1;
         voice.attack_rate = MambaSynth::VOICE_ATTACK_RATE;
         voice.release_rate = MambaSynth::VOICE_RELEASE_RATE;
+        voice.last_out[0] = 0.0f;
+        voice.last_out[1] = 0.0f;
+        m->mirror_zeroed_count[v] = 2;
         auto& va = m->voice_atomics[v];
         va.stage.store(VOICE_IDLE, std::memory_order_relaxed);
         va.env.store(0.0f, std::memory_order_relaxed);
@@ -144,7 +149,6 @@ static bool plugin_init(const clap_plugin_t* plugin) {
             }
             slot->bypass_target = false;
             slot->bypass_fade = 0.0f;
-            slot->weight_path[0] = '\0';
             m->state_mirror.end_write();
         }
     }
@@ -209,13 +213,13 @@ static void plugin_deactivate(const clap_plugin_t* plugin) {
 
 static bool plugin_start_processing(const clap_plugin_t* plugin) {
     auto* m = get_synth(plugin);
-    m->is_processing = true;
+    m->is_processing.store(true, std::memory_order_release);
     return true;
 }
 
 static void plugin_stop_processing(const clap_plugin_t* plugin) {
     auto* m = get_synth(plugin);
-    m->is_processing = false;
+    m->is_processing.store(false, std::memory_order_release);
 }
 
 static void plugin_reset(const clap_plugin_t* plugin) {
@@ -310,6 +314,13 @@ static int32_t allocate_voice(MambaSynth* m) {
 static void start_voice(MambaSynth* m, uint32_t v, int32_t key, int32_t channel,
                          int32_t clap_note_id, float velocity, uint64_t note_id) {
     auto& voice = m->voices[v];
+    if (voice.stage != VOICE_IDLE && voice.stage != VOICE_SILENT && voice.env > 0.0f) {
+        const float amp = voice.env * voice.velocity;
+        if (std::isfinite(voice.last_out[0])) m->steal_residual[0] += voice.last_out[0] * amp;
+        if (std::isfinite(voice.last_out[1])) m->steal_residual[1] += voice.last_out[1] * amp;
+    }
+    voice.last_out[0] = 0.0f;
+    voice.last_out[1] = 0.0f;
     // Reset SSM state for this voice
     std::memset(&voice.ssm_state, 0, sizeof(voice.ssm_state));
     voice.env = 0.0f;
@@ -343,11 +354,6 @@ static void start_voice(MambaSynth* m, uint32_t v, int32_t key, int32_t channel,
 static void refresh_conditioning(MambaSynth* m, SSMInferenceCore* core) {
     if (!core) return;
     ConditioningFrame cf{};
-    cf.tempo_bpm = 120.0f;
-    cf.key_sig = 0.0f;
-    std::memset(cf.chord_one_hot, 0, sizeof(cf.chord_one_hot));
-    cf.reserved[0] = 0.0f;
-    cf.reserved[1] = 0.0f;
 
     // Find the most recent active voice for conditioning.
     uint64_t newest_id = 0;
@@ -356,6 +362,7 @@ static void refresh_conditioning(MambaSynth* m, SSMInferenceCore* core) {
         if ((st == VOICE_ATTACK || st == VOICE_SUSTAIN) &&
             m->voices[v].note_id > newest_id) {
             newest_id = m->voices[v].note_id;
+            cf.tempo_bpm = 120.0f;
             int32_t key = m->voices[v].key;
             float vel = m->voices[v].velocity;
             if (key >= 0) {
@@ -374,6 +381,8 @@ static void refresh_conditioning(MambaSynth* m, SSMInferenceCore* core) {
         cf.tempo_bpm = ara_cf.tempo_bpm;
         cf.key_sig = ara_cf.key_sig;
         std::memcpy(cf.chord_one_hot, ara_cf.chord_one_hot, sizeof(cf.chord_one_hot));
+        std::memcpy(cf.f0_probs, ara_cf.f0_probs, sizeof(cf.f0_probs));
+        std::memcpy(cf.semantic, ara_cf.semantic, sizeof(cf.semantic));
     }
 
     core->set_conditioning(&cf.tempo_bpm);
@@ -381,31 +390,40 @@ static void refresh_conditioning(MambaSynth* m, SSMInferenceCore* core) {
 
 // Push a fresh state-mirror snapshot to the double-buffer seqlock. The
 // audio thread calls this at the end of each process() call.
-static void publish_state_mirror(MambaSynth* m) {
+static void publish_state_mirror(MambaSynth* m, uint32_t active_layers) {
     StateMirror* slot = m->state_mirror.begin_write();
     if (!slot) return;
-    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-        slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
-        slot->voice_snapshots[v].env = m->voices[v].env;
-        slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
-        slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
-        slot->voice_snapshots[v].velocity = m->voices[v].velocity;
-        slot->voice_snapshots[v].key = m->voices[v].key;
-        slot->voice_snapshots[v].channel = m->voices[v].channel;
-        slot->voice_snapshots[v].note_id = m->voices[v].note_id;
-        slot->voice_snapshots[v].stage = m->voices[v].stage;
+    const bool has_weights = m->weights_loaded.load(std::memory_order_acquire);
+    const uint32_t nlayers = std::min<uint32_t>(active_layers, MAX_LAYERS);
+    if (has_weights) {
+        for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+            if (m->voices[v].stage != VOICE_IDLE) {
+                for (uint32_t l = 0; l < nlayers; ++l) {
+                    slot->voice_snapshots[v].ssm_state.layers[l] = m->voices[v].ssm_state.layers[l];
+                }
+                slot->voice_snapshots[v].env = m->voices[v].env;
+                slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
+                slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
+                slot->voice_snapshots[v].velocity = m->voices[v].velocity;
+                slot->voice_snapshots[v].key = m->voices[v].key;
+                slot->voice_snapshots[v].channel = m->voices[v].channel;
+                slot->voice_snapshots[v].note_id = m->voices[v].note_id;
+                slot->voice_snapshots[v].stage = m->voices[v].stage;
+                m->mirror_zeroed_count[v] = 0;
+            } else if (m->mirror_zeroed_count[v] < 2) {
+                std::memset(&slot->voice_snapshots[v], 0, sizeof(VoiceSnapshot));
+                slot->voice_snapshots[v].key = -1;
+                slot->voice_snapshots[v].channel = -1;
+                slot->voice_snapshots[v].stage = VOICE_IDLE;
+                ++m->mirror_zeroed_count[v];
+            }
+        }
     }
     for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
         slot->param_values[i] = m->param_values[i].load(std::memory_order_acquire);
     }
     slot->bypass_target = m->bypass_target.load(std::memory_order_acquire);
     slot->bypass_fade = m->bypass_fade.load(std::memory_order_relaxed);
-    std::memset(slot->weight_path, 0, sizeof(slot->weight_path));
-    const char* nul = static_cast<const char*>(
-        std::memchr(m->weight_path, '\0', sizeof(slot->weight_path) - 1));
-    const size_t wp_len = nul ? static_cast<size_t>(nul - m->weight_path)
-                              : sizeof(slot->weight_path) - 1;
-    if (wp_len > 0) std::memcpy(slot->weight_path, m->weight_path, wp_len);
     m->state_mirror.end_write();
     m->state_mirror.swap();
 }
@@ -519,11 +537,36 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
     if ((!out_bus.data32 && !out_bus.data64) || out_bus.channel_count == 0)
         return CLAP_PROCESS_ERROR;
 
+    // Drain any GUI parameter edits queued via param_queue and emit to host.
+    {
+        ParamAtom queued{};
+        while (m->param_queue.pop(queued)) {
+            apply_param_value(m, queued.id, queued.value);
+            if (process->out_events && process->out_events->try_push && queued.id < PARAM_COUNT) {
+                clap_event_param_value_t ev{};
+                ev.header.size = sizeof(ev);
+                ev.header.time = 0;
+                ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+                ev.header.type = CLAP_EVENT_PARAM_VALUE;
+                ev.header.flags = 0;
+                ev.param_id = queued.id;
+                ev.cookie = &m->params[queued.id];
+                ev.note_id = -1;
+                ev.port_index = -1;
+                ev.channel = -1;
+                ev.key = -1;
+                ev.value = m->param_values[queued.id].load(std::memory_order_acquire);
+                process->out_events->try_push(process->out_events, &ev.header);
+            }
+        }
+    }
+
     // Adopt the latest published core for the whole block (stable across the
     // per-sample loop); the main thread may publish a newer one mid-block and
     // we simply pick it up next block (E12).
     SSMInferenceCore* core = m->core.adopt();
     const size_t core_d_model = core ? core->config().d_model : 1;
+    const uint32_t core_num_layers = core ? static_cast<uint32_t>(core->config().num_layers) : 0u;
 
     refresh_conditioning(m, core);
 
@@ -586,25 +629,40 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
         const double target_release = m->params[PARAM_RELEASE].target.load(std::memory_order_relaxed);
         const double target_mix = m->params[PARAM_MIX].target.load(std::memory_order_relaxed);
 
+        float live_attack_rate = compute_envelope_rate(
+            cur_attack, m->params[PARAM_ATTACK].min_value,
+            m->params[PARAM_ATTACK].max_value, m->sample_rate);
+        float live_release_rate = compute_envelope_rate(
+            cur_release, m->params[PARAM_RELEASE].min_value,
+            m->params[PARAM_RELEASE].max_value, m->sample_rate);
+
         for (uint32_t n = sample_pos; n < sub_block_end; ++n) {
             advance_one_pole(cur_gain, target_gain, c_gain);
+            const double prev_attack = cur_attack;
+            const double prev_release = cur_release;
             advance_one_pole(cur_attack, target_attack, c_attack);
             advance_one_pole(cur_release, target_release, c_release);
             advance_one_pole(cur_mix, target_mix, c_mix);
             advance_bypass_machine(bypass_target, fade, bypass_state, 1u, MambaSynth::BYPASS_FADE_RATE);
 
-            const float live_attack_rate = compute_envelope_rate(
-                cur_attack, m->params[PARAM_ATTACK].min_value,
-                m->params[PARAM_ATTACK].max_value, m->sample_rate);
-            const float live_release_rate = compute_envelope_rate(
-                cur_release, m->params[PARAM_RELEASE].min_value,
-                m->params[PARAM_RELEASE].max_value, m->sample_rate);
+            if (std::fabs(cur_attack - prev_attack) > 1e-12) {
+                live_attack_rate = compute_envelope_rate(
+                    cur_attack, m->params[PARAM_ATTACK].min_value,
+                    m->params[PARAM_ATTACK].max_value, m->sample_rate);
+            }
+            if (std::fabs(cur_release - prev_release) > 1e-12) {
+                live_release_rate = compute_envelope_rate(
+                    cur_release, m->params[PARAM_RELEASE].min_value,
+                    m->params[PARAM_RELEASE].max_value, m->sample_rate);
+            }
 
             float dry[2] = {0.0f, 0.0f};
             const uint32_t in_channels = in_bus ? std::min<uint32_t>(in_bus->channel_count, 2) : 0;
             for (uint32_t ch = 0; ch < in_channels; ++ch) {
-                if (in_bus->data32 && in_bus->data32[ch]) dry[ch] = in_bus->data32[ch][n];
-                else if (in_bus->data64 && in_bus->data64[ch]) dry[ch] = static_cast<float>(in_bus->data64[ch][n]);
+                float raw = 0.0f;
+                if (in_bus->data32 && in_bus->data32[ch]) raw = in_bus->data32[ch][n];
+                else if (in_bus->data64 && in_bus->data64[ch]) raw = static_cast<float>(in_bus->data64[ch][n]);
+                dry[ch] = std::isfinite(raw) ? std::clamp(raw, -1e6f, 1e6f) : 0.0f;
             }
             const float mono = in_channels > 1 ? 0.5f * (dry[0] + dry[1]) : dry[0];
             alignas(64) float voice_sum[MAX_D_MODEL]{};
@@ -619,14 +677,36 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
                 if (voice.env <= 0.0f || !core) continue;
                 alignas(64) float outbuf[MAX_D_MODEL]{};
                 core->process_sample(mono, outbuf, voice.ssm_state);
+                voice.last_out[0] = outbuf[0];
+                voice.last_out[1] = (core_d_model > 1) ? outbuf[1] : outbuf[0];
                 const float voice_amp = voice.env * voice.velocity;
                 for (size_t d = 0; d < core_d_model; ++d) {
                     voice_sum[d] += outbuf[d] * voice_amp;
                 }
             }
+            float stereo_wet[2] = {0.0f, 0.0f};
+            if (core_d_model == 1) {
+                stereo_wet[0] = voice_sum[0];
+                stereo_wet[1] = voice_sum[0];
+            } else if (core_d_model == 2) {
+                stereo_wet[0] = voice_sum[0];
+                stereo_wet[1] = voice_sum[1];
+            } else {
+                for (size_t d = 0; d < core_d_model; ++d) {
+                    stereo_wet[d & 1u] += voice_sum[d];
+                }
+                const float norm = 1.0f / static_cast<float>(core_d_model / 2);
+                stereo_wet[0] *= norm;
+                stereo_wet[1] *= norm;
+            }
+            stereo_wet[0] += m->steal_residual[0];
+            stereo_wet[1] += m->steal_residual[1];
+            m->steal_residual[0] *= 0.96f;
+            m->steal_residual[1] *= 0.96f;
+
             for (uint32_t ch = 0; ch < out_bus.channel_count; ++ch) {
                 const float channel_dry = ch < in_channels ? dry[ch] : mono;
-                const float wet = voice_sum[ch < core_d_model ? ch : 0] * static_cast<float>(cur_gain);
+                const float wet = stereo_wet[ch & 1u] * static_cast<float>(cur_gain);
                 const float mixed = channel_dry * static_cast<float>(1.0 - cur_mix)
                                   + wet * static_cast<float>(cur_mix);
                 const float sample = mixed * (1.0f - fade) + channel_dry * fade;
@@ -651,7 +731,7 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
     m->params[PARAM_MIX].current.store(cur_mix, std::memory_order_relaxed);
     m->bypass_fade.store(fade, std::memory_order_relaxed);
     m->bypass_state.store(bypass_state, std::memory_order_relaxed);
-    publish_state_mirror(m);
+    publish_state_mirror(m, core_num_layers);
     return CLAP_PROCESS_CONTINUE;
 }
 // Default behaviour: thread-check is queried from the host, not provided
@@ -735,8 +815,11 @@ bool MambaSynth::load_weights(const char* path) {
     core_cfg.nheads = hdr.nheads;
     core_cfg.headdim = hdr.headdim;
     core_cfg.cond_dim = hdr.cond_dim;
-    if (hdr.version == 2) {
+    if (hdr.version >= 2) {
         core_cfg.num_layers = hdr.num_layers;
+        core_cfg.mimo_rank = hdr.mimo_rank > 0 ? hdr.mimo_rank : 1;
+    } else {
+        core_cfg.mimo_rank = 1;
     }
 
     // Build the new engine fully OFF the audio path, then publish it. The
@@ -780,7 +863,10 @@ const clap_plugin_t* mamba_synth_create(const clap_host_t* host) {
     m->weights_loaded.store(false, std::memory_order_relaxed);
     m->block_size = 512;
     m->is_active = false;
-    m->is_processing = false;
+    m->is_processing.store(false, std::memory_order_relaxed);
+    m->steal_residual[0] = 0.0f;
+    m->steal_residual[1] = 0.0f;
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) m->mirror_zeroed_count[v] = 2;
     m->latency = 0;  // Mamba-3: no conv1d
     m->bypass_target.store(false, std::memory_order_relaxed);
     m->bypass_state.store(BYPASS_PROCESSING, std::memory_order_relaxed);

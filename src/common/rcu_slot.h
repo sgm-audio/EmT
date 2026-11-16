@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstddef>
 #include <vector>
+#include "common/ring_buffer.h"
 
 namespace mamba {
 
@@ -15,7 +16,7 @@ namespace mamba {
 //
 // publish() makes a fully-built heap object visible; the audio thread
 // adopt()s the latest object once per process() block and, when it moves to a
-// new object, reports the one it just left via a retired slot. The writer
+// new object, reports the one it just left via a retired SPSC queue. The writer
 // frees reported objects in reclaim() (called before every publish and on
 // shutdown). No lock, no allocation, no free ever runs on the reader.
 //
@@ -42,7 +43,11 @@ public:
     T* adopt() {
         T* p = published_.load(std::memory_order_acquire);
         if (p != active_) {
-            if (active_) retired_.store(active_, std::memory_order_release);
+            if (active_) {
+                // If the queue is full (64+ swaps without reclaim), active_
+                // remains in hold_ and will be freed by destroy().
+                (void)retired_queue_.push(active_);
+            }
             active_ = p;
         }
         return active_;
@@ -57,11 +62,12 @@ public:
     // Writer (main thread): free objects the reader has reported. Call before
     // each publish and on any main-thread hook (e.g. on_main_thread).
     void reclaim() {
-        T* p = retired_.exchange(nullptr, std::memory_order_acquire);
-        while (p) {
-            remove_from_hold(p);
-            delete p;
-            p = retired_.exchange(nullptr, std::memory_order_acquire);
+        T* p = nullptr;
+        while (retired_queue_.pop(p)) {
+            if (p) {
+                remove_from_hold(p);
+                delete p;
+            }
         }
     }
 
@@ -85,7 +91,7 @@ private:
     }
 
     std::atomic<T*> published_{nullptr};
-    std::atomic<T*> retired_{nullptr};
+    SPSCRingBuffer<T*, 64> retired_queue_;
     T* active_ = nullptr;   // reader only
     std::vector<T*> hold_;  // writer only
 };

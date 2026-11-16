@@ -268,7 +268,7 @@ bool save_preset(MambaSynth* m, const char* path, const char* name) {
     if (!m || !path) return false;
 
     // If not processing, ensure state mirror is synchronized with current synth state
-    if (!m->is_processing) {
+    if (!m->is_processing.load(std::memory_order_acquire)) {
         StateMirror* slot = m->state_mirror.begin_write();
         if (slot) {
             std::memset(slot, 0, sizeof(StateMirror));
@@ -288,7 +288,6 @@ bool save_preset(MambaSynth* m, const char* path, const char* name) {
             }
             slot->bypass_target = m->bypass_target.load(std::memory_order_acquire);
             slot->bypass_fade = m->bypass_fade.load(std::memory_order_relaxed);
-            std::snprintf(slot->weight_path, kMaxWeightPath, "%s", m->weight_path);
             m->state_mirror.end_write();
         }
     }
@@ -329,14 +328,14 @@ bool save_preset(MambaSynth* m, const char* path, const char* name) {
     }
 
     uint32_t path_len = 0;
-    if (mirror.weight_path[0]) {
-        path_len = static_cast<uint32_t>(std::strlen(mirror.weight_path));
+    if (m->weight_path[0]) {
+        path_len = static_cast<uint32_t>(std::strlen(m->weight_path));
         if (path_len >= MambaSynth::MAX_WEIGHT_PATH)
             path_len = MambaSynth::MAX_WEIGHT_PATH - 1;
     }
     ok = ok && file_write_u32(f, path_len);
     if (path_len > 0 && ok)
-        ok = file_write_all(f, mirror.weight_path, path_len);
+        ok = file_write_all(f, m->weight_path, path_len);
 
     uint32_t name_len = name ? static_cast<uint32_t>(std::strlen(name)) : 0;
     if (name_len > kMaxPresetName - 1) name_len = kMaxPresetName - 1;
@@ -426,10 +425,23 @@ bool load_preset(MambaSynth* m, const char* path) {
     std::fclose(f);
     f = nullptr;
 
+    std::memset(m->weight_path, 0, sizeof(m->weight_path));
     if (path_len > 0 && path_buf[0]) {
         char resolved[MambaSynth::MAX_WEIGHT_PATH]{};
-        if (!resolve_weight_path(path_buf, resolved, sizeof(resolved)) ||
-            (std::strcmp(resolved, m->weight_path) != 0 && !m->load_weights(resolved))) return false;
+        if (resolve_weight_path(path_buf, resolved, sizeof(resolved))) {
+            std::snprintf(m->weight_path, sizeof(m->weight_path), "%s", resolved);
+            std::FILE* probe = std::fopen(resolved, "rb");
+            if (probe) {
+                std::fclose(probe);
+                if (!m->load_weights(resolved)) return false;
+            } else {
+                m->weights_loaded.store(false, std::memory_order_release);
+            }
+        } else {
+            m->weights_loaded.store(false, std::memory_order_release);
+        }
+    } else {
+        m->weights_loaded.store(false, std::memory_order_release);
     }
 
     // Apply: parameters
@@ -472,7 +484,7 @@ bool load_preset(MambaSynth* m, const char* path) {
         }
     }
 
-    if (!m->is_processing) {
+    if (!m->is_processing.load(std::memory_order_acquire)) {
         StateMirror* slot = m->state_mirror.begin_write();
         if (slot) {
             std::memset(slot, 0, sizeof(StateMirror));
@@ -481,9 +493,6 @@ bool load_preset(MambaSynth* m, const char* path) {
             }
             slot->bypass_target = (bypass_int != 0);
             slot->bypass_fade = fade;
-            if (path_len > 0) {
-                std::snprintf(slot->weight_path, kMaxWeightPath, "%s", path_buf);
-            }
             for (uint32_t v = 0; v < MAX_VOICES; ++v) {
                 if (h_present) {
                     slot->voice_snapshots[v] = vstates[v];
@@ -562,51 +571,20 @@ std::string build_preset_json(const std::string& name, const std::string& catego
 bool export_preset_json_string(MambaSynth* m, const char* name, const char* category, std::string& out_json) {
     if (!m) return false;
 
-    if (!m->is_processing) {
-        StateMirror* slot = m->state_mirror.begin_write();
-        if (slot) {
-            std::memset(slot, 0, sizeof(StateMirror));
-            for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-                slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
-                slot->voice_snapshots[v].env = m->voices[v].env;
-                slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
-                slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
-                slot->voice_snapshots[v].velocity = m->voices[v].velocity;
-                slot->voice_snapshots[v].key = m->voices[v].key;
-                slot->voice_snapshots[v].channel = m->voices[v].channel;
-                slot->voice_snapshots[v].note_id = m->voices[v].note_id;
-                slot->voice_snapshots[v].stage = m->voices[v].stage;
-            }
-            for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
-                slot->param_values[i] = m->param_values[i].load(std::memory_order_acquire);
-            }
-            slot->bypass_target = m->bypass_target.load(std::memory_order_acquire);
-            slot->bypass_fade = m->bypass_fade.load(std::memory_order_relaxed);
-            std::snprintf(slot->weight_path, kMaxWeightPath, "%s", m->weight_path);
-            m->state_mirror.end_write();
-        }
+    double pv[PARAM_COUNT]{};
+    for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
+        pv[i] = m->param_values[i].load(std::memory_order_acquire);
     }
-
-    auto mirror_ptr = std::unique_ptr<StateMirror>(new (std::nothrow) StateMirror());
-    if (!mirror_ptr) return false;
-    StateMirror& mirror = *mirror_ptr;
-    {
-        constexpr int kMaxRetries = 8;
-        bool ok = false;
-        for (int retry = 0; retry < kMaxRetries; ++retry) {
-            std::memset(&mirror, 0, sizeof(StateMirror));
-            if (m->state_mirror.read(mirror)) { ok = true; break; }
-        }
-        if (!ok) return false;
-    }
+    const bool bypass_target = m->bypass_target.load(std::memory_order_acquire);
+    const float bypass_fade = m->bypass_fade.load(std::memory_order_relaxed);
 
     out_json = build_preset_json(
         name ? name : "",
         category ? category : "",
-        mirror.weight_path,
-        mirror.bypass_target,
-        mirror.bypass_fade,
-        mirror.param_values);
+        m->weight_path,
+        bypass_target,
+        bypass_fade,
+        pv);
     return true;
 }
 
@@ -710,7 +688,7 @@ bool import_preset_json_string(MambaSynth* m, const std::string& json_str) {
         bypass_target ? BYPASS_BYPASSED : BYPASS_PROCESSING,
         std::memory_order_relaxed);
 
-    if (!m->is_processing) {
+    if (!m->is_processing.load(std::memory_order_acquire)) {
         StateMirror* slot = m->state_mirror.begin_write();
         if (slot) {
             std::memset(slot, 0, sizeof(StateMirror));
@@ -730,11 +708,6 @@ bool import_preset_json_string(MambaSynth* m, const std::string& json_str) {
             }
             slot->bypass_target = bypass_target;
             slot->bypass_fade = bypass_fade;
-            if (!weight_path.empty()) {
-                std::snprintf(slot->weight_path, kMaxWeightPath, "%s", weight_path.c_str());
-            } else if (m->weight_path[0]) {
-                std::snprintf(slot->weight_path, kMaxWeightPath, "%s", m->weight_path);
-            }
             m->state_mirror.end_write();
         }
     }

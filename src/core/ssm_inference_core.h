@@ -76,6 +76,8 @@ private:
     SSMBlock* layers_;
     size_t num_constructed_;
     alignas(64) std::array<float, COND_DIM> cond_;
+    alignas(64) std::array<float, MAX_BLOCK_SIZE * MAX_D_MODEL> scratch_dm_{};
+    alignas(64) std::array<float, MAX_BLOCK_SIZE> scratch_mono_{};
 };
 
 } // namespace mamba

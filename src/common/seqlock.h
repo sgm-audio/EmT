@@ -48,12 +48,13 @@ struct Seqlocked {
     alignas(64) std::atomic<uint64_t> words[kWords]{};
     SeqLock seqlock;
 
+#if defined(__SANITIZE_THREAD__)
     void write(const T& value) {
         uint64_t buf[kWords]{};
         std::memcpy(buf, &value, sizeof(T));
         seqlock.write_lock();
         for (size_t i = 0; i < kWords; ++i) {
-            words[i].store(buf[i], std::memory_order_seq_cst);
+            words[i].store(buf[i], std::memory_order_release);
         }
         seqlock.write_unlock();
     }
@@ -64,7 +65,7 @@ struct Seqlocked {
             uint64_t start_seq = 0;
             if (seqlock.read_begin(start_seq)) {
                 for (size_t i = 0; i < kWords; ++i) {
-                    buf[i] = words[i].load(std::memory_order_seq_cst);
+                    buf[i] = words[i].load(std::memory_order_acquire);
                 }
                 if (!seqlock.read_retry(start_seq)) {
                     std::memcpy(&out, buf, sizeof(T));
@@ -74,6 +75,37 @@ struct Seqlocked {
         }
         return false;
     }
+#else
+    void write(const T& value) {
+        uint64_t buf[kWords]{};
+        std::memcpy(buf, &value, sizeof(T));
+        seqlock.write_lock();
+        std::atomic_thread_fence(std::memory_order_release);
+        for (size_t i = 0; i < kWords; ++i) {
+            words[i].store(buf[i], std::memory_order_relaxed);
+        }
+        seqlock.write_unlock();
+    }
+
+    bool read(T& out) const {
+        uint64_t buf[kWords];
+        for (int attempt = 0; attempt < 4096; ++attempt) {
+            uint64_t start_seq = 0;
+            if (seqlock.read_begin(start_seq)) {
+                std::atomic_thread_fence(std::memory_order_acquire);
+                for (size_t i = 0; i < kWords; ++i) {
+                    buf[i] = words[i].load(std::memory_order_relaxed);
+                }
+                std::atomic_thread_fence(std::memory_order_acquire);
+                if (!seqlock.read_retry(start_seq)) {
+                    std::memcpy(&out, buf, sizeof(T));
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+#endif
 };
 
 } // namespace mamba

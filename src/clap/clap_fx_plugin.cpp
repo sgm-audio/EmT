@@ -47,11 +47,13 @@ static bool fx_init(const clap_plugin_t* plugin) {
     auto* f = get_fx(plugin);
     f->core_cfg = MambaConfig::max_config();
     f->core_cfg.num_layers = 1;
-    f->core.publish(new SSMInferenceCore(f->core_cfg));
+    auto* core = new (std::nothrow) SSMInferenceCore(f->core_cfg);
+    if (!core) return false;
+    f->core.publish(core);
     f->sample_rate = 48000.0;
     f->block_size = 512;
     f->is_active = false;
-    f->is_processing = false;
+    f->is_processing.store(false, std::memory_order_relaxed);
 
     init_param_metadata(f);
     for (uint32_t i = 0; i < FX_PARAM_COUNT; ++i) {
@@ -95,13 +97,13 @@ static void fx_deactivate(const clap_plugin_t* plugin) {
 
 static bool fx_start_processing(const clap_plugin_t* plugin) {
     auto* f = get_fx(plugin);
-    f->is_processing = true;
+    f->is_processing.store(true, std::memory_order_release);
     return true;
 }
 
 static void fx_stop_processing(const clap_plugin_t* plugin) {
     auto* f = get_fx(plugin);
-    f->is_processing = false;
+    f->is_processing.store(false, std::memory_order_release);
 }
 
 static void fx_reset(const clap_plugin_t* plugin) {
@@ -178,10 +180,16 @@ static clap_process_status fx_process(const clap_plugin_t* plugin, const clap_pr
     const size_t core_d_model = core ? core->config().d_model : 1;
     double gain = f->params[FX_PARAM_GAIN].current.load(std::memory_order_relaxed);
     double mix = f->params[FX_PARAM_MIX].current.load(std::memory_order_relaxed);
+    const double c_gain = f->params[FX_PARAM_GAIN].coeff;
+    const double c_mix = f->params[FX_PARAM_MIX].coeff;
+    double target_gain = f->params[FX_PARAM_GAIN].target.load(std::memory_order_acquire);
+    double target_mix = f->params[FX_PARAM_MIX].target.load(std::memory_order_acquire);
+    bool bypass = f->params[FX_PARAM_BYPASS].target.load(std::memory_order_acquire) >= 0.5;
     float fade = f->bypass_fade.load(std::memory_order_relaxed);
     const uint32_t event_count = process->in_events ? process->in_events->size(process->in_events) : 0;
     uint32_t event_index = 0;
     for (uint32_t n = 0; n < process->frames_count; ++n) {
+        bool param_updated = false;
         while (event_index < event_count) {
             const clap_event_header_t* hdr = process->in_events->get(process->in_events, event_index);
             if (!hdr) { ++event_index; continue; } if (hdr->time > n) break;
@@ -189,18 +197,24 @@ static clap_process_status fx_process(const clap_plugin_t* plugin, const clap_pr
                 hdr->size >= sizeof(clap_event_param_value_t)) {
                 const auto* ev = reinterpret_cast<const clap_event_param_value_t*>(hdr);
                 apply_param_value(f, ev->param_id, ev->value);
+                param_updated = true;
             }
             ++event_index;
         }
-        const bool bypass = f->params[FX_PARAM_BYPASS].target.load(std::memory_order_relaxed) >= 0.5;
-        f->bypass_target.store(bypass, std::memory_order_relaxed);
+        if (param_updated) {
+            target_gain = f->params[FX_PARAM_GAIN].target.load(std::memory_order_relaxed);
+            target_mix = f->params[FX_PARAM_MIX].target.load(std::memory_order_relaxed);
+            bypass = f->params[FX_PARAM_BYPASS].target.load(std::memory_order_relaxed) >= 0.5;
+        }
         fade = std::clamp(fade + (bypass ? FxState::BYPASS_FADE_RATE : -FxState::BYPASS_FADE_RATE), 0.0f, 1.0f);
-        advance_one_pole(gain, f->params[FX_PARAM_GAIN].target.load(std::memory_order_relaxed), f->params[FX_PARAM_GAIN].coeff);
-        advance_one_pole(mix, f->params[FX_PARAM_MIX].target.load(std::memory_order_relaxed), f->params[FX_PARAM_MIX].coeff);
+        advance_one_pole(gain, target_gain, c_gain);
+        advance_one_pole(mix, target_mix, c_mix);
         float dry[2]{}; const uint32_t nc = in ? std::min<uint32_t>(in->channel_count, 2) : 0;
         for (uint32_t ch=0; ch<nc; ++ch) {
-            if (in->data32 && in->data32[ch]) dry[ch]=in->data32[ch][n];
-            else if (in->data64 && in->data64[ch]) dry[ch]=static_cast<float>(in->data64[ch][n]);
+            float raw = 0.0f;
+            if (in->data32 && in->data32[ch]) raw = in->data32[ch][n];
+            else if (in->data64 && in->data64[ch]) raw = static_cast<float>(in->data64[ch][n]);
+            dry[ch] = std::isfinite(raw) ? std::clamp(raw, -1e6f, 1e6f) : 0.0f;
         }
         const float mono = nc > 1 ? 0.5f*(dry[0]+dry[1]) : dry[0];
         alignas(64) float processed[MAX_D_MODEL]{};
@@ -492,7 +506,7 @@ const clap_plugin_t* mamba_fx_create(const clap_host_t* host) {
     f->weights_loaded.store(false, std::memory_order_relaxed);
     f->block_size = 512;
     f->is_active = false;
-    f->is_processing = false;
+    f->is_processing.store(false, std::memory_order_relaxed);
     f->bypass_target.store(false, std::memory_order_relaxed);
     f->bypass_state.store(BYPASS_PROCESSING, std::memory_order_relaxed);
     f->bypass_fade.store(0.0f, std::memory_order_relaxed);

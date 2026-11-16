@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <algorithm>
 #include <cmath>
 
 namespace mamba {
@@ -53,7 +54,7 @@ static bool params_value_to_text(const clap_plugin_t* plugin, clap_id param_id, 
     auto* m = get_synth(plugin);
     (void)m;  // Metadata now comes from the table; the deref stays as a null-plugin guard.
     if (param_id >= PARAM_COUNT || !out_buffer || out_buffer_capacity == 0) return false;
-    if (value != value) value = 0.0; // NaN guard
+    if (!std::isfinite(value)) value = 0.0; // NaN/Inf guard
 
     const ParamDesc& desc = kSynthParamTable[param_id];
 
@@ -93,11 +94,32 @@ static void apply_atom_to_state(MambaSynth* m, const ParamAtom& atom) {
 }
 
 static void params_flush(const clap_plugin_t* plugin, const clap_input_events_t* in, const clap_output_events_t* out) {
-    (void)out;
-    if (!plugin || !in) return;
+    if (!plugin) return;
     auto* m = get_synth(plugin);
     if (!m) return;
 
+    ParamAtom queued{};
+    while (m->param_queue.pop(queued)) {
+        apply_atom_to_state(m, queued);
+        if (out && out->try_push && queued.id < PARAM_COUNT) {
+            clap_event_param_value_t ev{};
+            ev.header.size = sizeof(ev);
+            ev.header.time = 0;
+            ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+            ev.header.type = CLAP_EVENT_PARAM_VALUE;
+            ev.header.flags = 0;
+            ev.param_id = queued.id;
+            ev.cookie = &m->params[queued.id];
+            ev.note_id = -1;
+            ev.port_index = -1;
+            ev.channel = -1;
+            ev.key = -1;
+            ev.value = m->param_values[queued.id].load(std::memory_order_acquire);
+            out->try_push(out, &ev.header);
+        }
+    }
+
+    if (!in) return;
     const uint32_t count = in->size(in);
     for (uint32_t i = 0; i < count; ++i) {
         const clap_event_header_t* header = in->get(in, i);

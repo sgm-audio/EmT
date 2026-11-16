@@ -122,8 +122,8 @@ void SSMInferenceCore::process_block(const float* input, float* output, size_t s
         layers_[0].process_block(input, output, size, state.layers[0]);
         return;
     }
-    alignas(64) float buf_dm[MAX_BLOCK_SIZE * MAX_D_MODEL];
-    alignas(64) float buf_mono[MAX_BLOCK_SIZE];
+    float* buf_dm = scratch_dm_.data();
+    float* buf_mono = scratch_mono_.data();
     size_t offset = 0;
     while (offset < size) {
         size_t chunk = size - offset;
@@ -170,8 +170,8 @@ void SSMInferenceCore::process_block(const float* input, float* output, size_t s
         layers_[0].process_block(input, output, size);
         return;
     }
-    alignas(64) float buf_dm[MAX_BLOCK_SIZE * MAX_D_MODEL];
-    alignas(64) float buf_mono[MAX_BLOCK_SIZE];
+    float* buf_dm = scratch_dm_.data();
+    float* buf_mono = scratch_mono_.data();
     size_t offset = 0;
     while (offset < size) {
         size_t chunk = size - offset;
@@ -213,11 +213,17 @@ void SSMInferenceCore::set_layer_params(size_t layer, const SSMBlockParams& para
 
 void SSMInferenceCore::set_conditioning(const float* cond_vector) {
     if (cond_vector) {
-        size_t n = std::min(static_cast<size_t>(COND_DIM), cond_.size());
+        const size_t n = std::min(cfg_.cond_dim, cond_.size());
+        std::memset(cond_.data(), 0, cond_.size() * sizeof(float));
         std::memcpy(cond_.data(), cond_vector, n * sizeof(float));
-    }
-    for (size_t i = 0; i < cfg_.num_layers; ++i) {
-        layers_[i].set_conditioning(cond_.data());
+        for (size_t i = 0; i < cfg_.num_layers; ++i) {
+            layers_[i].set_conditioning(cond_.data());
+        }
+    } else {
+        std::memset(cond_.data(), 0, cond_.size() * sizeof(float));
+        for (size_t i = 0; i < cfg_.num_layers; ++i) {
+            layers_[i].set_conditioning(nullptr);
+        }
     }
 }
 

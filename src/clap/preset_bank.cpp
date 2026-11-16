@@ -108,7 +108,7 @@ bool apply_factory_preset(MambaSynth* m, const FactoryPreset* fp) {
         }
     }
 
-    if (!m->is_processing) {
+    if (!m->is_processing.load(std::memory_order_acquire)) {
         StateMirror* slot = m->state_mirror.begin_write();
         if (slot) {
             std::memset(slot, 0, sizeof(StateMirror));
@@ -128,11 +128,6 @@ bool apply_factory_preset(MambaSynth* m, const FactoryPreset* fp) {
             }
             slot->bypass_target = fp->bypass_target;
             slot->bypass_fade = fp->bypass_fade;
-            if (fp->weight_path && fp->weight_path[0]) {
-                std::snprintf(slot->weight_path, kMaxWeightPath, "%s", fp->weight_path);
-            } else if (m->weight_path[0]) {
-                std::snprintf(slot->weight_path, kMaxWeightPath, "%s", m->weight_path);
-            }
             m->state_mirror.end_write();
         }
     }

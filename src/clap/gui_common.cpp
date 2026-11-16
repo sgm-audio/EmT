@@ -8,6 +8,7 @@
 #include "clap/clap_presets.h"
 #include <clap/clap.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <new>
 
@@ -19,13 +20,14 @@ static GuiInstance* gui(const clap_plugin_t* plugin) {
 }
 
 void set_param(GuiInstance* g, clap_id id, double value) {
-    if (!g || id >= PARAM_COUNT) return;
+    if (!g || id >= PARAM_COUNT || !std::isfinite(value)) return;
     ParamSmooth& p = g->synth->params[id];
     value = std::clamp(value, p.min_value, p.max_value);
     if (p.curve == PARAM_CURVE_STEPPED) value = value >= 0.5 ? 1.0 : 0.0;
     g->synth->param_values[id].store(value, std::memory_order_release);
     g->synth->params[id].target.store(value, std::memory_order_release);
     if (id == PARAM_BYPASS) g->synth->bypass_target.store(value > 0.5, std::memory_order_release);
+    (void)g->synth->param_queue.push(ParamAtom{id, value, 0});
     if (g->synth->host && g->synth->host->get_extension) {
         const auto* hp = static_cast<const clap_host_params_t*>(
             g->synth->host->get_extension(g->synth->host, CLAP_EXT_PARAMS));
