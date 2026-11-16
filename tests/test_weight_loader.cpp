@@ -478,3 +478,112 @@ TEST(WeightLoaderPath, DefaultPathIsModuleRelative) {
     EXPECT_NE(std::strcmp(path, "models/test_model.bin"), 0);
     EXPECT_NE(std::strstr(path, "models/test_model.bin"), nullptr);
 }
+
+TEST(WeightLoaderPath, RejectsOverflowAndMisalignedPayloadAndHeadOverflow) {
+    // 1. weight_data_size near UINT64_MAX wraps 64 + q_metadata_size + weight_data_size if unchecked.
+    {
+        test::TempWeightFile tmp("mamba3_wrap_");
+        WeightFileHeader hdr{};
+        hdr.magic = WEIGHT_MAGIC;
+        hdr.version = WEIGHT_VERSION;
+        hdr.d_state = 16; hdr.d_model = 1; hdr.d_inner = 32;
+        hdr.nheads = 2; hdr.num_layers = 1; hdr.headdim = 8;
+        hdr.cond_dim = 4;
+        hdr.quantization = static_cast<uint32_t>(QuantFormat::Int8Tensor);
+        hdr.q_metadata_size = 32;
+        hdr.weight_data_size = std::numeric_limits<uint64_t>::max() - 16ULL;
+        std::FILE* f = std::fopen(tmp.path, "wb");
+        ASSERT_NE(f, nullptr);
+        std::fwrite(&hdr, sizeof(hdr), 1, f);
+        std::vector<uint8_t> zeros(32, 0);
+        std::fwrite(zeros.data(), 1, zeros.size(), f);
+        std::fclose(f);
+
+        WeightLoader loader;
+        EXPECT_EQ(loader.load(tmp.path), LoadError::TruncatedData);
+    }
+
+    // 2. Float32 payload offset misaligned relative to 4-byte float boundary.
+    {
+        test::TempWeightFile tmp("mamba3_align_");
+        WeightFileHeader hdr{};
+        hdr.magic = WEIGHT_MAGIC;
+        hdr.version = WEIGHT_VERSION;
+        hdr.d_state = 16; hdr.d_model = 1; hdr.d_inner = 32;
+        hdr.nheads = 2; hdr.num_layers = 1; hdr.headdim = 8;
+        hdr.cond_dim = 4;
+        hdr.quantization = static_cast<uint32_t>(QuantFormat::Float32);
+        hdr.q_metadata_size = 2;  // forces weight payload to byte offset 66 (unaligned)
+        const uint64_t fpl = test::floats_per_layer_for(
+            hdr.d_state, hdr.d_model, hdr.d_inner, hdr.nheads, hdr.headdim, hdr.cond_dim);
+        hdr.weight_data_size = fpl * sizeof(float);
+        std::FILE* f = std::fopen(tmp.path, "wb");
+        ASSERT_NE(f, nullptr);
+        std::fwrite(&hdr, sizeof(hdr), 1, f);
+        std::vector<uint8_t> zeros(hdr.q_metadata_size + hdr.weight_data_size, 0);
+        std::fwrite(zeros.data(), 1, zeros.size(), f);
+        std::fclose(f);
+
+        WeightLoader loader;
+        EXPECT_EQ(loader.load(tmp.path), LoadError::TruncatedData);
+    }
+
+    // 3. nheads * headdim > d_inner rejected both in fits_in_static_weights_with() and load().
+    {
+        WeightFileHeader hdr{};
+        hdr.magic = WEIGHT_MAGIC;
+        hdr.version = WEIGHT_VERSION;
+        hdr.d_state = 16; hdr.d_model = 1; hdr.d_inner = 16;
+        hdr.nheads = 4; hdr.num_layers = 1; hdr.headdim = 8;
+        hdr.cond_dim = 4;
+        EXPECT_FALSE(WeightLoader::fits_in_static_weights_with(hdr));
+    }
+}
+
+TEST(WeightLoaderPath, DequantizeInt8PerLayerSafeRead) {
+    struct LayerQMetaDisk {
+        float scale;
+        int32_t zero_point;
+        uint8_t reserved[8];
+    };
+    static_assert(sizeof(LayerQMetaDisk) == 16);
+
+    test::TempWeightFile tmp("mamba3_i8pl_");
+    WeightFileHeader hdr{};
+    hdr.magic = WEIGHT_MAGIC;
+    hdr.version = WEIGHT_VERSION;
+    hdr.d_state = 16; hdr.d_model = 2; hdr.d_inner = 16;
+    hdr.nheads = 2; hdr.num_layers = 2; hdr.headdim = 8;
+    hdr.cond_dim = 4;
+    hdr.quantization = static_cast<uint32_t>(QuantFormat::Int8PerLayer);
+    const uint64_t fpl = test::floats_per_layer_for(
+        hdr.d_state, hdr.d_model, hdr.d_inner, hdr.nheads, hdr.headdim, hdr.cond_dim);
+    hdr.q_metadata_size = static_cast<uint32_t>(2 * sizeof(LayerQMetaDisk));
+    hdr.weight_data_size = 2 * fpl;
+
+    std::vector<LayerQMetaDisk> qmeta(2);
+    qmeta[0] = {0.25f, 2, {}};
+    qmeta[1] = {0.50f, -1, {}};
+
+    std::vector<int8_t> qweights(2 * fpl, 0);
+    qweights[0] = 6;              // (6 - 2) * 0.25 = 1.0
+    qweights[fpl] = -5;           // (-5 - (-1)) * 0.50 = -2.0
+
+    std::FILE* f = std::fopen(tmp.path, "wb");
+    ASSERT_NE(f, nullptr);
+    std::fwrite(&hdr, sizeof(hdr), 1, f);
+    std::fwrite(qmeta.data(), sizeof(LayerQMetaDisk), 2, f);
+    std::fwrite(qweights.data(), 1, qweights.size(), f);
+    std::fclose(f);
+
+    WeightLoader loader;
+    ASSERT_EQ(loader.load(tmp.path), LoadError::Ok);
+
+    auto w0 = std::make_unique<SSMWeights>();
+    auto w1 = std::make_unique<SSMWeights>();
+    ASSERT_EQ(loader.dequantize_layer_to(0, *w0), LoadError::Ok);
+    ASSERT_EQ(loader.dequantize_layer_to(1, *w1), LoadError::Ok);
+    EXPECT_FLOAT_EQ(w0->in_proj_w[0][0], 1.0f);
+    EXPECT_FLOAT_EQ(w1->in_proj_w[0][0], -2.0f);
+    loader.unload();
+}

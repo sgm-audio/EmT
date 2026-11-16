@@ -178,3 +178,106 @@ TEST(SSMInferenceCore, ProcessSampleExplicitStateParity) {
     }
 }
 
+TEST(SSMInferenceCore, LargeBlockChunkingMatchesPerSample) {
+    auto core1 = std::make_unique<SSMInferenceCore>();
+    auto core2 = std::make_unique<SSMInferenceCore>();
+    MambaConfig cfg{};
+    cfg.d_state = 16;
+    cfg.d_model = 2;
+    cfg.d_inner = 16;
+    cfg.nheads = 2;
+    cfg.headdim = 8;
+    cfg.mimo_rank = 1;
+    cfg.num_bc_heads = 1;
+    cfg.num_rope_angles = 8;
+    cfg.num_layers = 2;
+    cfg.cond_dim = 4;
+    core1->init(cfg);
+    core2->init(cfg);
+    auto w = make_test_weights();
+    w->dt_film_proj_w[0][0] = 0.25f;
+    w->dt_film_proj_w[2][1] = -0.5f;
+    for (uint32_t layer = 0; layer < cfg.num_layers; ++layer) {
+        core1->set_layer_weights(layer, *w);
+        core2->set_layer_weights(layer, *w);
+    }
+
+    constexpr uint32_t N = MAX_BLOCK_SIZE + 317;
+    std::vector<float> in(N);
+    for (uint32_t i = 0; i < N; ++i) {
+        in[i] = 0.05f * std::sin(0.01f * static_cast<float>(i));
+    }
+    std::vector<float> out_block(N * cfg.d_model, -99.0f);
+    std::vector<float> out_sample(N * cfg.d_model, -99.0f);
+
+    core1->process_block(in.data(), out_block.data(), N);
+    for (uint32_t i = 0; i < N; ++i) {
+        core2->process_sample(in[i], out_sample.data() + i * cfg.d_model);
+    }
+    for (uint32_t i = 0; i < N; ++i) {
+        EXPECT_FLOAT_EQ(out_block[i * cfg.d_model], out_sample[i * cfg.d_model]);
+        EXPECT_FLOAT_EQ(out_block[i * cfg.d_model + 1], out_sample[i * cfg.d_model + 1]);
+    }
+}
+
+TEST(SSMInferenceCore, ZeroLayersZeroesExtraChannels) {
+    auto core = std::make_unique<SSMInferenceCore>();
+    MambaConfig cfg{};
+    cfg.d_state = 16;
+    cfg.d_model = 4;
+    cfg.d_inner = 16;
+    cfg.nheads = 2;
+    cfg.headdim = 8;
+    cfg.mimo_rank = 1;
+    cfg.num_bc_heads = 1;
+    cfg.num_rope_angles = 8;
+    cfg.num_layers = 0;
+    cfg.cond_dim = 4;
+    core->init(cfg);
+    float out[MAX_D_MODEL] = {9.0f, 9.0f, 9.0f, 9.0f};
+    core->process_sample(0.75f, out);
+    EXPECT_FLOAT_EQ(out[0], 0.75f);
+    EXPECT_FLOAT_EQ(out[1], 0.0f);
+    EXPECT_FLOAT_EQ(out[2], 0.0f);
+    EXPECT_FLOAT_EQ(out[3], 0.0f);
+}
+
+TEST(SSMBlockTest, SetWeightsDtFilmCompactStrideCondDim) {
+    // Regression test: SSMBlock::set_weights copies 2 * nheads_ rows of
+    // dt_film_proj_w strided by COND_DIM into compact weights_.dt_film_proj_w
+    // (row h*2+p at (h*2+p) * d_cond_), matching WeightLoader compact layout.
+    SSMBlock block_small_cond(16, 1, 16, 2, 8, 1, 1, 4);
+    SSMBlock block_ref_cond(16, 1, 16, 2, 8, 1, 1, 4);
+
+    auto w_small = make_test_weights();
+    w_small->dt_film_proj_w[0][0] = 1.25f;
+    w_small->dt_film_proj_w[1][3] = -0.5f;
+    w_small->dt_film_proj_w[2][1] = 0.25f;
+    w_small->dt_film_proj_w[3][2] = 0.75f;
+    // Deliberately write non-zero garbage past d_cond=4; it must NOT leak into row 1+!
+    w_small->dt_film_proj_w[0][10] = 99.0f;
+    w_small->dt_film_proj_w[1][10] = -99.0f;
+
+    auto w_clean = make_test_weights();
+    w_clean->dt_film_proj_w[0][0] = 1.25f;
+    w_clean->dt_film_proj_w[1][3] = -0.5f;
+    w_clean->dt_film_proj_w[2][1] = 0.25f;
+    w_clean->dt_film_proj_w[3][2] = 0.75f;
+
+    block_small_cond.set_weights(*w_small);
+    block_ref_cond.set_weights(*w_clean);
+
+    alignas(64) float cond[4] = {1.0f, 0.25f, 0.5f, -1.0f};
+    block_small_cond.set_conditioning(cond);
+    block_ref_cond.set_conditioning(cond);
+
+    alignas(64) float out1[MAX_D_MODEL]{}, out2[MAX_D_MODEL]{};
+    auto s1 = std::make_unique<SSMState>();
+    auto s2 = std::make_unique<SSMState>();
+    std::memset(s1.get(), 0, sizeof(SSMState));
+    std::memset(s2.get(), 0, sizeof(SSMState));
+    block_small_cond.process_sample(0.4f, out1, *s1);
+    block_ref_cond.process_sample(0.4f, out2, *s2);
+    EXPECT_FLOAT_EQ(out1[0], out2[0]);
+}
+

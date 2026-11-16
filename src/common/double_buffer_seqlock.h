@@ -9,66 +9,87 @@
 
 namespace mamba {
 
-// Double-buffer seqlock per ADR-001.
+// Triple-buffer lock-free snapshot exchange per ADR-001.
 //
-// The audio (producer) thread writes to a "back" slot while readers
-// observe the "front" slot. A swap is performed by the main thread
-// (or any non-audio thread) so that the audio thread never blocks.
+// The producer writes to an exclusive non-front slot returned by
+// begin_write() and publishes it atomically on end_write().
+// Readers pin the current front slot while copying it so the producer
+// never overwrites a slot a reader is actively reading, even if the
+// producer laps or swap() is omitted.
 //
 // Pattern:
-//   - producer (audio thread) calls begin_write() to get a reference
-//     to the writable slot, copies/fills it, then calls end_write().
-//   - consumer (main thread) calls read() to get a stable snapshot
-//     of the most recently completed slot. read() is wait-free and
-//     does not block.
-//   - swap() is called by the main thread; it atomically exchanges
-//     the front/back indices and bumps a generation counter so the
-//     audio thread can detect the swap and rebind to the new back.
-//   - On the audio thread, between calls to process(), the producer
-//     is exclusive owner of the back slot, so no synchronization
-//     beyond a release/acquire on the generation is needed inside
-//     the begin/end pair.
+//   - producer calls begin_write() to get an exclusive slot pointer,
+//     populates it, then calls end_write() (swap() is kept for API
+//     compatibility and is an optional no-op after end_write()).
+//   - consumer calls read(out) to obtain a consistent, tear-free
+//     snapshot without blocking.
 class DoubleBufferSeqLockCore {
 public:
-    static constexpr uint32_t kSlots = 2;
+    static constexpr uint32_t kSlots = 3;
 
     // Construct in caller-provided storage. slot_storage must be at
-    // least slot_count * slot_size bytes and aligned to alignof(T).
+    // least kSlots * slot_size bytes and aligned to alignof(T).
     void init(void* slot_storage, size_t slot_size, size_t align) {
         slot_size_ = slot_size;
         slots_ = static_cast<std::byte*>(slot_storage);
-        // zero storage
-        for (size_t i = 0; i < slot_size * kSlots; ++i) {
-            slots_[i] = std::byte{0};
-        }
+        std::memset(slots_, 0, slot_size * kSlots);
         (void)align;
         front_.store(0, std::memory_order_relaxed);
-        writer_.store(0, std::memory_order_relaxed);
+        writer_ = 1;
+        writing_.store(false, std::memory_order_relaxed);
+        for (uint32_t i = 0; i < kSlots; ++i) {
+            readers_[i].store(0, std::memory_order_relaxed);
+        }
         generation_.store(0, std::memory_order_relaxed);
     }
 
     void* begin_write() {
-        return &slots_[writer_.load(std::memory_order_acquire) * slot_size_];
+        bool expected = false;
+        if (!writing_.compare_exchange_strong(expected, true, std::memory_order_acquire)) {
+            return nullptr;
+        }
+        const uint32_t f = front_.load(std::memory_order_seq_cst);
+        for (uint32_t off = 0; off < kSlots; ++off) {
+            const uint32_t candidate = (writer_ + off) % kSlots;
+            if (candidate != f && readers_[candidate].load(std::memory_order_seq_cst) == 0) {
+                writer_ = candidate;
+                return &slots_[candidate * slot_size_];
+            }
+        }
+        writing_.store(false, std::memory_order_release);
+        return nullptr;
     }
 
     void end_write() {
-        uint32_t cur = writer_.load(std::memory_order_relaxed);
-        front_.store(cur, std::memory_order_release);
-        generation_.fetch_add(1, std::memory_order_acq_rel);
+        if (!writing_.load(std::memory_order_acquire)) {
+            return;
+        }
+        const uint32_t published = writer_;
+        writer_ = (published + 1) % kSlots;
+        front_.store(published, std::memory_order_seq_cst);
+        generation_.fetch_add(1, std::memory_order_release);
+        writing_.store(false, std::memory_order_release);
     }
 
     bool read(void* out) const {
-        uint64_t g1 = generation_.load(std::memory_order_acquire);
-        uint32_t f = front_.load(std::memory_order_acquire);
-        std::memcpy(out, &slots_[f * slot_size_], slot_size_);
-        uint64_t g2 = generation_.load(std::memory_order_acquire);
-        return g1 == g2;
+        if (!out) return false;
+        uint32_t f = front_.load(std::memory_order_seq_cst);
+        for (int attempt = 0; attempt < 64; ++attempt) {
+            readers_[f].fetch_add(1, std::memory_order_seq_cst);
+            const uint32_t f2 = front_.load(std::memory_order_seq_cst);
+            if (f2 == f) {
+                std::memcpy(out, &slots_[f * slot_size_], slot_size_);
+                readers_[f].fetch_sub(1, std::memory_order_release);
+                return true;
+            }
+            readers_[f].fetch_sub(1, std::memory_order_release);
+            f = f2;
+        }
+        return false;
     }
 
     void swap() {
-        uint32_t cur = writer_.load(std::memory_order_acquire);
-        uint32_t next = cur ^ 1u;
-        writer_.store(next, std::memory_order_release);
+        // Publication and slot rotation happen atomically in end_write().
     }
 
     uint64_t generation() const {
@@ -80,9 +101,11 @@ public:
 private:
     std::byte* slots_;
     size_t slot_size_;
-    alignas(64) std::atomic<uint32_t> front_;
-    alignas(64) std::atomic<uint32_t> writer_;
-    alignas(64) std::atomic<uint64_t> generation_;
+    uint32_t writer_{1};
+    alignas(64) std::atomic<bool> writing_{false};
+    alignas(64) std::atomic<uint32_t> front_{0};
+    alignas(64) mutable std::atomic<uint32_t> readers_[kSlots]{};
+    alignas(64) std::atomic<uint64_t> generation_{0};
 };
 
 // Typed wrapper. Storage is a fixed-size byte array embedded in the

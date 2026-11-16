@@ -2,6 +2,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
+#include <limits>
 #include <string>
 
 #ifdef _WIN32
@@ -112,7 +113,7 @@ WeightLoader::~WeightLoader() {
 LoadError WeightLoader::load(const char* path) {
     unload();
 
-    char resolved[512];
+    char resolved[1024];
     resolve_path(path, resolved, sizeof(resolved));
     std::snprintf(source_path_, sizeof(source_path_), "%s", resolved);
 
@@ -177,6 +178,10 @@ LoadError WeightLoader::load(const char* path) {
     if (header_->headdim   == 0 || header_->headdim   > MAX_HEADDIM)  { unload(); return LoadError::DimsExceedLimits; }
     if (header_->cond_dim  == 0 || header_->cond_dim  > COND_DIM)     { unload(); return LoadError::DimsExceedLimits; }
     if (header_->num_layers== 0 || header_->num_layers > MAX_LAYERS) { unload(); return LoadError::DimsExceedLimits; }
+    if (static_cast<uint64_t>(header_->nheads) * header_->headdim > header_->d_inner) {
+        unload();
+        return LoadError::DimsExceedLimits;
+    }
 
     // Validate quantization format
     if (header_->quantization > static_cast<uint32_t>(QuantFormat::FP16)) {
@@ -193,22 +198,47 @@ LoadError WeightLoader::load(const char* path) {
         return LoadError::MimoRankRefused;
     }
 
-    // Compute offset of weight data (header + q-metadata)
+    // Compute offset of weight data (header + q-metadata) with overflow-safe
+    // bounds and alignment checks before forming pointers into mapped_data_.
     const uint8_t* base = static_cast<const uint8_t*>(mapped_data_);
-    size_t q_meta_size = header_->q_metadata_size;
-    weight_data_ = base + sizeof(WeightFileHeader) + q_meta_size;
-    weight_data_bytes_ = static_cast<size_t>(header_->weight_data_size);
-
-    // Bounds check
-    size_t needed = sizeof(WeightFileHeader) + q_meta_size + weight_data_bytes_;
-    if (needed > mapped_size_) {
+    const size_t avail_after_header = mapped_size_ - sizeof(WeightFileHeader);
+    const size_t q_meta_size = static_cast<size_t>(header_->q_metadata_size);
+    if (q_meta_size > avail_after_header) {
         unload();
         return LoadError::TruncatedData;
     }
 
-    // Per-layer size validation
-    size_t expected_bpl = bytes_per_layer();
-    size_t expected_total = expected_bpl * header_->num_layers;
+    // Weight payload pointers are cast to float* (Float32) or uint16_t* (FP16).
+    // Header is 64-byte aligned, so alignment depends on q_meta_size.
+    if (quant_format() == QuantFormat::Float32 && (q_meta_size % alignof(float)) != 0) {
+        unload();
+        return LoadError::TruncatedData;
+    }
+    if (quant_format() == QuantFormat::FP16 && (q_meta_size % alignof(uint16_t)) != 0) {
+        unload();
+        return LoadError::TruncatedData;
+    }
+
+    if (header_->weight_data_size > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        unload();
+        return LoadError::TruncatedData;
+    }
+    const size_t avail_after_qmeta = avail_after_header - q_meta_size;
+    if (header_->weight_data_size > static_cast<uint64_t>(avail_after_qmeta)) {
+        unload();
+        return LoadError::TruncatedData;
+    }
+
+    weight_data_ = base + sizeof(WeightFileHeader) + q_meta_size;
+    weight_data_bytes_ = static_cast<size_t>(header_->weight_data_size);
+
+    // Per-layer size validation (overflow-safe)
+    const size_t expected_bpl = bytes_per_layer();
+    if (expected_bpl > std::numeric_limits<size_t>::max() / header_->num_layers) {
+        unload();
+        return LoadError::TruncatedData;
+    }
+    const size_t expected_total = expected_bpl * header_->num_layers;
     if (weight_data_bytes_ < expected_total) {
         unload();
         return LoadError::TruncatedData;
@@ -436,10 +466,10 @@ LoadError WeightLoader::get_tensor_qparam(TensorQParam& out) const {
 
     if (header_->q_metadata_size < sizeof(TensorQMetaRaw)) return LoadError::QMetadataTooSmall;
     const uint8_t* base = static_cast<const uint8_t*>(mapped_data_);
-    const TensorQMetaRaw* m = reinterpret_cast<const TensorQMetaRaw*>(
-        base + sizeof(WeightFileHeader));
-    out.scale = m->scale;
-    out.zero_point = m->zero_point;
+    TensorQMetaRaw m{};
+    std::memcpy(&m, base + sizeof(WeightFileHeader), sizeof(TensorQMetaRaw));
+    out.scale = m.scale;
+    out.zero_point = m.zero_point;
     return LoadError::Ok;
 }
 
@@ -452,10 +482,12 @@ LoadError WeightLoader::get_layer_qparam(uint32_t layer, LayerQParam& out) const
     if (header_->q_metadata_size < needed) return LoadError::QMetadataTooSmall;
 
     const uint8_t* base = static_cast<const uint8_t*>(mapped_data_);
-    const LayerQMetaRaw* m = reinterpret_cast<const LayerQMetaRaw*>(
-        base + sizeof(WeightFileHeader));
-    out.scale = m[layer].scale;
-    out.zero_point = m[layer].zero_point;
+    LayerQMetaRaw m{};
+    std::memcpy(&m,
+                base + sizeof(WeightFileHeader) + static_cast<size_t>(layer) * sizeof(LayerQMetaRaw),
+                sizeof(LayerQMetaRaw));
+    out.scale = m.scale;
+    out.zero_point = m.zero_point;
     return LoadError::Ok;
 }
 

@@ -13,14 +13,18 @@ Usage (invoked by CMake's clap-validator test):
 Exit code mirrors clap-validator.
 """
 
+import glob as _glob
 import os
-import sys
 import shutil
-import subprocess
-import tempfile
 import stat
-import platform
-import sysconfig
+import subprocess
+import sys
+import tempfile
+
+
+def glob(pattern):
+    return _glob.glob(pattern)
+
 
 def find_editbin():
     """Locate editbin.exe via vswhere or common VS paths."""
@@ -29,12 +33,23 @@ def find_editbin():
     if vswhere:
         try:
             out = subprocess.check_output(
-                [vswhere, "-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.VCTools",
-                 "-property", "installationPath"],
-                text=True, stderr=subprocess.DEVNULL
+                [
+                    vswhere,
+                    "-latest",
+                    "-products",
+                    "*",
+                    "-requires",
+                    "Microsoft.VisualStudio.VCTools",
+                    "-property",
+                    "installationPath",
+                ],
+                text=True,
+                stderr=subprocess.DEVNULL,
             ).strip()
             if out:
-                cand = os.path.join(out, "VC", "Tools", "MSVC", "*", "bin", "Hostx64", "x64", "editbin.exe")
+                cand = os.path.join(
+                    out, "VC", "Tools", "MSVC", "*", "bin", "Hostx64", "x64", "editbin.exe"
+                )
                 for path in sorted(glob(cand), reverse=True):
                     if os.path.isfile(path):
                         return path
@@ -48,26 +63,27 @@ def find_editbin():
         os.environ.get("VCINSTALLDIR", ""),
     ]:
         if base:
-            for root, dirs, files in os.walk(base):
+            for root, _dirs, files in os.walk(base):
                 if "editbin.exe" in files:
                     return os.path.join(root, "editbin.exe")
     return None
 
-# Windows-only glob helper
-import glob as _glob
-def glob(pattern):
-    return _glob.glob(pattern)
 
 def patch_stack(exe_path, stack_bytes=16_777_216):
     """Use editbin to set the stack reserve on a PE executable."""
     editbin = find_editbin()
     if not editbin:
         raise RuntimeError("editbin.exe not found; install VS Build Tools")
-    subprocess.check_call([editbin, f"/STACK:{stack_bytes}", exe_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.check_call(
+        [editbin, f"/STACK:{stack_bytes}", exe_path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
 
 def main():
     if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} <clap-validator.exe> <plugin.clap>", file=sys.stderr)
+        print(f"Usage: {sys.argv[0]} <clap-validator> <plugin.clap>", file=sys.stderr)
         return 2
 
     validator_src = sys.argv[1]
@@ -76,9 +92,18 @@ def main():
     if not os.path.isfile(validator_src):
         print(f"clap-validator not found: {validator_src}", file=sys.stderr)
         return 2
-    if not os.path.isdir(plugin_path):
-        print(f"Plugin bundle not found: {plugin_path}", file=sys.stderr)
+    if not os.path.exists(plugin_path):
+        print(f"Plugin not found: {plugin_path}", file=sys.stderr)
         return 2
+
+    if sys.platform != "win32":
+        cmd = [validator_src, "validate", plugin_path]
+        try:
+            result = subprocess.run(cmd, capture_output=False)
+            return result.returncode
+        except FileNotFoundError:
+            print(f"Failed to execute {validator_src}", file=sys.stderr)
+            return 1
 
     # Work in a temp dir so we don't mutate the installed validator
     with tempfile.TemporaryDirectory(prefix="clapv_") as tmp:
@@ -103,6 +128,7 @@ def main():
         except FileNotFoundError:
             print(f"Failed to execute {validator_dst}", file=sys.stderr)
             return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

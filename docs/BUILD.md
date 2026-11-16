@@ -52,9 +52,10 @@ Per-target flags (set in the root `CMakeLists.txt`, not globally):
 - Tests and GTest build with warnings but **with** exceptions/RTTI, which
   GTest and `std::filesystem` fixtures require.
 - MSVC test executables (not the plugin) link with `/STACK:16777216`:
-  `SSMWeights` is ~4 MB at max config and the 1 MB default stack is too small.
-  A plugin can't set the host thread's stack, so `clap_plugin.cpp:624`
-  (`SSMWeights w{}` on the stack) is a known overflow risk in hosts.
+  `SSMWeights` is ~4 MB at max config and the 1 MB default stack is too small
+  if placed on the stack; plugin loaders (`clap_plugin.cpp`, `clap_fx_plugin.cpp`,
+  `clap_state.cpp`, `preset_codec.cpp`) heap-allocate `SSMWeights`,
+  `StateMirror`, and `VoiceSnapshot[]` with `std::nothrow` on non-RT threads.
 
 ## Tests
 
@@ -65,7 +66,7 @@ C++/Python parity test silently skips and a green run proves nothing:
 python3 scripts/reference_mamba3.py --generate --output-dir build
 ```
 
-Then run the suite (125 tests across 10 binaries, plus `clap-validator` when
+Then run the suite (144 tests across 15 binaries, plus `clap-validator` when
 the tool is installed):
 
 ```bash

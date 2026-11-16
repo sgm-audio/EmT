@@ -103,11 +103,6 @@ class AudioMamba(Mamba3Model):
     def num_parameters(self) -> int:
         return sum(int(p.numel()) for p in self.parameters())
 
-    def forward(self, x, cond=None):
-        for layer in self.layers:
-            x = layer(x, cond=cond)
-        return x
-
 
 def make_model(cfg: dict) -> AudioMamba:
     return AudioMamba(
@@ -247,14 +242,14 @@ class AudioWaveDataset(torch.utils.data.IterableDataset):
                 print(f"[skip] {path}: {exc}")
                 continue
             for chunk in frame_waveform(wave, self.seq_len):
-                if self.d_model == 1:
-                    inp = chunk[:-1].reshape(-1, 1)
-                    tgt = chunk[1:].reshape(-1, 1)
-                else:
-                    inp = chunk[:-1]
-                    tgt = chunk[1:]
+                inp = np.repeat(chunk[:-1, None], self.d_model, axis=-1)
+                tgt = np.repeat(chunk[1:, None], self.d_model, axis=-1)
                 cond = np.zeros(self.cond_dim, dtype=np.float32)
-                yield (torch.from_numpy(inp), torch.from_numpy(tgt), torch.from_numpy(cond))
+                yield (
+                    torch.from_numpy(np.ascontiguousarray(inp)),
+                    torch.from_numpy(np.ascontiguousarray(tgt)),
+                    torch.from_numpy(cond),
+                )
 
 
 class PairedAudioDataset(torch.utils.data.IterableDataset):
@@ -366,10 +361,14 @@ class SyntheticDataset(torch.utils.data.IterableDataset):
             t = np.arange(self.seq_len + 1, dtype=np.float32)
             chunk = np.sin(2 * math.pi * freq * t + phase)
             chunk += 0.05 * self.rng.randn(self.seq_len + 1).astype(np.float32)
-            inp = chunk[:-1].reshape(-1, 1) if self.d_model == 1 else chunk[:-1]
-            tgt = chunk[1:].reshape(-1, 1) if self.d_model == 1 else chunk[1:]
+            inp = np.repeat(chunk[:-1, None], self.d_model, axis=-1)
+            tgt = np.repeat(chunk[1:, None], self.d_model, axis=-1)
             cond = np.zeros(self.cond_dim, dtype=np.float32)
-            yield (torch.from_numpy(inp), torch.from_numpy(tgt), torch.from_numpy(cond))
+            yield (
+                torch.from_numpy(np.ascontiguousarray(inp)),
+                torch.from_numpy(np.ascontiguousarray(tgt)),
+                torch.from_numpy(cond),
+            )
 
 
 def collate(batch):
@@ -426,14 +425,52 @@ def train(
         drop_last=True,
     )
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=cfg["lr"],
-        betas=tuple(cfg.get("betas", (0.9, 0.999))),
-        weight_decay=cfg.get("weight_decay", 0.01),
-    )
+    opt_name = str(cfg.get("optimizer", "adamw")).lower()
+    betas = tuple(cfg.get("betas", (0.9, 0.999)))
+    if opt_name == "adamw":
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=cfg["lr"],
+            betas=betas,
+            weight_decay=cfg.get("weight_decay", 0.01),
+        )
+    elif opt_name == "adam":
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=cfg["lr"],
+            betas=betas,
+            weight_decay=cfg.get("weight_decay", 0.0),
+        )
+    else:
+        raise ValueError(f"unsupported optimizer: {opt_name!r}")
 
     grad_accum = max(1, int(cfg.get("grad_accum", 1)))
+    warmup_steps = max(0, int(cfg.get("warmup_steps", 0)))
+    grad_clip = float(cfg.get("grad_clip", 1.0))
+    sched_name = str(cfg.get("scheduler", "none")).lower()
+
+    if sched_name == "cosine":
+        default_steps = cfg["epochs"] * max(1, 1000 // cfg["batch_size"] // grad_accum)
+        total_steps = (
+            max_steps
+            if max_steps is not None
+            else max(1, int(cfg.get("total_steps", default_steps)))
+        )
+
+        def lr_lambda(cur_step: int) -> float:
+            if warmup_steps > 0 and cur_step < warmup_steps:
+                return float(cur_step + 1) / float(warmup_steps)
+            if total_steps <= warmup_steps:
+                return 1.0
+            progress = min(1.0, float(cur_step - warmup_steps) / float(total_steps - warmup_steps))
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    elif sched_name in ("none", "constant", ""):
+        scheduler = None
+    else:
+        raise ValueError(f"unsupported scheduler: {sched_name!r}")
+
     loss_name = cfg.get("loss", "mse")
     criterion = build_loss(loss_name, cfg, device)
     print(
@@ -448,12 +485,15 @@ def train(
         ckpt = torch.load(resume, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt.get("optimizer_state_dict", optimizer.state_dict()))
+        if scheduler is not None and "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         if "scaler_state_dict" in ckpt:
             scaler.load_state_dict(ckpt["scaler_state_dict"])
         step = ckpt.get("step", 0)
         print(f"resumed from {resume} at step {step}")
 
     model.train()
+    optimizer.zero_grad(set_to_none=True)
     start = time.time()
     done = False
     accum = 0
@@ -469,8 +509,13 @@ def train(
             accum += 1
 
             if accum % grad_accum == 0:
+                if grad_clip > 0.0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 scaler.step(optimizer)
                 scaler.update()
+                if scheduler is not None:
+                    scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
                 step += 1
                 accum = 0
@@ -492,16 +537,16 @@ def train(
                     )
 
                 if step % cfg.get("save_every", 1000) == 0:
-                    torch.save(
-                        {
-                            "step": step,
-                            "model_state_dict": model.state_dict(),
-                            "optimizer_state_dict": optimizer.state_dict(),
-                            "scaler_state_dict": scaler.state_dict(),
-                            "config": cfg,
-                        },
-                        output_dir / f"checkpoint_{step:07d}.pt",
-                    )
+                    ckpt_data = {
+                        "step": step,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "scaler_state_dict": scaler.state_dict(),
+                        "config": cfg,
+                    }
+                    if scheduler is not None:
+                        ckpt_data["scheduler_state_dict"] = scheduler.state_dict()
+                    torch.save(ckpt_data, output_dir / f"checkpoint_{step:07d}.pt")
 
                 if max_steps is not None and step >= max_steps:
                     print(f"reached --steps {max_steps}; stopping")
@@ -632,7 +677,7 @@ def main():
         output_dir=Path(args.output_dir),
         dataset_dir=args.dataset_dir,
         device=args.device,
-        use_amp=not args.no_amp,
+        use_amp=bool(cfg.get("amp", True)) and not args.no_amp,
         resume=args.resume,
         max_steps=max_steps,
         validate=args.validate,

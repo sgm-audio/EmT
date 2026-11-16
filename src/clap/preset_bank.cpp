@@ -3,6 +3,7 @@
 // preset_codec.cpp (file/JSON codecs) and preset_paths.cpp (directories).
 #include "clap/clap_presets.h"
 #include <array>
+#include <cstdio>
 #include <cstring>
 
 namespace mamba {
@@ -110,14 +111,27 @@ bool apply_factory_preset(MambaSynth* m, const FactoryPreset* fp) {
     if (!m->is_processing) {
         StateMirror* slot = m->state_mirror.begin_write();
         if (slot) {
+            std::memset(slot, 0, sizeof(StateMirror));
+            for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+                slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
+                slot->voice_snapshots[v].env = m->voices[v].env;
+                slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
+                slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
+                slot->voice_snapshots[v].velocity = m->voices[v].velocity;
+                slot->voice_snapshots[v].key = m->voices[v].key;
+                slot->voice_snapshots[v].channel = m->voices[v].channel;
+                slot->voice_snapshots[v].note_id = m->voices[v].note_id;
+                slot->voice_snapshots[v].stage = m->voices[v].stage;
+            }
             for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
                 slot->param_values[i] = m->param_values[i].load(std::memory_order_acquire);
             }
             slot->bypass_target = fp->bypass_target;
             slot->bypass_fade = fp->bypass_fade;
             if (fp->weight_path && fp->weight_path[0]) {
-                std::strncpy(slot->weight_path, fp->weight_path, kMaxWeightPath - 1);
-                slot->weight_path[kMaxWeightPath - 1] = '\0';
+                std::snprintf(slot->weight_path, kMaxWeightPath, "%s", fp->weight_path);
+            } else if (m->weight_path[0]) {
+                std::snprintf(slot->weight_path, kMaxWeightPath, "%s", m->weight_path);
             }
             m->state_mirror.end_write();
         }

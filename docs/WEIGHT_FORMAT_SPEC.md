@@ -100,9 +100,9 @@ static_assert(sizeof(WeightFileHeader) == 64, "Header must be 64 bytes");
 | `quantization` Code | Enumeration | Quantization Mode | Element Size | `q_metadata_size` | Dequantization Formula |
 |:---:|:---|:---|:---:|:---:|:---|
 | `0` | `QuantFormat::Float32` | Raw Single Precision | 4 bytes | `0` bytes | None (identity) |
-| `1` | `QuantFormat::Int8Tensor` | Per-Tensor Signed Int8 | 1 byte | `8` bytes | $v = (i_8 - 	ext{zp}) 	imes 	ext{scale}$ |
-| `2` | `QuantFormat::Int8PerLayer` | Per-Layer Signed Int8 | 1 byte | $L 	imes 8$ bytes | $v = (i_8 - 	ext{zp}_l) 	imes 	ext{scale}_l$ |
-| `3` | `QuantFormat::FP16` | IEEE 754 Half Precision | 2 bytes | `0` bytes | IEEE 754 binary16 $	o$ binary32 conversion with FTZ |
+| `1` | `QuantFormat::Int8Tensor` | Per-Tensor Signed Int8 | 1 byte | `16` bytes (`float scale`, `int32_t zp`, `8B` pad) | $v = (i_8 - \text{zp}) \times \text{scale}$ |
+| `2` | `QuantFormat::Int8PerLayer` | Per-Layer Signed Int8 | 1 byte | $L \times 16$ bytes | $v = (i_8 - \text{zp}_l) \times \text{scale}_l$ |
+| `3` | `QuantFormat::FP16` | IEEE 754 Half Precision | 2 bytes | `0` bytes | IEEE 754 binary16 $\to$ binary32 conversion with FTZ |
 
 ---
 
@@ -165,16 +165,19 @@ struct WeightLayerPointers {
 
 ## 7. Path Resolution Hierarchy
 
-When loading weights at runtime, the plugin resolves candidates in strict precedence:
+When `WeightLoader::load()` is called (`src/core/weight_loader.cpp`), it resolves candidates in this order:
 
-1. **Explicit Path Argument:** Caller-provided absolute path.
+1. **Explicit Path Argument:** Caller-provided non-empty path.
 2. **`EMT_WEIGHTS` Environment Variable:** System-wide or container-level override.
 3. **`MAMBA_WEIGHTS` Environment Variable:** Backward-compatible fallback.
-4. **`EMT_WEIGHTS_DIR` / `MAMBA_WEIGHTS_DIR`:** Search directory prepended to relative paths.
-5. **Standard User Models Directory:**
-   - Windows: `%APPDATA%/emt/models/model.bin`
-   - Linux: `~/.local/share/emt/models/model.bin`
-6. **Local CWD:** `models/test_model.bin` (fallback for test runners).
+4. **Module-Relative Default:** `<module_dir>/models/test_model.bin` (with `models/test_model.bin` fallback when module dir cannot be determined).
+
+For preset weight resolution (`resolve_weight_path()` in `src/clap/preset_paths.cpp`), relative weight names additionally search:
+
+1. **Explicit Path As-Is.**
+2. **Preset Directory:** `<preset_dir>/<path>` and `<preset_dir>/../weights/<path>`.
+3. **`EMT_WEIGHTS_DIR` / `MAMBA_WEIGHTS_DIR`:** Directory prepended to relative path.
+4. **Local CWD:** `models/<path>`.
 
 ---
 

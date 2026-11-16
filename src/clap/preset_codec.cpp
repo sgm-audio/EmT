@@ -13,6 +13,7 @@
 #include <cmath>
 #include <utility>
 #include <memory>
+#include <new>
 
 namespace mamba {
 
@@ -266,23 +267,34 @@ private:
 bool save_preset(MambaSynth* m, const char* path, const char* name) {
     if (!m || !path) return false;
 
-    // If not processing, ensure state mirror is synchronized with current atomic values
+    // If not processing, ensure state mirror is synchronized with current synth state
     if (!m->is_processing) {
         StateMirror* slot = m->state_mirror.begin_write();
         if (slot) {
+            std::memset(slot, 0, sizeof(StateMirror));
+            for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+                slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
+                slot->voice_snapshots[v].env = m->voices[v].env;
+                slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
+                slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
+                slot->voice_snapshots[v].velocity = m->voices[v].velocity;
+                slot->voice_snapshots[v].key = m->voices[v].key;
+                slot->voice_snapshots[v].channel = m->voices[v].channel;
+                slot->voice_snapshots[v].note_id = m->voices[v].note_id;
+                slot->voice_snapshots[v].stage = m->voices[v].stage;
+            }
             for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
                 slot->param_values[i] = m->param_values[i].load(std::memory_order_acquire);
             }
             slot->bypass_target = m->bypass_target.load(std::memory_order_acquire);
             slot->bypass_fade = m->bypass_fade.load(std::memory_order_relaxed);
-            std::strncpy(slot->weight_path, m->weight_path, kMaxWeightPath - 1);
-            slot->weight_path[kMaxWeightPath - 1] = '\0';
+            std::snprintf(slot->weight_path, kMaxWeightPath, "%s", m->weight_path);
             m->state_mirror.end_write();
         }
     }
 
     // Pull a fresh state mirror from the audio thread.
-    auto mirror_ptr = std::make_unique<StateMirror>();
+    auto mirror_ptr = std::unique_ptr<StateMirror>(new (std::nothrow) StateMirror());
     if (!mirror_ptr) return false;
     StateMirror& mirror = *mirror_ptr;
     {
@@ -356,7 +368,7 @@ bool load_preset(MambaSynth* m, const char* path) {
 
     uint32_t param_count = 0;
     if (!file_read_u32(f, param_count)) return fail();
-    if (param_count > PARAM_COUNT) return fail();
+    if (param_count == 0 || param_count > PARAM_COUNT) return fail();
 
     double pv[PARAM_COUNT] = {0};
     for (uint32_t i = 0; i < param_count; ++i)
@@ -371,7 +383,9 @@ bool load_preset(MambaSynth* m, const char* path) {
     uint32_t h_present = 0;
     if (!file_read_u32(f, h_present) || h_present > 1 || bypass_int > 1) return fail();
 
-    VoiceSnapshot vstates[MAX_VOICES]{};
+    auto vs_ptr = std::unique_ptr<VoiceSnapshot[]>(new (std::nothrow) VoiceSnapshot[MAX_VOICES]());
+    if (!vs_ptr) return fail();
+    VoiceSnapshot* vstates = vs_ptr.get();
     for (uint32_t v = 0; v < MAX_VOICES; ++v) {
         vstates[v].key = -1;
         vstates[v].channel = -1;
@@ -382,9 +396,13 @@ bool load_preset(MambaSynth* m, const char* path) {
         for (uint32_t v = 0; v < MAX_VOICES; ++v) {
             if (version >= kPresetVersion) {
                 if (!file_read_all(f, &vstates[v], sizeof(VoiceSnapshot))) return fail();
+                if (vstates[v].stage > VOICE_SILENT || !std::isfinite(vstates[v].env) ||
+                    !std::isfinite(vstates[v].velocity) ||
+                    !std::isfinite(vstates[v].attack_rate) || vstates[v].attack_rate < 0.0f ||
+                    !std::isfinite(vstates[v].release_rate) || vstates[v].release_rate < 0.0f) return fail();
             } else {
                 if (!file_read_all(f, &vstates[v].ssm_state, sizeof(MambaState))) return fail();
-                if (!file_read_f32(f, vstates[v].env)) return fail();
+                if (!file_read_f32(f, vstates[v].env) || !std::isfinite(vstates[v].env)) return fail();
                 vstates[v].stage = vstates[v].env > 0.0f ? VOICE_SUSTAIN : VOICE_IDLE;
             }
         }
@@ -437,6 +455,7 @@ bool load_preset(MambaSynth* m, const char* path) {
             m->voices[v].velocity = saved.velocity;
             m->voices[v].key = saved.key;
             m->voices[v].channel = saved.channel;
+            m->voices[v].clap_note_id = -1;
             m->voices[v].note_id = saved.note_id;
             m->voices[v].stage = saved.stage;
             m->voice_atomics[v].stage.store(saved.stage, std::memory_order_relaxed);
@@ -456,18 +475,28 @@ bool load_preset(MambaSynth* m, const char* path) {
     if (!m->is_processing) {
         StateMirror* slot = m->state_mirror.begin_write();
         if (slot) {
+            std::memset(slot, 0, sizeof(StateMirror));
             for (uint32_t i = 0; i < param_count; ++i) {
                 slot->param_values[i] = pv[i];
             }
             slot->bypass_target = (bypass_int != 0);
             slot->bypass_fade = fade;
             if (path_len > 0) {
-                std::strncpy(slot->weight_path, path_buf, kMaxWeightPath - 1);
-                slot->weight_path[kMaxWeightPath - 1] = '\0';
+                std::snprintf(slot->weight_path, kMaxWeightPath, "%s", path_buf);
             }
-            if (h_present) {
-                for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+            for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+                if (h_present) {
                     slot->voice_snapshots[v] = vstates[v];
+                } else {
+                    slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
+                    slot->voice_snapshots[v].env = m->voices[v].env;
+                    slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
+                    slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
+                    slot->voice_snapshots[v].velocity = m->voices[v].velocity;
+                    slot->voice_snapshots[v].key = m->voices[v].key;
+                    slot->voice_snapshots[v].channel = m->voices[v].channel;
+                    slot->voice_snapshots[v].note_id = m->voices[v].note_id;
+                    slot->voice_snapshots[v].stage = m->voices[v].stage;
                 }
             }
             m->state_mirror.end_write();
@@ -477,52 +506,23 @@ bool load_preset(MambaSynth* m, const char* path) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// JSON Preset Export / Import
-// ---------------------------------------------------------------------------
-
-bool export_preset_json_string(MambaSynth* m, const char* name, const char* category, std::string& out_json) {
-    if (!m) return false;
-
-    if (!m->is_processing) {
-        StateMirror* slot = m->state_mirror.begin_write();
-        if (slot) {
-            for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
-                slot->param_values[i] = m->param_values[i].load(std::memory_order_acquire);
-            }
-            slot->bypass_target = m->bypass_target.load(std::memory_order_acquire);
-            slot->bypass_fade = m->bypass_fade.load(std::memory_order_relaxed);
-            std::strncpy(slot->weight_path, m->weight_path, kMaxWeightPath - 1);
-            slot->weight_path[kMaxWeightPath - 1] = '\0';
-            m->state_mirror.end_write();
-        }
-    }
-
-    auto mirror_ptr = std::make_unique<StateMirror>();
-    if (!mirror_ptr) return false;
-    StateMirror& mirror = *mirror_ptr;
-    {
-        constexpr int kMaxRetries = 8;
-        bool ok = false;
-        for (int retry = 0; retry < kMaxRetries; ++retry) {
-            std::memset(&mirror, 0, sizeof(StateMirror));
-            if (m->state_mirror.read(mirror)) { ok = true; break; }
-        }
-        if (!ok) return false;
-    }
-
-    const std::string preset_name = name ? name : "";
-    const std::string preset_cat = category ? category : "";
-
-    char buf[2048];
-    std::snprintf(buf, sizeof(buf),
-        "{\n"
-        "  \"format\": \"mamba-preset\",\n"
-        "  \"version\": 2,\n"
-        "  \"name\": \"%s\",\n"
-        "  \"category\": \"%s\",\n"
-        "  \"weight_path\": \"%s\",\n"
-        "  \"bypass\": %s,\n"
+namespace {
+std::string build_preset_json(const std::string& name, const std::string& category,
+                              const std::string& weight_path, bool bypass_target,
+                              float bypass_fade, const double* param_values) {
+    char num_buf[512];
+    std::string out;
+    out.reserve(1024);
+    out += "{\n"
+           "  \"format\": \"mamba-preset\",\n"
+           "  \"version\": 2,\n"
+           "  \"name\": \"" + json_escape(name) + "\",\n"
+           "  \"category\": \"" + json_escape(category) + "\",\n"
+           "  \"weight_path\": \"" + json_escape(weight_path) + "\",\n"
+           "  \"bypass\": ";
+    out += (bypass_target ? "true" : "false");
+    out += ",\n";
+    std::snprintf(num_buf, sizeof(num_buf),
         "  \"bypass_fade\": %.4f,\n"
         "  \"parameters\": {\n"
         "    \"gain\": %.6f,\n"
@@ -539,24 +539,74 @@ bool export_preset_json_string(MambaSynth* m, const char* name, const char* cate
         "    %.6f\n"
         "  ]\n"
         "}\n",
-        json_escape(preset_name).c_str(),
-        json_escape(preset_cat).c_str(),
-        json_escape(mirror.weight_path).c_str(),
-        mirror.bypass_target ? "true" : "false",
-        static_cast<double>(mirror.bypass_fade),
-        mirror.param_values[PARAM_GAIN],
-        mirror.param_values[PARAM_ATTACK],
-        mirror.param_values[PARAM_RELEASE],
-        mirror.param_values[PARAM_MIX],
-        mirror.param_values[PARAM_BYPASS],
-        mirror.param_values[0],
-        mirror.param_values[1],
-        mirror.param_values[2],
-        mirror.param_values[3],
-        mirror.param_values[4]
-    );
+        static_cast<double>(bypass_fade),
+        param_values[PARAM_GAIN],
+        param_values[PARAM_ATTACK],
+        param_values[PARAM_RELEASE],
+        param_values[PARAM_MIX],
+        param_values[PARAM_BYPASS],
+        param_values[0],
+        param_values[1],
+        param_values[2],
+        param_values[3],
+        param_values[4]);
+    out += num_buf;
+    return out;
+}
+} // namespace
 
-    out_json = buf;
+// ---------------------------------------------------------------------------
+// JSON Preset Export / Import
+// ---------------------------------------------------------------------------
+
+bool export_preset_json_string(MambaSynth* m, const char* name, const char* category, std::string& out_json) {
+    if (!m) return false;
+
+    if (!m->is_processing) {
+        StateMirror* slot = m->state_mirror.begin_write();
+        if (slot) {
+            std::memset(slot, 0, sizeof(StateMirror));
+            for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+                slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
+                slot->voice_snapshots[v].env = m->voices[v].env;
+                slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
+                slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
+                slot->voice_snapshots[v].velocity = m->voices[v].velocity;
+                slot->voice_snapshots[v].key = m->voices[v].key;
+                slot->voice_snapshots[v].channel = m->voices[v].channel;
+                slot->voice_snapshots[v].note_id = m->voices[v].note_id;
+                slot->voice_snapshots[v].stage = m->voices[v].stage;
+            }
+            for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
+                slot->param_values[i] = m->param_values[i].load(std::memory_order_acquire);
+            }
+            slot->bypass_target = m->bypass_target.load(std::memory_order_acquire);
+            slot->bypass_fade = m->bypass_fade.load(std::memory_order_relaxed);
+            std::snprintf(slot->weight_path, kMaxWeightPath, "%s", m->weight_path);
+            m->state_mirror.end_write();
+        }
+    }
+
+    auto mirror_ptr = std::unique_ptr<StateMirror>(new (std::nothrow) StateMirror());
+    if (!mirror_ptr) return false;
+    StateMirror& mirror = *mirror_ptr;
+    {
+        constexpr int kMaxRetries = 8;
+        bool ok = false;
+        for (int retry = 0; retry < kMaxRetries; ++retry) {
+            std::memset(&mirror, 0, sizeof(StateMirror));
+            if (m->state_mirror.read(mirror)) { ok = true; break; }
+        }
+        if (!ok) return false;
+    }
+
+    out_json = build_preset_json(
+        name ? name : "",
+        category ? category : "",
+        mirror.weight_path,
+        mirror.bypass_target,
+        mirror.bypass_fade,
+        mirror.param_values);
     return true;
 }
 
@@ -663,14 +713,27 @@ bool import_preset_json_string(MambaSynth* m, const std::string& json_str) {
     if (!m->is_processing) {
         StateMirror* slot = m->state_mirror.begin_write();
         if (slot) {
+            std::memset(slot, 0, sizeof(StateMirror));
+            for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+                slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
+                slot->voice_snapshots[v].env = m->voices[v].env;
+                slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
+                slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
+                slot->voice_snapshots[v].velocity = m->voices[v].velocity;
+                slot->voice_snapshots[v].key = m->voices[v].key;
+                slot->voice_snapshots[v].channel = m->voices[v].channel;
+                slot->voice_snapshots[v].note_id = m->voices[v].note_id;
+                slot->voice_snapshots[v].stage = m->voices[v].stage;
+            }
             for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
                 slot->param_values[i] = pv[i];
             }
             slot->bypass_target = bypass_target;
             slot->bypass_fade = bypass_fade;
             if (!weight_path.empty()) {
-                std::strncpy(slot->weight_path, weight_path.c_str(), kMaxWeightPath - 1);
-                slot->weight_path[kMaxWeightPath - 1] = '\0';
+                std::snprintf(slot->weight_path, kMaxWeightPath, "%s", weight_path.c_str());
+            } else if (m->weight_path[0]) {
+                std::snprintf(slot->weight_path, kMaxWeightPath, "%s", m->weight_path);
             }
             m->state_mirror.end_write();
         }
@@ -714,48 +777,13 @@ bool import_preset_json(MambaSynth* m, const char* path) {
 }
 
 bool export_factory_preset_json(const FactoryPreset& fp, std::string& out_json) {
-    char buf[2048];
-    std::snprintf(buf, sizeof(buf),
-        "{\n"
-        "  \"format\": \"mamba-preset\",\n"
-        "  \"version\": 2,\n"
-        "  \"name\": \"%s\",\n"
-        "  \"category\": \"%s\",\n"
-        "  \"weight_path\": \"%s\",\n"
-        "  \"bypass\": %s,\n"
-        "  \"bypass_fade\": %.4f,\n"
-        "  \"parameters\": {\n"
-        "    \"gain\": %.6f,\n"
-        "    \"attack\": %.6f,\n"
-        "    \"release\": %.6f,\n"
-        "    \"mix\": %.6f,\n"
-        "    \"bypass\": %.6f\n"
-        "  },\n"
-        "  \"param_values\": [\n"
-        "    %.6f,\n"
-        "    %.6f,\n"
-        "    %.6f,\n"
-        "    %.6f,\n"
-        "    %.6f\n"
-        "  ]\n"
-        "}\n",
-        json_escape(fp.name ? fp.name : "").c_str(),
-        json_escape(fp.category ? fp.category : "").c_str(),
-        json_escape(fp.weight_path ? fp.weight_path : "").c_str(),
-        fp.bypass_target ? "true" : "false",
-        static_cast<double>(fp.bypass_fade),
-        fp.param_values[PARAM_GAIN],
-        fp.param_values[PARAM_ATTACK],
-        fp.param_values[PARAM_RELEASE],
-        fp.param_values[PARAM_MIX],
-        fp.param_values[PARAM_BYPASS],
-        fp.param_values[0],
-        fp.param_values[1],
-        fp.param_values[2],
-        fp.param_values[3],
-        fp.param_values[4]
-    );
-    out_json = buf;
+    out_json = build_preset_json(
+        fp.name ? fp.name : "",
+        fp.category ? fp.category : "",
+        fp.weight_path ? fp.weight_path : "",
+        fp.bypass_target,
+        fp.bypass_fade,
+        fp.param_values.data());
     return true;
 }
 

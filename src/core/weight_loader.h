@@ -225,6 +225,7 @@ public:
                hdr.d_inner    > 0 && hdr.d_inner    <= MAX_D_INNER  &&
                hdr.nheads     > 0 && hdr.nheads     <= MAX_NHEADS   &&
                hdr.headdim    > 0 && hdr.headdim    <= MAX_HEADDIM  &&
+               static_cast<uint64_t>(hdr.nheads) * hdr.headdim <= hdr.d_inner &&
                hdr.cond_dim   > 0 && hdr.cond_dim   <= COND_DIM     &&
                hdr.num_layers > 0 && hdr.num_layers <= MAX_LAYERS   &&
                // Deviation D3: a rank-R file must not look loadable.
@@ -258,7 +259,7 @@ private:
     const uint8_t* weight_data_;
     size_t weight_data_bytes_;
 
-    char source_path_[512];
+    char source_path_[1024];
 
     size_t elem_size() const;
     size_t bytes_per_layer() const;

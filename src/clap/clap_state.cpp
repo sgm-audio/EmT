@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <algorithm>
 #include <cmath>
+#include <memory>
+#include <new>
 
 namespace mamba {
 
@@ -66,7 +68,9 @@ static bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream
     const bool h_present = m->weights_loaded.load(std::memory_order_acquire);
     if (!stream_write_u32(stream, h_present ? 1u : 0u)) return false;
     if (h_present) {
-        StateMirror mirror{};
+        auto mirror_ptr = std::unique_ptr<StateMirror>(new (std::nothrow) StateMirror());
+        if (!mirror_ptr) return false;
+        StateMirror& mirror = *mirror_ptr;
         constexpr int kMaxRetries = 8;
         bool ok = false;
         for (int retry = 0; retry < kMaxRetries; ++retry) {
@@ -141,7 +145,9 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
     uint32_t h_present = 0;
     if (!stream_read_u32(stream, h_present) || h_present > 1 || bypass_int > 1) return false;
 
-    VoiceSnapshot voice_states[MAX_VOICES]{};
+    auto voice_states_ptr = std::unique_ptr<VoiceSnapshot[]>(new (std::nothrow) VoiceSnapshot[MAX_VOICES]());
+    if (!voice_states_ptr) return false;
+    VoiceSnapshot* voice_states = voice_states_ptr.get();
     for (uint32_t v = 0; v < MAX_VOICES; ++v) {
         voice_states[v].key = -1;
         voice_states[v].channel = -1;
@@ -153,12 +159,14 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
             for (uint32_t v = 0; v < num_voices; ++v) {
                 if (!stream_read_all(stream, &voice_states[v], sizeof(VoiceSnapshot))) return false;
                 if (voice_states[v].stage > VOICE_SILENT || !std::isfinite(voice_states[v].env) ||
-                    !std::isfinite(voice_states[v].velocity)) return false;
+                    !std::isfinite(voice_states[v].velocity) ||
+                    !std::isfinite(voice_states[v].attack_rate) || voice_states[v].attack_rate < 0.0f ||
+                    !std::isfinite(voice_states[v].release_rate) || voice_states[v].release_rate < 0.0f) return false;
             }
         } else if (schema == kStateSchemaV2) {
             for (uint32_t v = 0; v < num_voices; ++v) {
                 if (!stream_read_all(stream, &voice_states[v].ssm_state, sizeof(MambaState))) return false;
-                if (!stream_read_f32(stream, voice_states[v].env)) return false;
+                if (!stream_read_f32(stream, voice_states[v].env) || !std::isfinite(voice_states[v].env)) return false;
                 voice_states[v].stage = voice_states[v].env > 0.0f ? VOICE_SUSTAIN : VOICE_IDLE;
             }
         } else {
@@ -203,6 +211,7 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
             m->voices[v].velocity = saved.velocity;
             m->voices[v].key = saved.key;
             m->voices[v].channel = saved.channel;
+            m->voices[v].clap_note_id = -1;
             m->voices[v].note_id = saved.note_id;
             m->voices[v].stage = saved.stage;
             m->voice_atomics[v].stage.store(saved.stage, std::memory_order_relaxed);
@@ -231,26 +240,32 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
     // per the CLAP contract); mirrors the field set of publish_state_mirror.
     {
         StateMirror* slot = m->state_mirror.begin_write();
-        for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-            slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
-            slot->voice_snapshots[v].env = m->voices[v].env;
-            slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
-            slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
-            slot->voice_snapshots[v].velocity = m->voices[v].velocity;
-            slot->voice_snapshots[v].key = m->voices[v].key;
-            slot->voice_snapshots[v].channel = m->voices[v].channel;
-            slot->voice_snapshots[v].note_id = m->voices[v].note_id;
-            slot->voice_snapshots[v].stage = m->voices[v].stage;
+        if (slot) {
+            for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+                slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
+                slot->voice_snapshots[v].env = m->voices[v].env;
+                slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
+                slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
+                slot->voice_snapshots[v].velocity = m->voices[v].velocity;
+                slot->voice_snapshots[v].key = m->voices[v].key;
+                slot->voice_snapshots[v].channel = m->voices[v].channel;
+                slot->voice_snapshots[v].note_id = m->voices[v].note_id;
+                slot->voice_snapshots[v].stage = m->voices[v].stage;
+            }
+            for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
+                slot->param_values[i] = m->param_values[i].load(std::memory_order_acquire);
+            }
+            slot->bypass_target = m->bypass_target.load(std::memory_order_acquire);
+            slot->bypass_fade = m->bypass_fade.load(std::memory_order_relaxed);
+            std::memset(slot->weight_path, 0, sizeof(slot->weight_path));
+            const char* nul = static_cast<const char*>(
+                std::memchr(m->weight_path, '\0', sizeof(slot->weight_path) - 1));
+            const size_t wp_len = nul ? static_cast<size_t>(nul - m->weight_path)
+                                      : sizeof(slot->weight_path) - 1;
+            if (wp_len > 0) std::memcpy(slot->weight_path, m->weight_path, wp_len);
+            m->state_mirror.end_write();
+            m->state_mirror.swap();
         }
-        for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
-            slot->param_values[i] = m->param_values[i].load(std::memory_order_acquire);
-        }
-        slot->bypass_target = m->bypass_target.load(std::memory_order_acquire);
-        slot->bypass_fade = m->bypass_fade.load(std::memory_order_relaxed);
-        std::memset(slot->weight_path, 0, sizeof(slot->weight_path));
-        std::memcpy(slot->weight_path, m->weight_path, std::strlen(m->weight_path));
-        m->state_mirror.end_write();
-        m->state_mirror.swap();
     }
 
     // Parameter values changed outside the flush/process path, so tell the

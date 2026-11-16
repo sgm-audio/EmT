@@ -360,7 +360,7 @@ class ReferenceForward:
             if self.conditioning_active:
                 gamma = 0.0
                 beta = 0.0
-                for k in range(w.d_cond):
+                for k in range(h.cond_dim):
                     gamma += w.dt_film_proj_w[2 * h_idx, k] * self.cond[k]
                     beta += w.dt_film_proj_w[2 * h_idx + 1, k] * self.cond[k]
                 dt_pre = dt_pre * (1.0 + gamma) + beta

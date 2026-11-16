@@ -238,7 +238,8 @@ def check_d3(build_dir: Path, no_build_checks: bool) -> Result:
         ("fits_in_static_weights_with() rejects rank-R headers", "mimo_rank <= 1" in loader_h),
         (
             "exporter writes the field and refuses rank-R",
-            "mr, 0)" in fmt and "mimo_rank={mr} is not supported" in exporter,
+            re.search(r"\bmr,\s*0,?\s*\)", fmt) is not None
+            and "mimo_rank={mr} is not supported" in exporter,
         ),
         ("trainer refuses a rank-R config up front", 'cfg.get("mimo_rank", 1)' in trainer),
     ]

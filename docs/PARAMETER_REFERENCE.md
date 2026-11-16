@@ -109,7 +109,7 @@ On each sample \(n\):
 $$\text{env}[n] = \text{env}[n-1] + \text{attack\_rate}$$
 When \(\text{env}[n] \ge 1.0\), the envelope saturates to \(1.0\) and transitions to `VOICE_SUSTAIN`.
 
-> **Shipped behavior (O10, found in #8):** the `attack_time` → `attack_rate` formula above is the *intended* mapping, not the wired one. `start_voice()` assigns the fixed constant `VOICE_ATTACK_RATE` (1/1024 per sample); the `PARAM_ATTACK` value is accepted, range-checked, stored, and has smoothing state allocated, but its smoothed value is never stepped in `process()` and nothing reads it. The per-sample step itself is `voice_envelope_step()` in `src/dsp/voice_envelope.h`, which takes the rates as parameters -- wiring the knob is a rate computation at the call site (Phase 2).
+> **Wired behavior (updated):** `PARAM_ATTACK` is smoothed in `plugin_process()` with its 20 ms one-pole smoother and converted to `attack_rate = 1.0f / max(1.0f, attack_s * sample_rate)` at voice start and per sample inside `voice_envelope_step()` (`src/dsp/voice_envelope.h`). `VOICE_ATTACK_RATE` remains as the pre-activation fallback constant.
 
 ---
 
@@ -145,7 +145,7 @@ On each sample \(n\):
 $$\text{env}[n] = \text{env}[n-1] - \text{release\_rate}$$
 When \(\text{env}[n] \le 0.0\), the voice enters `VOICE_SILENT` and becomes available for reallocation.
 
-> **Shipped behavior (O10, found in #8):** the `release_time` → `release_rate` formula above is the *intended* mapping, not the wired one. `start_voice()` assigns the fixed constant `VOICE_RELEASE_RATE` (1/4096 per sample); the `PARAM_RELEASE` value is accepted, range-checked, stored, and has smoothing state allocated, but its smoothed value is never stepped in `process()` and nothing reads it. The per-sample step itself is `voice_envelope_step()` in `src/dsp/voice_envelope.h`, which takes the rates as parameters -- wiring the knob is a rate computation at the call site (Phase 2).
+> **Wired behavior (updated):** `PARAM_RELEASE` is smoothed in `plugin_process()` with its 50 ms one-pole smoother and converted to `release_rate = 1.0f / max(1.0f, release_s * sample_rate)` at voice start and per sample inside `voice_envelope_step()` (`src/dsp/voice_envelope.h`). `VOICE_RELEASE_RATE` remains as the pre-activation fallback constant.
 
 ---
 
@@ -257,7 +257,7 @@ $$t_{99\%} \approx 4.6 \cdot \tau$$
 | **Mix** | 10 ms (`0.010 s`) | `0.002265` | `0.002081` | `0.001041` | ~46.0 ms |
 | **Bypass** | 0 ms (`0.000 s`) | `1.000000` | `1.000000` | `1.000000` | Instant (managed by fade ramp) |
 
-> **Note (O10):** the Attack/Release coefficients above are computed at activation but never stepped in `process()` -- only Gain and Mix advance in the sample loops. Their settling times are therefore inert until the knobs are wired to the envelope rates (Phase 2).
+> **Note:** Gain, Attack, Release, and Mix all advance in `plugin_process()` via `advance_one_pole()`; in the FX plugin, Gain and Mix advance in `fx_process()`.
 
 ### 3.4 Knob Curves (Host-Side)
 

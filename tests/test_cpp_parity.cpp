@@ -177,8 +177,10 @@ static std::unique_ptr<SSMBlock> load_parity_block(const char* weight_path,
     for (size_t r = 0; r < 2 * dm; ++r) {
         std::memcpy(w->film_proj_w[r], ptrs.film_proj_w + r * cd, cd * sizeof(float));
     }
-    // dt_film_proj_w: [2*nh, cd]
-    std::memcpy(w->dt_film_proj_w, ptrs.dt_film_proj_w, 2 * nh * cd * sizeof(float));
+    // dt_film_proj_w: [2*nh, cd] in file, [2*MAX_NHEADS, COND_DIM] in struct
+    for (size_t r = 0; r < 2 * nh; ++r) {
+        std::memcpy(w->dt_film_proj_w[r], ptrs.dt_film_proj_w + r * cd, cd * sizeof(float));
+    }
 
     block->set_weights(*w);
     loader.unload();

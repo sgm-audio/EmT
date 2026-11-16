@@ -463,7 +463,7 @@ static bool register_window_class() {
 }
 
 bool gui_backend_is_api_supported(const char* api) {
-    return std::strcmp(api, CLAP_WINDOW_API_WIN32) == 0;
+    return api && std::strcmp(api, CLAP_WINDOW_API_WIN32) == 0;
 }
 
 const char* gui_backend_preferred_api() {
@@ -495,6 +495,7 @@ void gui_backend_set_size(GuiInstance* g, uint32_t, uint32_t) {
     }}
 
 bool gui_backend_set_parent(GuiInstance* g, const clap_window_t* window) {
+    if (!g || !window || !window->api) return false;
     if (std::strcmp(window->api, CLAP_WINDOW_API_WIN32) != 0) return false;
     HWND parent_hwnd = static_cast<HWND>(window->win32);
     if (!parent_hwnd || !IsWindow(parent_hwnd)) return false;

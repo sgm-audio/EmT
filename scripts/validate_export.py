@@ -171,6 +171,10 @@ def validate(path: str, batch: int = 1, seq_len: int = 64):
     assert hdr["version"] == WEIGHT_VERSION, (
         f"Bad version: {hdr['version']} (expected {WEIGHT_VERSION})"
     )
+    assert hdr["mimo_rank"] <= 1, f"Unsupported mimo_rank={hdr['mimo_rank']} (D3)"
+    assert hdr["quantization"] == 0, (
+        f"validate_export.py validates Float32 exports (got quant={hdr['quantization']})"
+    )
 
     print(
         f"Header: layers={hdr['num_layers']} ds={hdr['d_state']} "
@@ -190,14 +194,19 @@ def validate(path: str, batch: int = 1, seq_len: int = 64):
     load_weights_into_model(model, path)
     model.eval()
 
-    # Run forward pass with random input
+    # Run forward pass with random input (unconditioned and conditioned)
     x = torch.randn(batch, seq_len, hdr["d_model"])
+    cond = torch.randn(batch, hdr["cond_dim"])
     with torch.no_grad():
         y = model(x)
+        y_cond = model(x, cond=cond)
 
     assert not torch.isnan(y).any(), "NaN in output!"
     assert not torch.isinf(y).any(), "Inf in output!"
+    assert not torch.isnan(y_cond).any(), "NaN in conditioned output!"
+    assert not torch.isinf(y_cond).any(), "Inf in conditioned output!"
     assert y.shape == (batch, seq_len, hdr["d_model"]), f"Shape mismatch: {y.shape}"
+    assert y_cond.shape == (batch, seq_len, hdr["d_model"]), f"Shape mismatch: {y_cond.shape}"
 
     # Run a second time to verify determinism
     x2 = x.clone()

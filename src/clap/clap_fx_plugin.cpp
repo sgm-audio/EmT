@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <memory>
 #include <new>
 #include <cstdlib>
 #include <cstdio>
@@ -111,9 +112,17 @@ static void fx_reset(const clap_plugin_t* plugin) {
 }
 
 static void apply_param_value(FxState* f, clap_id id, double value) {
-    if (id >= FX_PARAM_COUNT) return;
+    if (id >= FX_PARAM_COUNT || !std::isfinite(value)) return;
+    const ParamSmooth& p = f->params[id];
+    value = std::clamp(value, p.min_value, p.max_value);
+    if (p.curve == PARAM_CURVE_STEPPED) {
+        value = value >= 0.5 ? 1.0 : 0.0;
+    }
     f->param_values[id].store(value, std::memory_order_release);
     f->params[id].target.store(value, std::memory_order_release);
+    if (id == FX_PARAM_BYPASS) {
+        f->bypass_target.store(value >= 0.5, std::memory_order_release);
+    }
 }
 
 static uint32_t fx_params_count(const clap_plugin_t*) { return FX_PARAM_COUNT; }
@@ -156,15 +165,17 @@ static const clap_plugin_params_t s_fx_params = {fx_params_count, fx_params_get_
     fx_params_value_to_text, fx_params_text_to_value, fx_params_flush};
 // FX: process audio in -> SSM -> audio out with dry/wet mix
 static clap_process_status fx_process(const clap_plugin_t* plugin, const clap_process_t* process) {
-    if (!process || !process->audio_outputs || process->audio_outputs_count == 0)
+    if (!plugin || !process || !process->audio_outputs || process->audio_outputs_count == 0)
         return CLAP_PROCESS_ERROR;
     auto* f = get_fx(plugin);
+    if (!f) return CLAP_PROCESS_ERROR;
     ScopedFtzDaz ftz_guard;  // FTZ/DAZ for the block; MXCSR restored on exit (E8/E19)
     f->thread_check.mark_audio_thread();
     SSMInferenceCore* core = f->core.adopt();  // stable across this block (E12)
     clap_audio_buffer_t& out = process->audio_outputs[0];
     const clap_audio_buffer_t* in = process->audio_inputs && process->audio_inputs_count ? &process->audio_inputs[0] : nullptr;
     if ((!out.data32 && !out.data64) || out.channel_count == 0) return CLAP_PROCESS_ERROR;
+    const size_t core_d_model = core ? core->config().d_model : 1;
     double gain = f->params[FX_PARAM_GAIN].current.load(std::memory_order_relaxed);
     double mix = f->params[FX_PARAM_MIX].current.load(std::memory_order_relaxed);
     float fade = f->bypass_fade.load(std::memory_order_relaxed);
@@ -181,7 +192,7 @@ static clap_process_status fx_process(const clap_plugin_t* plugin, const clap_pr
             }
             ++event_index;
         }
-        const bool bypass = f->params[FX_PARAM_BYPASS].target.load(std::memory_order_relaxed) > 0.5;
+        const bool bypass = f->params[FX_PARAM_BYPASS].target.load(std::memory_order_relaxed) >= 0.5;
         f->bypass_target.store(bypass, std::memory_order_relaxed);
         fade = std::clamp(fade + (bypass ? FxState::BYPASS_FADE_RATE : -FxState::BYPASS_FADE_RATE), 0.0f, 1.0f);
         advance_one_pole(gain, f->params[FX_PARAM_GAIN].target.load(std::memory_order_relaxed), f->params[FX_PARAM_GAIN].coeff);
@@ -192,14 +203,25 @@ static clap_process_status fx_process(const clap_plugin_t* plugin, const clap_pr
             else if (in->data64 && in->data64[ch]) dry[ch]=static_cast<float>(in->data64[ch][n]);
         }
         const float mono = nc > 1 ? 0.5f*(dry[0]+dry[1]) : dry[0];
-        alignas(64) float processed[MAX_D_MODEL]; core->process_sample(mono, processed);
+        alignas(64) float processed[MAX_D_MODEL]{};
+        if (core) core->process_sample(mono, processed);
         for (uint32_t ch=0; ch<out.channel_count; ++ch) {
             const float d = ch < nc ? dry[ch] : mono;
-            const float wet = processed[0] * static_cast<float>(gain);
+            const float wet = processed[ch < core_d_model ? ch : 0] * static_cast<float>(gain);
             const float sample = (d*static_cast<float>(1.0-mix)+wet*static_cast<float>(mix))*(1.0f-fade)+d*fade;
             if (out.data32 && out.data32[ch]) out.data32[ch][n]=sample;
             if (out.data64 && out.data64[ch]) out.data64[ch][n]=sample;
         }
+    }
+    while (event_index < event_count) {
+        const clap_event_header_t* hdr = process->in_events->get(process->in_events, event_index);
+        if (hdr && hdr->space_id == CLAP_CORE_EVENT_SPACE_ID &&
+            hdr->type == CLAP_EVENT_PARAM_VALUE &&
+            hdr->size >= sizeof(clap_event_param_value_t)) {
+            const auto* ev = reinterpret_cast<const clap_event_param_value_t*>(hdr);
+            apply_param_value(f, ev->param_id, ev->value);
+        }
+        ++event_index;
     }
     f->params[FX_PARAM_GAIN].current.store(gain,std::memory_order_relaxed);
     f->params[FX_PARAM_MIX].current.store(mix,std::memory_order_relaxed);
@@ -243,38 +265,21 @@ bool fx_load_weights(FxState* f, const char* path) {
     }
 
     // Build the new engine off the audio path and publish it (E12).
-    auto* new_core = new SSMInferenceCore(f->core_cfg);
-
-    auto w_ptr = std::make_unique<SSMWeights>();
+    auto* new_core = new (std::nothrow) SSMInferenceCore(f->core_cfg);
+    auto w_ptr = std::unique_ptr<SSMWeights>(new (std::nothrow) SSMWeights());
+    if (!new_core || !w_ptr) {
+        delete new_core;
+        f->weight_loader.unload();
+        return false;
+    }
     SSMWeights& w = *w_ptr;
 
     for (uint32_t layer = 0; layer < f->core_cfg.num_layers; ++layer) {
-        WeightLayerPointers ptrs;
-        if (f->weight_loader.get_layer_pointers(layer, ptrs) != LoadError::Ok) {
+        if (f->weight_loader.dequantize_layer_to(layer, w) != LoadError::Ok) {
             delete new_core;
             f->weight_loader.unload();
             return false;
         }
-
-        std::memset(&w, 0, sizeof(SSMWeights));
-        size_t in_proj_out = f->core_cfg.d_inner * 2
-                           + f->core_cfg.nheads * MAX_MIMO_RANK * f->core_cfg.d_state * 2
-                           + f->core_cfg.nheads * 3
-                           + MAX_NUM_ROPE_ANGLES;
-        std::memcpy(w.in_proj_w, ptrs.in_proj_w, in_proj_out * f->core_cfg.d_model * sizeof(float));
-        std::memcpy(w.dt_bias, ptrs.dt_bias, f->core_cfg.nheads * sizeof(float));
-        std::memcpy(w.B_bias, ptrs.B_bias, f->core_cfg.nheads * MAX_MIMO_RANK * f->core_cfg.d_state * sizeof(float));
-        std::memcpy(w.C_bias, ptrs.C_bias, f->core_cfg.nheads * MAX_MIMO_RANK * f->core_cfg.d_state * sizeof(float));
-        std::memcpy(w.B_norm_weight, ptrs.B_norm_weight, f->core_cfg.d_state * sizeof(float));
-        std::memcpy(w.C_norm_weight, ptrs.C_norm_weight, f->core_cfg.d_state * sizeof(float));
-        std::memcpy(w.mimo_x, ptrs.mimo_x, f->core_cfg.nheads * MAX_MIMO_RANK * f->core_cfg.headdim * sizeof(float));
-        std::memcpy(w.mimo_z, ptrs.mimo_z, f->core_cfg.nheads * MAX_MIMO_RANK * f->core_cfg.headdim * sizeof(float));
-        std::memcpy(w.mimo_o, ptrs.mimo_o, f->core_cfg.nheads * MAX_MIMO_RANK * f->core_cfg.headdim * sizeof(float));
-        std::memcpy(w.D_proj, ptrs.D_proj, f->core_cfg.nheads * sizeof(float));
-        std::memcpy(w.out_proj_w, ptrs.out_proj_w, f->core_cfg.d_model * f->core_cfg.d_inner * sizeof(float));
-        std::memcpy(w.film_proj_w, ptrs.film_proj_w, 2 * f->core_cfg.d_model * f->core_cfg.cond_dim * sizeof(float));
-        std::memcpy(w.dt_film_proj_w, ptrs.dt_film_proj_w, 2 * f->core_cfg.nheads * f->core_cfg.cond_dim * sizeof(float));
-
         new_core->set_layer_weights(layer, w);
     }
     f->core.reclaim();   // free any previously retired core (main thread)
@@ -383,7 +388,17 @@ static bool fx_state_load(const clap_plugin_t* plugin, const clap_istream_t* str
     if (path_len > 0) {
         std::memcpy(f->weight_path, path_buf, path_len);
         f->weight_path[path_len] = '\0';
-        fx_load_weights(f, path_buf);
+        std::FILE* probe = std::fopen(path_buf, "rb");
+        if (probe) {
+            std::fclose(probe);
+            if (!fx_load_weights(f, path_buf)) {
+                return false;
+            }
+        } else {
+            f->weights_loaded.store(false, std::memory_order_release);
+        }
+    } else {
+        f->weights_loaded.store(false, std::memory_order_release);
     }
 
     // Parameter values changed outside the flush/process path (E3).
