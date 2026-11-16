@@ -5,6 +5,8 @@
 #include "core/ssm_inference_core.h"
 #include "config.h"
 
+#include <cmath>
+#include <cstring>
 #include <memory>
 
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
@@ -73,4 +75,56 @@ TEST(RtSafety, TwoInstancesIndependentConditioning) {
     b->process_sample(0.5f, ob);
 
     EXPECT_NE(oa[0], ob[0]);  // conditioning is per-instance
+}
+
+TEST(RtSafety, DenormalInputAndDecayingTailFlushedToZero) {
+    auto cfg = small_config();
+    cfg.num_layers = 1;
+    SSMBlock block(cfg.d_state, cfg.d_model, cfg.d_inner, cfg.nheads, cfg.headdim,
+                   cfg.mimo_rank, cfg.num_bc_heads, cfg.cond_dim);
+    auto w = std::make_unique<SSMWeights>();
+    std::memset(w.get(), 0, sizeof(*w));
+    for (size_t j = 0; j < cfg.d_model; ++j) {
+        w->in_proj_w[j][j] = 0.5f;
+        w->in_proj_w[cfg.d_inner + j][j] = 0.5f;
+        w->out_proj_w[j][j] = 1.0f;
+    }
+    for (size_t h = 0; h < cfg.nheads; ++h) {
+        w->dt_bias[h] = 1.0f;
+        w->B_bias[h][0][0] = 0.5f;
+        w->C_bias[h][0][0] = 0.5f;
+    }
+    for (size_t s = 0; s < cfg.d_state; ++s) {
+        w->B_norm_weight[s] = 1.0f;
+        w->C_norm_weight[s] = 1.0f;
+    }
+    block.set_weights(*w);
+
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
+    const unsigned int mxcsr_before = _mm_getcsr();
+#endif
+    {
+        ScopedFtzDaz guard;
+        alignas(64) float out[MAX_D_MODEL]{};
+        // Feed subnormal impulse then zero tail; FTZ/DAZ must prevent subnormals.
+        block.process_sample(1e-40f, out);
+        ASSERT_NE(std::fpclassify(out[0]), FP_SUBNORMAL);
+        for (int i = 0; i < 4096; ++i) {
+            block.process_sample(0.0f, out);
+            for (size_t j = 0; j < cfg.d_model; ++j) {
+                ASSERT_NE(std::fpclassify(out[j]), FP_SUBNORMAL)
+                    << "subnormal output at sample " << i << " ch " << j;
+            }
+        }
+        for (size_t h = 0; h < cfg.nheads; ++h) {
+            for (size_t d = 0; d < cfg.headdim; ++d) {
+                for (size_t s = 0; s < cfg.d_state; ++s) {
+                    ASSERT_NE(std::fpclassify(block.state().ssm_real[h][d][s]), FP_SUBNORMAL);
+                }
+            }
+        }
+    }
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64)
+    EXPECT_EQ(_mm_getcsr(), mxcsr_before);
+#endif
 }

@@ -106,3 +106,44 @@ TEST(RtStress, PublishCoresWhileProcessing) {
     std::printf("stress: %ld audio blocks vs %ld publishes\n",
                 audio_blocks.load(), load_cycles.load());
 }
+
+TEST(RtStress, RapidRcuPublishSkipDoesNotLeakOrUseAfterFree) {
+    RcuSlot<SSMInferenceCore> slot;
+    slot.publish(build_core());
+
+    std::atomic<bool> stop{false};
+    std::atomic<long> adoptions{0};
+    std::atomic<long> publishes{0};
+
+    // Slow reader: sleeps briefly between adopt()s so the writer publishes
+    // multiple times per reader interval, exercising hold_ and retired_ overwrites.
+    std::thread reader([&] {
+        MambaState st{};
+        alignas(64) float out[MAX_D_MODEL]{};
+        while (!stop.load(std::memory_order_relaxed)) {
+            SSMInferenceCore* core = slot.adopt();
+            if (core) {
+                core->process_sample(0.1f, out, st);
+            }
+            adoptions.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+    });
+
+    std::thread writer([&] {
+        for (int i = 0; i < 60; ++i) {
+            slot.reclaim();
+            slot.publish(build_core());
+            publishes.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+        stop.store(true, std::memory_order_relaxed);
+    });
+
+    writer.join();
+    reader.join();
+    slot.destroy();
+
+    EXPECT_GT(adoptions.load(), 0);
+    EXPECT_EQ(publishes.load(), 60);
+}

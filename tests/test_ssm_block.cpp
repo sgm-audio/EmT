@@ -82,6 +82,11 @@ TEST(SSMBlock, DifferentWeightsProduceDifferentOutputs) {
     auto block2 = make_test_block();
     auto w1 = make_test_weights();
     auto w2 = make_test_weights();
+    // Make the recurrence live (non-zero B/C) so dt_bias actually affects output.
+    w1->B_bias[0][0][0] = 0.5f;
+    w1->C_bias[0][0][0] = 0.5f;
+    w2->B_bias[0][0][0] = 0.5f;
+    w2->C_bias[0][0][0] = 0.5f;
     w2->dt_bias[0] = 10.0f;  // dramatically different dt
     block1->set_weights(*w1);
     block2->set_weights(*w2);
@@ -91,7 +96,7 @@ TEST(SSMBlock, DifferentWeightsProduceDifferentOutputs) {
     block2->process_sample(1.0f, buf2);
     EXPECT_FALSE(std::isnan(buf1[0]));
     EXPECT_FALSE(std::isnan(buf2[0]));
-    // Both should be non-NaN; output differs (tested in NoNaN)
+    EXPECT_GT(std::fabs(buf1[0] - buf2[0]), 1e-5f);
 }
 
 TEST(SSMBlock, SetConditioningDoesNotCrash) {
@@ -112,12 +117,22 @@ TEST(SSMInferenceCore, MultiLayerProcessing) {
     MambaConfig cfg = MambaConfig::max_config();
     cfg.num_layers = MAX_LAYERS;
     core->init(cfg);
-    for (uint32_t layer = 0; layer < MAX_LAYERS; ++layer)
-        core->set_layer_weights(layer, *make_test_weights());
+    auto w = make_test_weights();
+    w->B_bias[0][0][0] = 0.5f;
+    w->C_bias[0][0][0] = 0.5f;
+    SSMBlockParams params{};
+    params.gain = 1.0f / static_cast<float>(MAX_D_MODEL);
+    for (uint32_t layer = 0; layer < MAX_LAYERS; ++layer) {
+        core->set_layer_weights(layer, *w);
+        core->set_layer_params(layer, params);
+    }
     alignas(64) float outbuf[MAX_D_MODEL];
-    core->process_sample(1.0f, outbuf);
-    EXPECT_FALSE(std::isnan(outbuf[0]));
-    EXPECT_FALSE(std::isinf(outbuf[0]));
+    for (int i = 0; i < 64; ++i) {
+        core->process_sample((i == 0) ? 1.0f : 0.25f, outbuf);
+        ASSERT_FALSE(std::isnan(outbuf[0]));
+        ASSERT_FALSE(std::isinf(outbuf[0]));
+    }
+    EXPECT_NE(outbuf[0], 0.0f);
 }
 
 TEST(SSMInferenceCore, ResetClearsState) {
@@ -279,5 +294,107 @@ TEST(SSMBlockTest, SetWeightsDtFilmCompactStrideCondDim) {
     block_small_cond.process_sample(0.4f, out1, *s1);
     block_ref_cond.process_sample(0.4f, out2, *s2);
     EXPECT_FLOAT_EQ(out1[0], out2[0]);
+}
+
+TEST(SSMBlock, StrictCausalityPrefixInvariance) {
+    MambaConfig cfg{};
+    cfg.d_state = 16;
+    cfg.d_model = 4;
+    cfg.d_inner = 16;
+    cfg.nheads = 2;
+    cfg.headdim = 8;
+    cfg.mimo_rank = 1;
+    cfg.num_bc_heads = 1;
+    cfg.num_rope_angles = 8;
+    cfg.num_layers = 2;
+    cfg.cond_dim = 4;
+
+    auto core_a = std::make_unique<SSMInferenceCore>(cfg);
+    auto core_b = std::make_unique<SSMInferenceCore>(cfg);
+    auto w = make_test_weights();
+    w->B_bias[0][0][0] = 0.5f;
+    w->C_bias[0][0][0] = 0.5f;
+    for (uint32_t l = 0; l < cfg.num_layers; ++l) {
+        core_a->set_layer_weights(l, *w);
+        core_b->set_layer_weights(l, *w);
+    }
+
+    constexpr size_t N = 64;
+    constexpr size_t kSplit = 23;
+    std::vector<float> in_a(N), in_b(N);
+    for (size_t i = 0; i < N; ++i) {
+        in_a[i] = std::sin(0.15f * static_cast<float>(i));
+        in_b[i] = (i < kSplit) ? in_a[i] : std::numeric_limits<float>::quiet_NaN();
+    }
+
+    std::vector<float> out_a(N * cfg.d_model, 0.0f), out_b(N * cfg.d_model, 0.0f);
+    core_a->process_block(in_a.data(), out_a.data(), N);
+    core_b->process_block(in_b.data(), out_b.data(), N);
+
+    // Prefix [0..kSplit-1] must be bit-identical regardless of future NaNs.
+    ASSERT_EQ(std::memcmp(out_a.data(), out_b.data(), kSplit * cfg.d_model * sizeof(float)), 0);
+}
+
+TEST(SSMBlock, ZeroDeltaFreezesStateAndLargeDeltaBounded) {
+    // 1. dt_bias = -50 -> softplus(dt_pre) == 0 -> A_bar == 1, B_bar == 0 (state freezes).
+    {
+        SSMBlock block(16, 4, 16, 2, 8, 1, 1, 4);
+        auto w = make_test_weights();
+        for (size_t h = 0; h < 2; ++h) w->dt_bias[h] = -50.0f;
+        w->B_bias[0][0][0] = 1.0f;
+        w->C_bias[0][0][0] = 1.0f;
+        block.set_weights(*w);
+        block.state().ssm_real[0][0][0] = 2.5f;
+
+        alignas(64) float out[MAX_D_MODEL]{};
+        for (int i = 0; i < 32; ++i) {
+            block.process_sample(1.0f, out);
+        }
+        EXPECT_FLOAT_EQ(block.state().ssm_real[0][0][0], 2.5f);
+    }
+
+    // 2. dt_bias = +50 -> linear softplus regime (DT_t ~ 50), A_t <= -1 -> |a_bar| < 1, bounded.
+    {
+        SSMBlock block(16, 4, 16, 2, 8, 1, 1, 4);
+        auto w = make_test_weights();
+        for (size_t h = 0; h < 2; ++h) w->dt_bias[h] = 50.0f;
+        w->B_bias[0][0][0] = 0.5f;
+        w->C_bias[0][0][0] = 0.5f;
+        block.set_weights(*w);
+
+        alignas(64) float out[MAX_D_MODEL]{};
+        for (int i = 0; i < 10000; ++i) {
+            block.process_sample((i % 2 == 0) ? 1.0f : -1.0f, out);
+            ASSERT_TRUE(std::isfinite(out[0])) << "sample " << i;
+            ASSERT_LT(std::fabs(out[0]), 1e3f) << "sample " << i;
+        }
+    }
+}
+
+TEST(SSMBlock, RmsNormZeroInputAndRopeLongHorizon) {
+    SSMBlock block(16, 4, 16, 2, 8, 1, 1, 4);
+    auto w = make_test_weights();
+    // Leave B/C in_proj rows at 0 so B_ptr == 0 and C_ptr == 0; set non-zero biases and RoPE angle.
+    w->B_bias[0][0][0] = 0.25f;
+    w->C_bias[0][0][0] = 0.5f;
+    const size_t angle_row = 16 * 2 + 2 * MAX_MIMO_RANK * 16 * 2 + 2 * 3;
+    w->in_proj_w[angle_row][0] = 1.5f;
+    block.set_weights(*w);
+
+    alignas(64) float out[MAX_D_MODEL]{};
+    for (int i = 0; i < 100000; ++i) {
+        block.process_sample(0.5f, out);
+        if ((i & 4095) == 0) {
+            ASSERT_TRUE(std::isfinite(out[0])) << "sample " << i;
+        }
+    }
+    constexpr float kTwoPi = 2.0f * 3.14159265358979323846f;
+    for (size_t h = 0; h < 2; ++h) {
+        for (size_t a = 0; a < 8; ++a) {
+            const float ang = block.state().angle_state[h][a];
+            ASSERT_TRUE(std::isfinite(ang));
+            EXPECT_LT(std::fabs(ang), kTwoPi + 1e-5f);
+        }
+    }
 }
 

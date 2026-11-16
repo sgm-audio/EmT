@@ -17,17 +17,54 @@
 #include <unistd.h>
 #endif
 #include <algorithm>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 using namespace mamba;
+
+namespace {
+
+std::unique_ptr<SSMWeights> make_live_weights() {
+    auto w = std::make_unique<SSMWeights>();
+    std::memset(w.get(), 0, sizeof(*w));
+    for (size_t j = 0; j < MAX_D_MODEL && j < MAX_D_INNER; ++j) {
+        w->in_proj_w[j][j] = 0.2f;
+        w->in_proj_w[MAX_D_INNER + j][j] = 0.2f;
+        w->out_proj_w[j][j] = 0.5f;
+    }
+    for (size_t h = 0; h < MAX_NHEADS; ++h) {
+        w->dt_bias[h] = 0.5f;
+        w->B_bias[h][0][0] = 0.25f;
+        w->C_bias[h][0][0] = 0.25f;
+    }
+    for (size_t s = 0; s < MAX_D_STATE; ++s) {
+        w->B_norm_weight[s] = 1.0f;
+        w->C_norm_weight[s] = 1.0f;
+    }
+    return w;
+}
+
+} // namespace
 
 TEST(RealtimeSafety, ProcessCallGraphAudit) {
     auto core = std::make_unique<SSMInferenceCore>();
     MambaConfig cfg = MambaConfig::max_config();
     cfg.num_layers = 1;
     core->init(cfg);
+    core->set_layer_weights(0, *make_live_weights());
     alignas(64) float outbuf[MAX_D_MODEL];
+    // Warm up once before measuring heap.
     core->process_sample(1.0f, outbuf);
-    EXPECT_FALSE(std::isnan(outbuf[0]));
+    ASSERT_TRUE(std::isfinite(outbuf[0]));
+#if defined(__GLIBC__)
+    const size_t before = mallinfo2().uordblks;
+    for (int i = 0; i < 1000; ++i) {
+        core->process_sample(0.25f, outbuf);
+    }
+    const size_t after = mallinfo2().uordblks;
+    EXPECT_EQ(before, after) << "heap grew during SSMInferenceCore::process_sample";
+#endif
 }
 
 TEST(RealtimeSafety, SeqLockReadFunctionsDontAllocate) {
@@ -45,12 +82,20 @@ TEST(RealtimeSafety, MultiLayerProcessIsStable) {
     MambaConfig cfg = MambaConfig::max_config();
     cfg.num_layers = MAX_LAYERS;
     core->init(cfg);
+    auto w = make_live_weights();
+    SSMBlockParams params{};
+    params.gain = 1.0f / static_cast<float>(MAX_D_MODEL);
+    for (uint32_t l = 0; l < MAX_LAYERS; ++l) {
+        core->set_layer_weights(l, *w);
+        core->set_layer_params(l, params);
+    }
     alignas(64) float outbuf[MAX_D_MODEL];
     for (int i = 0; i < 1000; ++i) {
         core->process_sample(0.5f, outbuf);
         ASSERT_FALSE(std::isnan(outbuf[0]));
         ASSERT_FALSE(std::isinf(outbuf[0]));
     }
+    EXPECT_NE(outbuf[0], 0.0f);
 }
 
 TEST(RealtimeSafety, ZeroCopyVoiceStateIsolation) {
@@ -254,6 +299,10 @@ bool write_raw_header(const char* path, uint32_t d_state, uint32_t d_model,
 TEST(RealtimeSafety, FxAcceptsMultiLayerWeightsWithinLimits) {
     const char* path = std::getenv("MAMBA_TEST_WEIGHTS");
     if (!path || path[0] == '\0') {
+        const char* require = std::getenv("MAMBA_REQUIRE_PARITY");
+        if (require && require[0] != '\0' && require[0] != '0') {
+            FAIL() << "MAMBA_REQUIRE_PARITY is set but MAMBA_TEST_WEIGHTS is unset";
+        }
         GTEST_SKIP() << "set MAMBA_TEST_WEIGHTS to a generated .bin to run this";
     }
 
@@ -326,4 +375,105 @@ TEST(RealtimeSafety, FxRejectsWeightsExceedingCompiledLimits) {
     EXPECT_FALSE(fx->weights_loaded.load(std::memory_order_acquire));
     plugin->destroy(plugin);
     std::remove(path);
+}
+
+TEST(RealtimeSafety, FxProcessZeroAllocations) {
+    const clap_plugin_t* plugin = mamba_fx_create(nullptr);
+    ASSERT_NE(plugin, nullptr);
+    ASSERT_TRUE(plugin->init(plugin));
+    auto* fx = static_cast<FxState*>(plugin->plugin_data);
+    ASSERT_NE(fx, nullptr);
+
+    auto* live = fx->core.published();
+    ASSERT_NE(live, nullptr);
+    live->set_layer_weights(0, *make_live_weights());
+    fx->weights_loaded.store(true, std::memory_order_release);
+
+    ASSERT_TRUE(plugin->activate(plugin, 48000.0, 32, 256));
+    ASSERT_TRUE(plugin->start_processing(plugin));
+
+    alignas(64) float in[64]{};
+    alignas(64) float out[64]{};
+    for (int i = 0; i < 64; ++i) in[i] = 0.25f;
+    float* in_ptrs[1] = {in};
+    float* out_ptrs[1] = {out};
+    clap_audio_buffer_t in_bufs{};
+    in_bufs.data32 = in_ptrs;
+    in_bufs.channel_count = 1;
+    clap_audio_buffer_t out_bufs{};
+    out_bufs.data32 = out_ptrs;
+    out_bufs.channel_count = 1;
+    clap_process_t proc{};
+    proc.frames_count = 64;
+    proc.audio_inputs = &in_bufs;
+    proc.audio_inputs_count = 1;
+    proc.audio_outputs = &out_bufs;
+    proc.audio_outputs_count = 1;
+
+    // Warm up
+    plugin->process(plugin, &proc);
+#if defined(__GLIBC__)
+    const size_t before = mallinfo2().uordblks;
+    for (int i = 0; i < 500; ++i) {
+        plugin->process(plugin, &proc);
+    }
+    const size_t after = mallinfo2().uordblks;
+    EXPECT_EQ(before, after) << "heap grew inside fx_process";
+#endif
+    EXPECT_TRUE(std::isfinite(out[0]));
+    plugin->stop_processing(plugin);
+    plugin->destroy(plugin);
+}
+
+TEST(RealtimeSafety, FxFailedWeightLoadPreservesActiveCore) {
+    char bad_path[512];
+    const char* tmpdir = std::getenv("TMPDIR");
+    if (!tmpdir || tmpdir[0] == '\0') tmpdir = "/tmp";
+    std::snprintf(bad_path, sizeof(bad_path), "%s/mamba_bad_preserve_%d.bin",
+                  tmpdir, mamba_test_pid());
+    ASSERT_TRUE(write_raw_header(bad_path, MAX_D_STATE + 1, MAX_D_MODEL, MAX_D_INNER,
+                                 MAX_NHEADS, MAX_LAYERS, MAX_HEADDIM, COND_DIM));
+
+    const clap_plugin_t* plugin = mamba_fx_create(nullptr);
+    ASSERT_NE(plugin, nullptr);
+    ASSERT_TRUE(plugin->init(plugin));
+    auto* fx = static_cast<FxState*>(plugin->plugin_data);
+    ASSERT_NE(fx, nullptr);
+
+    auto* original_core = fx->core.published();
+    ASSERT_NE(original_core, nullptr);
+    original_core->set_layer_weights(0, *make_live_weights());
+    fx->weights_loaded.store(true, std::memory_order_release);
+
+    // Failed load must return false AND keep weights_loaded + original core intact.
+    EXPECT_FALSE(fx_load_weights(fx, bad_path));
+    EXPECT_TRUE(fx->weights_loaded.load(std::memory_order_acquire));
+    EXPECT_EQ(fx->core.published(), original_core);
+
+    ASSERT_TRUE(plugin->activate(plugin, 48000.0, 32, 64));
+    ASSERT_TRUE(plugin->start_processing(plugin));
+    alignas(64) float in[64]{};
+    alignas(64) float out[64]{};
+    in[0] = 0.5f;
+    float* in_ptrs[1] = {in};
+    float* out_ptrs[1] = {out};
+    clap_audio_buffer_t in_bufs{};
+    in_bufs.data32 = in_ptrs;
+    in_bufs.channel_count = 1;
+    clap_audio_buffer_t out_bufs{};
+    out_bufs.data32 = out_ptrs;
+    out_bufs.channel_count = 1;
+    clap_process_t proc{};
+    proc.frames_count = 64;
+    proc.audio_inputs = &in_bufs;
+    proc.audio_inputs_count = 1;
+    proc.audio_outputs = &out_bufs;
+    proc.audio_outputs_count = 1;
+    plugin->process(plugin, &proc);
+    EXPECT_TRUE(std::isfinite(out[0]));
+    EXPECT_NE(out[0], 0.0f);
+
+    plugin->stop_processing(plugin);
+    plugin->destroy(plugin);
+    std::remove(bad_path);
 }

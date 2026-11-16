@@ -95,11 +95,12 @@ bash scripts/ci.sh   # configure, build, parity vectors, test weights, ctest,
                      # clap-validator if installed
 ```
 
-Tests: ctest registers 136 tests across 14 binaries (137 with clap-validator
-installed). Two need generated inputs: `CppParity` (parity vectors) and
-`RealtimeSafety.FxAcceptsMultiLayerWeightsWithinLimits` (an exported model).
-Plain `ctest` runs 134 and skips those 2; `scripts/ci.sh` generates the inputs
-and sets `MAMBA_REQUIRE_PARITY=1` so a missing file fails instead of skipping.
+Tests: ctest registers 159 tests across 15 binaries (160 with clap-validator
+installed). Five need generated inputs: `CppParity.*` (4 parity vector tests)
+and `RealtimeSafety.FxAcceptsMultiLayerWeightsWithinLimits` (an exported model).
+Plain `ctest` runs 154 and skips any whose inputs are absent; `scripts/ci.sh`
+generates the inputs and sets `MAMBA_REQUIRE_PARITY=1` so a missing file fails
+instead of skipping.
 
 On 2026-11-03 (machine and compiler as above) `scripts/ci.sh` gave: ctest
 135/135 passed, loss self-test passed, trainer smoke test wrote

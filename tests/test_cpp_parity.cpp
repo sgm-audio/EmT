@@ -272,3 +272,105 @@ TEST(CppParity, OutputMatchesPythonReference) {
     std::cout << "[ Parity ] Max absolute difference over "
               << num_inputs * d_model << " elements: " << max_error << "\n";
 }
+
+namespace {
+
+void run_core_parity(const std::string& prefix,
+                     const std::vector<float>& test_inputs,
+                     bool conditioning_active,
+                     float tol) {
+    const std::string weight_path = resolve_test_file(prefix + "_weights.bin");
+    const std::string expect_path = resolve_test_file(prefix + "_expected.bin");
+
+    if (weight_path.empty() || expect_path.empty()) {
+        const char* require = std::getenv("MAMBA_REQUIRE_PARITY");
+        if (require && require[0] != '\0' && require[0] != '0') {
+            FAIL() << "MAMBA_REQUIRE_PARITY is set but " << prefix << " parity vectors were not found";
+        }
+        GTEST_SKIP() << "Test vectors not found for " << prefix
+                     << ". Run: python scripts/reference_mamba3.py --generate";
+    }
+
+    WeightLoader loader;
+    ASSERT_EQ(loader.load(weight_path.c_str()), LoadError::Ok);
+    const WeightFileHeader hdr = loader.header();
+
+    MambaConfig cfg{};
+    cfg.d_state = hdr.d_state;
+    cfg.d_model = hdr.d_model;
+    cfg.d_inner = hdr.d_inner;
+    cfg.nheads = hdr.nheads;
+    cfg.headdim = hdr.headdim;
+    cfg.mimo_rank = MAX_MIMO_RANK;
+    cfg.num_bc_heads = MAX_NUM_BC_HEADS;
+    cfg.num_rope_angles = hdr.d_state / 2;
+    cfg.num_layers = hdr.num_layers;
+    cfg.cond_dim = hdr.cond_dim;
+
+    auto core = std::make_unique<SSMInferenceCore>();
+    core->init(cfg);
+    auto w = std::make_unique<SSMWeights>();
+    for (uint32_t l = 0; l < hdr.num_layers; ++l) {
+        ASSERT_EQ(loader.dequantize_layer_to(l, *w), LoadError::Ok);
+        core->set_layer_weights(l, *w);
+    }
+    loader.unload();
+
+    float cond[COND_DIM] = {0.0f};
+    if (conditioning_active) {
+        cond[0] = 0.5f;
+        cond[1] = -0.25f;
+    }
+    core->set_conditioning(cond);
+
+    std::vector<float> expected;
+    FILE* f = fopen(expect_path.c_str(), "rb");
+    ASSERT_NE(f, nullptr);
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    ASSERT_GT(sz, 0);
+    expected.resize(static_cast<size_t>(sz) / sizeof(float));
+    ASSERT_EQ(fread(expected.data(), sizeof(float), expected.size(), f), expected.size());
+    fclose(f);
+
+    ASSERT_EQ(expected.size(), test_inputs.size() * hdr.d_model);
+
+    for (size_t i = 0; i < test_inputs.size(); ++i) {
+        alignas(64) float cpp_out[MAX_D_MODEL]{};
+        core->process_sample(test_inputs[i], cpp_out);
+        for (size_t j = 0; j < hdr.d_model; ++j) {
+            const float py_val = expected[i * hdr.d_model + j];
+            const float eff_tol = std::max(tol, 5e-5f * std::fabs(py_val));
+            ASSERT_TRUE(std::isfinite(cpp_out[j])) << prefix << " sample=" << i << " ch=" << j;
+            EXPECT_NEAR(cpp_out[j], py_val, eff_tol)
+                << prefix << " sample=" << i << " ch=" << j;
+        }
+    }
+}
+
+}  // namespace
+
+TEST(CppParity, MultiLayerUnconditionedAndNonZeroMimoPadding) {
+    std::vector<float> inputs(32);
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        inputs[i] = std::sin(0.37f * static_cast<float>(i)) * 0.8f;
+    }
+    run_core_parity("parity_multilayer", inputs, /*conditioning_active=*/false, 1e-3f);
+}
+
+TEST(CppParity, Train4070ShapeLargeStateSingleChannel) {
+    std::vector<float> inputs(32);
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        inputs[i] = std::sin(0.37f * static_cast<float>(i)) * 0.8f;
+    }
+    run_core_parity("parity_train4070", inputs, /*conditioning_active=*/true, 2e-5f);
+}
+
+TEST(CppParity, ExtremeDeltaAndSaturationRegimes) {
+    std::vector<float> inputs(64);
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        inputs[i] = std::cos(0.23f * static_cast<float>(i));
+    }
+    run_core_parity("parity_extreme_dt", inputs, /*conditioning_active=*/true, 5e-4f);
+}

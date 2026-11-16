@@ -126,6 +126,11 @@ LoadError WeightLoader::load(const char* path) {
     LARGE_INTEGER file_size;
     if (!GetFileSizeEx(hFile, &file_size)) { CloseHandle(hFile); return LoadError::StatFailed; }
     mapped_size_ = static_cast<size_t>(file_size.QuadPart);
+    if (mapped_size_ < sizeof(WeightFileHeader)) {
+        CloseHandle(hFile);
+        mapped_size_ = 0;
+        return LoadError::FileTooSmall;
+    }
 
     HANDLE hMap = CreateFileMappingA(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
     if (!hMap) { CloseHandle(hFile); return LoadError::MapFailed; }
@@ -143,6 +148,11 @@ LoadError WeightLoader::load(const char* path) {
     struct stat st;
     if (fstat(fd_, &st) < 0) { close(fd_); fd_ = -1; return LoadError::StatFailed; }
     mapped_size_ = static_cast<size_t>(st.st_size);
+    if (mapped_size_ < sizeof(WeightFileHeader)) {
+        close(fd_); fd_ = -1;
+        mapped_size_ = 0;
+        return LoadError::FileTooSmall;
+    }
 
     mapped_data_ = mmap(nullptr, mapped_size_, PROT_READ, MAP_PRIVATE, fd_, 0);
     if (mapped_data_ == MAP_FAILED) {
@@ -151,11 +161,6 @@ LoadError WeightLoader::load(const char* path) {
         return LoadError::MapFailed;
     }
 #endif
-
-    if (mapped_size_ < sizeof(WeightFileHeader)) {
-        unload();
-        return LoadError::FileTooSmall;
-    }
 
     header_ = static_cast<const WeightFileHeader*>(mapped_data_);
 

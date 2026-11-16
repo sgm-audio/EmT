@@ -202,3 +202,37 @@ TEST(RecurrenceKernel, ZeroInputDecaysForEveryClampedPole) {
         }
     }
 }
+
+// Closed-form LTI verification: for constant A, dt, B, C:
+// 1. Unit impulse x = [1, 0, 0, ...] produces y[n] = C * b_bar * a_bar^n.
+// 2. Unit step x = 1.0 converges monotonically to DC gain 1 / |A| (when B=C=1).
+TEST(RecurrenceKernel, AnalyticalImpulseAndStepSteadyState) {
+    const float A = -2.0f;
+    const float dt = 0.1f;
+    const auto k = mamba::recurrence::bilinear_coeffs(A, dt);
+    const float B = 1.0f;
+    const float C = 1.0f;
+
+    // 1. Impulse response
+    float h = 0.0f;
+    float a_pow = 1.0f;
+    for (int n = 0; n < 32; ++n) {
+        float y = 0.0f;
+        const float x = (n == 0) ? 1.0f : 0.0f;
+        mamba::recurrence::two_term_element(h, y, k.a_bar, k.b_bar_scale, B, C, x);
+        const float expected = C * k.b_bar_scale * B * a_pow;
+        EXPECT_NEAR(y, expected, 1e-6f) << "impulse sample " << n;
+        a_pow *= k.a_bar;
+    }
+
+    // 2. Step response steady state = B * C / |A| = 0.5
+    h = 0.0f;
+    float prev_y = -1.0f;
+    for (int n = 0; n < 200; ++n) {
+        float y = 0.0f;
+        mamba::recurrence::two_term_element(h, y, k.a_bar, k.b_bar_scale, B, C, 1.0f);
+        EXPECT_GE(y, prev_y) << "step response must be monotonic at sample " << n;
+        prev_y = y;
+    }
+    EXPECT_NEAR(prev_y, 1.0f / std::fabs(A), 1e-5f);
+}

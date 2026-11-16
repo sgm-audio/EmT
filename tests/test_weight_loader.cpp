@@ -587,3 +587,89 @@ TEST(WeightLoaderPath, DequantizeInt8PerLayerSafeRead) {
     EXPECT_FLOAT_EQ(w1->in_proj_w[0][0], -2.0f);
     loader.unload();
 }
+
+TEST(WeightLoaderPath, RejectsEmptyBadQuantZeroDimsAndTruncatedQMeta) {
+    // 1. 0-byte empty file must return FileTooSmall (not MapFailed).
+    {
+        test::TempWeightFile tmp("mamba3_empty_");
+        std::FILE* f = std::fopen(tmp.path, "wb");
+        ASSERT_NE(f, nullptr);
+        std::fclose(f);
+
+        WeightLoader loader;
+        EXPECT_EQ(loader.load(tmp.path), LoadError::FileTooSmall);
+        EXPECT_FALSE(loader.is_loaded());
+    }
+
+    // 2. Unknown quantization format (> FP16) must return BadQuantFormat.
+    {
+        test::TempWeightFile tmp("mamba3_badq_");
+        WeightFileHeader hdr{};
+        hdr.magic = WEIGHT_MAGIC;
+        hdr.version = WEIGHT_VERSION;
+        hdr.d_state = 16; hdr.d_model = 1; hdr.d_inner = 16;
+        hdr.nheads = 2; hdr.num_layers = 1; hdr.headdim = 8;
+        hdr.cond_dim = 4;
+        hdr.quantization = 99;
+        hdr.weight_data_size = 64;
+        std::FILE* f = std::fopen(tmp.path, "wb");
+        ASSERT_NE(f, nullptr);
+        std::fwrite(&hdr, sizeof(hdr), 1, f);
+        std::vector<uint8_t> zeros(64, 0);
+        std::fwrite(zeros.data(), 1, zeros.size(), f);
+        std::fclose(f);
+
+        WeightLoader loader;
+        EXPECT_EQ(loader.load(tmp.path), LoadError::BadQuantFormat);
+    }
+
+    // 3. Zero dimensions (d_state == 0 or num_layers == 0) must return DimsExceedLimits.
+    for (int mode = 0; mode < 2; ++mode) {
+        test::TempWeightFile tmp("mamba3_zdim_");
+        WeightFileHeader hdr{};
+        hdr.magic = WEIGHT_MAGIC;
+        hdr.version = WEIGHT_VERSION;
+        hdr.d_state = (mode == 0) ? 0u : 16u;
+        hdr.d_model = 1; hdr.d_inner = 16;
+        hdr.nheads = 2; hdr.num_layers = (mode == 1) ? 0u : 1u;
+        hdr.headdim = 8; hdr.cond_dim = 4;
+        hdr.weight_data_size = 64;
+        std::FILE* f = std::fopen(tmp.path, "wb");
+        ASSERT_NE(f, nullptr);
+        std::fwrite(&hdr, sizeof(hdr), 1, f);
+        std::vector<uint8_t> zeros(64, 0);
+        std::fwrite(zeros.data(), 1, zeros.size(), f);
+        std::fclose(f);
+
+        WeightLoader loader;
+        EXPECT_EQ(loader.load(tmp.path), LoadError::DimsExceedLimits);
+    }
+
+    // 4. Int8PerLayer with q_metadata_size too small for num_layers must fail get_layer_qparam.
+    {
+        test::TempWeightFile tmp("mamba3_qmeta_short_");
+        WeightFileHeader hdr{};
+        hdr.magic = WEIGHT_MAGIC;
+        hdr.version = WEIGHT_VERSION;
+        hdr.d_state = 16; hdr.d_model = 1; hdr.d_inner = 16;
+        hdr.nheads = 2; hdr.num_layers = 2; hdr.headdim = 8;
+        hdr.cond_dim = 4;
+        hdr.quantization = static_cast<uint32_t>(QuantFormat::Int8PerLayer);
+        const uint64_t fpl = test::floats_per_layer_for(
+            hdr.d_state, hdr.d_model, hdr.d_inner, hdr.nheads, hdr.headdim, hdr.cond_dim);
+        hdr.q_metadata_size = 16;  // only 1 layer of metadata for 2 layers!
+        hdr.weight_data_size = 2 * fpl;
+        std::FILE* f = std::fopen(tmp.path, "wb");
+        ASSERT_NE(f, nullptr);
+        std::fwrite(&hdr, sizeof(hdr), 1, f);
+        std::vector<uint8_t> zeros(hdr.q_metadata_size + hdr.weight_data_size, 0);
+        std::fwrite(zeros.data(), 1, zeros.size(), f);
+        std::fclose(f);
+
+        WeightLoader loader;
+        ASSERT_EQ(loader.load(tmp.path), LoadError::Ok);
+        SSMWeights w{};
+        EXPECT_EQ(loader.dequantize_layer_to(1, w), LoadError::QMetadataTooSmall);
+        loader.unload();
+    }
+}

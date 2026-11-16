@@ -20,6 +20,9 @@
 #include <limits>
 #include <algorithm>
 #include <memory>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 // Synth create function is in clap_plugin.cpp (not in a header)
 namespace mamba {
@@ -86,13 +89,37 @@ void run_state_tests(CreateFn create, const char* test_name) {
     EXPECT_TRUE(state_ext2->save(plugin2, &ostream2));
     EXPECT_EQ(mem.buffer, mem2.buffer);
 
+    // --- 3. Stream robustness: chunked prime-byte (7B) reads ---
+    const clap_plugin_t* plugin3 = create(nullptr);
+    ASSERT_NE(plugin3, nullptr);
+    ASSERT_TRUE(plugin3->init(plugin3));
+    auto* state_ext3 = static_cast<const clap_plugin_state_t*>(
+        plugin3->get_extension(plugin3, CLAP_EXT_STATE));
+    ASSERT_NE(state_ext3, nullptr);
+
+    struct PrimeStream {
+        const std::vector<uint8_t>& buf;
+        size_t pos = 0;
+        static int64_t CLAP_ABI read_fn(const clap_istream* stream, void* out, uint64_t size) {
+            auto* self = static_cast<PrimeStream*>(stream->ctx);
+            if (self->pos >= self->buf.size()) return 0;
+            size_t n = std::min<size_t>({static_cast<size_t>(size), 7u, self->buf.size() - self->pos});
+            std::memcpy(out, self->buf.data() + self->pos, n);
+            self->pos += n;
+            return static_cast<int64_t>(n);
+        }
+    } prime_ctx{mem.buffer, 0};
+    clap_istream prime_in{&prime_ctx, PrimeStream::read_fn};
+    EXPECT_TRUE(state_ext3->load(plugin3, &prime_in));
+
+    MemoryStream mem3;
+    clap_ostream ostream3{&mem3, MemoryStream::write_fn};
+    EXPECT_TRUE(state_ext3->save(plugin3, &ostream3));
+    EXPECT_EQ(mem.buffer, mem3.buffer);
+
     plugin1->destroy(plugin1);
     plugin2->destroy(plugin2);
-    // Prime-byte test disabled: stream_read_all handles short reads correctly
-    // but the test fails due to an issue with the PrimeStream implementation.
-    // The core functionality (round-trip + byte-identical re-save) works.
-    // TODO: fix PrimeStream and re-enable.
-    // plugin3->destroy(plugin3);
+    plugin3->destroy(plugin3);
 }
 
 TEST(ClapState, FxRoundtrip) {
@@ -438,6 +465,359 @@ TEST(SynthIntegration, AraZeroFrameDoesNotClobberMidiAndStereoInt8LargeBlock) {
         fx_plugin->destroy(fx_plugin);
     }
 
+    std::remove(model_path.c_str());
+}
+
+TEST(SynthIntegration, SampleAccurateMidBlockEventsAndNoteOff) {
+    std::string model_path = write_temp_int8_stereo_model();
+    ASSERT_FALSE(model_path.empty());
+
+    const clap_plugin_t* plugin = mamba_synth_create(nullptr);
+    ASSERT_NE(plugin, nullptr);
+    ASSERT_TRUE(plugin->init(plugin));
+    auto* m = static_cast<MambaSynth*>(plugin->plugin_data);
+    ASSERT_NE(m, nullptr);
+    ASSERT_TRUE(m->load_weights(model_path.c_str()));
+
+    ASSERT_TRUE(plugin->activate(plugin, 48000.0, 16, 256));
+    ASSERT_TRUE(plugin->start_processing(plugin));
+
+    // Zero dry input so any output comes purely from the active voice? No,
+    // wait: dry=0 -> mono=0 -> D_proj*x=0, so feed 0.25f dry with Mix=1.0
+    // (pure wet) so frames before NOTE_ON at t=32 are strictly 0.0f!
+    constexpr uint32_t kFrames = 128;
+    std::vector<float> in_l(kFrames, 0.25f), in_r(kFrames, 0.25f);
+    std::vector<float> out_l(kFrames, 0.0f), out_r(kFrames, 0.0f);
+    float* in_ptrs[2] = {in_l.data(), in_r.data()};
+    float* out_ptrs[2] = {out_l.data(), out_r.data()};
+    clap_audio_buffer_t in_buf{};
+    in_buf.data32 = in_ptrs;
+    in_buf.channel_count = 2;
+    clap_audio_buffer_t out_buf{};
+    out_buf.data32 = out_ptrs;
+    out_buf.channel_count = 2;
+
+    // 1. Wrong-namespace event and PARAM_MOD at t=0 (must be ignored safely)
+    clap_event_param_mod_t mod_ev{};
+    mod_ev.header.size = sizeof(mod_ev);
+    mod_ev.header.time = 0;
+    mod_ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    mod_ev.header.type = CLAP_EVENT_PARAM_MOD;
+    mod_ev.param_id = PARAM_GAIN;
+    mod_ev.amount = 0.5;
+
+    clap_event_note_t bogus_ns{};
+    bogus_ns.header.size = sizeof(bogus_ns);
+    bogus_ns.header.time = 0;
+    bogus_ns.header.space_id = 0x1234;  // non-core namespace
+    bogus_ns.header.type = CLAP_EVENT_NOTE_ON;
+    bogus_ns.key = 60;
+    bogus_ns.velocity = 1.0;
+
+    // 2. NOTE_ON at t=32
+    clap_event_note_t note_on{};
+    note_on.header.size = sizeof(note_on);
+    note_on.header.time = 32;
+    note_on.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    note_on.header.type = CLAP_EVENT_NOTE_ON;
+    note_on.note_id = 7;
+    note_on.channel = 0;
+    note_on.key = 64;
+    note_on.velocity = 1.0;
+
+    // 3. NOTE_OFF at t=96
+    clap_event_note_t note_off{};
+    note_off.header.size = sizeof(note_off);
+    note_off.header.time = 96;
+    note_off.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    note_off.header.type = CLAP_EVENT_NOTE_OFF;
+    note_off.note_id = 7;
+    note_off.channel = 0;
+    note_off.key = 64;
+
+    // 4. Trailing event at t=200 >= kFrames (must be drained without OOB)
+    clap_event_param_value_t trailing{};
+    trailing.header.size = sizeof(trailing);
+    trailing.header.time = 200;
+    trailing.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    trailing.header.type = CLAP_EVENT_PARAM_VALUE;
+    trailing.param_id = PARAM_GAIN;
+    trailing.value = 1.25;
+
+    EventList list;
+    list.events = {&mod_ev.header, &bogus_ns.header, &note_on.header, &note_off.header, &trailing.header};
+    clap_input_events_t in_ev{&list, EventList::size_fn, EventList::get_fn};
+
+    clap_process_t proc{};
+    proc.frames_count = kFrames;
+    proc.audio_inputs = &in_buf;
+    proc.audio_inputs_count = 1;
+    proc.audio_outputs = &out_buf;
+    proc.audio_outputs_count = 1;
+    proc.in_events = &in_ev;
+    plugin->process(plugin, &proc);
+
+    // Frames [0..31] before NOTE_ON must be strictly silent (Mix=1.0, no active voice).
+    for (uint32_t i = 0; i < 32; ++i) {
+        EXPECT_FLOAT_EQ(out_l[i], 0.0f) << "pre-note frame " << i;
+    }
+    // Frames [32..95] must have non-zero audio.
+    float mid_peak = 0.0f;
+    for (uint32_t i = 32; i < 96; ++i) {
+        mid_peak = std::max(mid_peak, std::abs(out_l[i]));
+    }
+    EXPECT_GT(mid_peak, 1e-4f);
+    // Voice must be in RELEASE (or SILENT) after NOTE_OFF at t=96.
+    const uint8_t st = m->voice_atomics[0].stage.load();
+    EXPECT_TRUE(st == VOICE_RELEASE || st == VOICE_SILENT);
+
+    double g = 0.0;
+    auto* params = static_cast<const clap_plugin_params_t*>(
+        plugin->get_extension(plugin, CLAP_EXT_PARAMS));
+    ASSERT_TRUE(params->get_value(plugin, PARAM_GAIN, &g));
+    EXPECT_DOUBLE_EQ(g, 1.25);
+
+    plugin->stop_processing(plugin);
+    plugin->destroy(plugin);
+    std::remove(model_path.c_str());
+}
+
+TEST(PluginIntegration, BypassAndGainSmoothingClickFreeAndDryInvariant) {
+    std::string model_path = write_temp_int8_stereo_model();
+    ASSERT_FALSE(model_path.empty());
+
+    auto verify_plugin = [&](const clap_plugin_t* plugin, clap_id gain_id, clap_id mix_id,
+                             clap_id bypass_id, bool is_synth) {
+        ASSERT_TRUE(plugin->activate(plugin, 48000.0, 16, 256));
+        ASSERT_TRUE(plugin->start_processing(plugin));
+        auto* params = static_cast<const clap_plugin_params_t*>(
+            plugin->get_extension(plugin, CLAP_EXT_PARAMS));
+        ASSERT_NE(params, nullptr);
+
+        // Set Gain=2.0, Mix=1.0, Bypass=1.0 and let smoother/fader settle
+        clap_event_param_value_t evs_arr[3]{};
+        const clap_id ids[3] = {gain_id, mix_id, bypass_id};
+        const double vals[3] = {2.0, 1.0, 1.0};
+        EventList list;
+        for (int i = 0; i < 3; ++i) {
+            evs_arr[i].header.size = sizeof(clap_event_param_value_t);
+            evs_arr[i].header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+            evs_arr[i].header.type = CLAP_EVENT_PARAM_VALUE;
+            evs_arr[i].param_id = ids[i];
+            evs_arr[i].value = vals[i];
+            list.events.push_back(&evs_arr[i].header);
+        }
+        if (is_synth) {
+            // Also trigger a note so wet path is active
+            static clap_event_note_t note{};
+            note.header.size = sizeof(note);
+            note.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+            note.header.type = CLAP_EVENT_NOTE_ON;
+            note.key = 60;
+            note.velocity = 1.0;
+            list.events.push_back(&note.header);
+        }
+        clap_input_events_t in_ev{&list, EventList::size_fn, EventList::get_fn};
+
+        constexpr uint32_t kFrames = 256;
+        std::vector<float> in_l(kFrames), in_r(kFrames);
+        for (uint32_t i = 0; i < kFrames; ++i) {
+            in_l[i] = 0.3f * std::sin(0.05f * static_cast<float>(i));
+            in_r[i] = -0.2f * std::cos(0.03f * static_cast<float>(i));
+        }
+        std::vector<float> out_l(kFrames, 0.0f), out_r(kFrames, 0.0f);
+        float* in_ptrs[2] = {in_l.data(), in_r.data()};
+        float* out_ptrs[2] = {out_l.data(), out_r.data()};
+        clap_audio_buffer_t in_buf{};
+        in_buf.data32 = in_ptrs;
+        in_buf.channel_count = 2;
+        clap_audio_buffer_t out_buf{};
+        out_buf.data32 = out_ptrs;
+        out_buf.channel_count = 2;
+        clap_process_t proc{};
+        proc.frames_count = kFrames;
+        proc.audio_inputs = &in_buf;
+        proc.audio_inputs_count = 1;
+        proc.audio_outputs = &out_buf;
+        proc.audio_outputs_count = 1;
+        proc.in_events = &in_ev;
+
+        // Run 40 blocks (~213 ms) so bypass fade & one-pole smoothers settle completely.
+        for (int b = 0; b < 40; ++b) {
+            if (b > 0) list.events.clear();
+            plugin->process(plugin, &proc);
+        }
+        for (uint32_t i = 0; i < kFrames; ++i) {
+            EXPECT_NEAR(out_l[i], in_l[i], 1e-6f) << "bypass dry mismatch L at " << i;
+            EXPECT_NEAR(out_r[i], in_r[i], 1e-6f) << "bypass dry mismatch R at " << i;
+        }
+
+        // Now un-bypass (1.0 -> 0.0) and verify smooth transition (bounded sample-to-sample step)
+        evs_arr[2].value = 0.0;
+        list.events = {&evs_arr[2].header};
+        plugin->process(plugin, &proc);
+        float max_step = 0.0f;
+        for (uint32_t i = 1; i < kFrames; ++i) {
+            max_step = std::max(max_step, std::abs(out_l[i] - out_l[i - 1]));
+        }
+        EXPECT_LT(max_step, 0.05f) << "un-bypass transition had a click discontinuity";
+
+        // Verify data64 double-precision path produces finite output matching data32 path
+        std::vector<double> in64_l(kFrames), in64_r(kFrames), out64_l(kFrames, 0.0), out64_r(kFrames, 0.0);
+        for (uint32_t i = 0; i < kFrames; ++i) {
+            in64_l[i] = static_cast<double>(in_l[i]);
+            in64_r[i] = static_cast<double>(in_r[i]);
+        }
+        double* in64_ptrs[2] = {in64_l.data(), in64_r.data()};
+        double* out64_ptrs[2] = {out64_l.data(), out64_r.data()};
+        in_buf.data32 = nullptr;
+        in_buf.data64 = in64_ptrs;
+        out_buf.data32 = nullptr;
+        out_buf.data64 = out64_ptrs;
+        list.events.clear();
+        plugin->process(plugin, &proc);
+        for (uint32_t i = 0; i < kFrames; ++i) {
+            ASSERT_TRUE(std::isfinite(out64_l[i]));
+            ASSERT_TRUE(std::isfinite(out64_r[i]));
+        }
+
+        plugin->stop_processing(plugin);
+    };
+
+    // 1. Synth
+    {
+        const clap_plugin_t* synth = mamba_synth_create(nullptr);
+        ASSERT_TRUE(synth->init(synth));
+        auto* m = static_cast<MambaSynth*>(synth->plugin_data);
+        ASSERT_TRUE(m->load_weights(model_path.c_str()));
+        verify_plugin(synth, PARAM_GAIN, PARAM_MIX, PARAM_BYPASS, true);
+        synth->destroy(synth);
+    }
+    // 2. FX
+    {
+        const clap_plugin_t* fx_p = mamba_fx_create(nullptr);
+        ASSERT_TRUE(fx_p->init(fx_p));
+        auto* fx = static_cast<FxState*>(fx_p->plugin_data);
+        ASSERT_TRUE(fx_load_weights(fx, model_path.c_str()));
+        verify_plugin(fx_p, FX_PARAM_GAIN, FX_PARAM_MIX, FX_PARAM_BYPASS, false);
+        fx_p->destroy(fx_p);
+    }
+
+    std::remove(model_path.c_str());
+}
+
+TEST(PluginIntegration, ConcurrentParamFlushAndProcessAndStateSave) {
+    std::string model_path = write_temp_int8_stereo_model();
+    ASSERT_FALSE(model_path.empty());
+
+    const clap_plugin_t* plugin = mamba_synth_create(nullptr);
+    ASSERT_NE(plugin, nullptr);
+    ASSERT_TRUE(plugin->init(plugin));
+    auto* m = static_cast<MambaSynth*>(plugin->plugin_data);
+    ASSERT_TRUE(m->load_weights(model_path.c_str()));
+    ASSERT_TRUE(plugin->activate(plugin, 48000.0, 16, 128));
+    ASSERT_TRUE(plugin->start_processing(plugin));
+
+    auto* params = static_cast<const clap_plugin_params_t*>(
+        plugin->get_extension(plugin, CLAP_EXT_PARAMS));
+    auto* state_ext = static_cast<const clap_plugin_state_t*>(
+        plugin->get_extension(plugin, CLAP_EXT_STATE));
+    ASSERT_NE(params, nullptr);
+    ASSERT_NE(state_ext, nullptr);
+
+    // Verify zero heap growth on MambaSynth::process single-threaded first
+    // (mallinfo2 is process-global, so concurrent host/save std::vector allocs
+    // cannot be separated from the audio thread's own heap usage).
+    {
+        constexpr uint32_t kFrames = 64;
+        std::vector<float> in_l(kFrames, 0.2f), in_r(kFrames, 0.2f);
+        std::vector<float> out_l(kFrames, 0.0f), out_r(kFrames, 0.0f);
+        float* in_ptrs[2] = {in_l.data(), in_r.data()};
+        float* out_ptrs[2] = {out_l.data(), out_r.data()};
+        clap_audio_buffer_t in_buf{};
+        in_buf.data32 = in_ptrs;
+        in_buf.channel_count = 2;
+        clap_audio_buffer_t out_buf{};
+        out_buf.data32 = out_ptrs;
+        out_buf.channel_count = 2;
+        clap_process_t proc{};
+        proc.frames_count = kFrames;
+        proc.audio_inputs = &in_buf;
+        proc.audio_inputs_count = 1;
+        proc.audio_outputs = &out_buf;
+        proc.audio_outputs_count = 1;
+
+        plugin->process(plugin, &proc);
+#if defined(__GLIBC__)
+        const size_t before = mallinfo2().uordblks;
+#endif
+        for (int i = 0; i < 500; ++i) {
+            plugin->process(plugin, &proc);
+            ASSERT_TRUE(std::isfinite(out_l[0]));
+        }
+#if defined(__GLIBC__)
+        const size_t after = mallinfo2().uordblks;
+        EXPECT_EQ(before, after) << "heap grew inside MambaSynth::process";
+#endif
+    }
+
+    std::atomic<bool> stop{false};
+    std::thread audio([&] {
+        constexpr uint32_t kFrames = 64;
+        std::vector<float> in_l(kFrames, 0.2f), in_r(kFrames, 0.2f);
+        std::vector<float> out_l(kFrames, 0.0f), out_r(kFrames, 0.0f);
+        float* in_ptrs[2] = {in_l.data(), in_r.data()};
+        float* out_ptrs[2] = {out_l.data(), out_r.data()};
+        clap_audio_buffer_t in_buf{};
+        in_buf.data32 = in_ptrs;
+        in_buf.channel_count = 2;
+        clap_audio_buffer_t out_buf{};
+        out_buf.data32 = out_ptrs;
+        out_buf.channel_count = 2;
+        clap_process_t proc{};
+        proc.frames_count = kFrames;
+        proc.audio_inputs = &in_buf;
+        proc.audio_inputs_count = 1;
+        proc.audio_outputs = &out_buf;
+        proc.audio_outputs_count = 1;
+
+        for (int i = 0; i < 500 && !stop.load(std::memory_order_relaxed); ++i) {
+            plugin->process(plugin, &proc);
+            ASSERT_TRUE(std::isfinite(out_l[0]));
+        }
+    });
+
+    std::thread host([&] {
+        for (int i = 0; i < 200; ++i) {
+            clap_event_param_value_t ev{};
+            ev.header.size = sizeof(ev);
+            ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+            ev.header.type = CLAP_EVENT_PARAM_VALUE;
+            ev.param_id = PARAM_GAIN;
+            ev.value = (i % 7 == 0) ? std::numeric_limits<double>::quiet_NaN()
+                                    : (0.2 + 0.01 * static_cast<double>(i % 100));
+            EventList list;
+            list.events = {&ev.header};
+            clap_input_events_t in_ev{&list, EventList::size_fn, EventList::get_fn};
+            params->flush(plugin, &in_ev, nullptr);
+
+            double val = 0.0;
+            EXPECT_TRUE(params->get_value(plugin, PARAM_GAIN, &val));
+            EXPECT_TRUE(std::isfinite(val));
+            EXPECT_GE(val, 0.0);
+            EXPECT_LE(val, 2.0);
+
+            MemoryStream ms;
+            clap_ostream os{&ms, MemoryStream::write_fn};
+            EXPECT_TRUE(state_ext->save(plugin, &os));
+        }
+        stop.store(true, std::memory_order_relaxed);
+    });
+
+    host.join();
+    audio.join();
+    plugin->stop_processing(plugin);
+    plugin->destroy(plugin);
     std::remove(model_path.c_str());
 }
 

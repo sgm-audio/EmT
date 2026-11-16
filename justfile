@@ -34,6 +34,13 @@ build:
 test: build
     ctest --test-dir $(BUILD_DIR) --output-on-failure $(CTEST_CONFIG_FLAG) $(BUILD_CONFIG)
 
+# Run full test suite with generated parity vectors and multi-layer weights (fails on skip)
+test-full: build
+    python3 scripts/reference_mamba3.py --generate --output-dir $(BUILD_DIR)
+    mkdir -p models
+    python3 scripts/export_mamba_weights.py --state-dim 16 --model-dim 16 --inner-dim 32 --nheads 2 --layers 2 --random-init --output models/ci_test_model.bin
+    MAMBA_PARITY_DIR="$(PWD)/$(BUILD_DIR)" MAMBA_REQUIRE_PARITY=1 MAMBA_TEST_WEIGHTS="$(PWD)/models/ci_test_model.bin" ctest --test-dir $(BUILD_DIR) --output-on-failure $(CTEST_CONFIG_FLAG) $(BUILD_CONFIG)
+
 # Run clap-validator specifically
 validate: build
     ctest --test-dir $(BUILD_DIR) -R "clap-validator" --output-on-failure $(CTEST_CONFIG_FLAG) $(BUILD_CONFIG)

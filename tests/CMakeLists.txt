@@ -112,6 +112,7 @@ emt_add_test(test_clap_state
     ${PROJECT_SOURCE_DIR}/src/clap/gui_common.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/gui_stub.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/preset_paths.cpp)
+target_link_libraries(test_clap_state PRIVATE Threads::Threads)
 target_include_directories(test_clap_state PRIVATE
     ${PROJECT_SOURCE_DIR}/extern/clap/include)
 

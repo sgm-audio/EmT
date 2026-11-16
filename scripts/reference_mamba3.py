@@ -426,7 +426,237 @@ def generate_test_vectors(
             f.write(results[f"out_{i}"].tobytes())
 
     print(f"Wrote {expect_path} ({len(test_inputs)} outputs)")
+    generate_edge_case_vectors(output_dir)
     return weight_path, expect_path, test_inputs
+
+
+def _write_multilayer_parity(
+    output_dir: str,
+    prefix: str,
+    seed: int,
+    d_state: int,
+    d_model: int,
+    d_inner: int,
+    nheads: int,
+    num_layers: int,
+    d_cond: int,
+    test_inputs: list[float],
+    conditioning_active: bool,
+    nonzero_mimo_padding: bool = False,
+    dt_bias_override: np.ndarray | None = None,
+    in_proj_scale: float = 0.1,
+):
+    headdim = d_inner // nheads
+    mimo_rank = 1
+    num_bc_heads = 1
+    num_rope_angles = d_state // 2
+    rng = np.random.RandomState(seed)
+
+    in_proj_out = d_inner * 2 + nheads * mimo_rank * d_state * 2 + nheads * 3 + num_rope_angles
+    in_proj_out_file = (
+        d_inner * 2 + nheads * MAX_MIMO_RANK * d_state * 2 + nheads * 3 + MAX_NUM_ROPE_ANGLES
+    )
+    fpl = floats_per_layer(d_state, d_model, d_inner, nheads, headdim, d_cond)
+
+    layers = []
+    for _ in range(num_layers):
+        in_proj_w = rng.randn(in_proj_out, d_model).astype(np.float32) * in_proj_scale
+        dt_bias = (
+            dt_bias_override.astype(np.float32).copy()
+            if dt_bias_override is not None
+            else rng.randn(nheads).astype(np.float32) * 0.1
+        )
+        B_bias = rng.randn(nheads, mimo_rank, d_state).astype(np.float32) * 0.1
+        C_bias = rng.randn(nheads, mimo_rank, d_state).astype(np.float32) * 0.1
+        B_norm_weight = 1.0 + rng.randn(d_state).astype(np.float32) * 0.1
+        C_norm_weight = 1.0 + rng.randn(d_state).astype(np.float32) * 0.1
+        D_proj = rng.randn(nheads).astype(np.float32) * 0.1
+        out_proj_w = rng.randn(d_model, d_inner).astype(np.float32) * 0.1
+        film_proj_w = rng.randn(2 * d_model, d_cond).astype(np.float32) * 0.01
+        dt_film_proj_w = rng.randn(2 * nheads, d_cond).astype(np.float32) * 0.01
+        layers.append(
+            {
+                "in_proj_w": in_proj_w,
+                "dt_bias": dt_bias,
+                "B_bias": B_bias,
+                "C_bias": C_bias,
+                "B_norm_weight": B_norm_weight,
+                "C_norm_weight": C_norm_weight,
+                "D_proj": D_proj,
+                "out_proj_w": out_proj_w,
+                "film_proj_w": film_proj_w,
+                "dt_film_proj_w": dt_film_proj_w,
+                "ssm_real": np.zeros((nheads, headdim, d_state), dtype=np.float32),
+                "angle_state": np.zeros((nheads, num_rope_angles), dtype=np.float32),
+            }
+        )
+
+    os.makedirs(output_dir, exist_ok=True)
+    weight_path = os.path.join(output_dir, f"{prefix}_weights.bin")
+    with open(weight_path, "wb") as f:
+        f.write(
+            make_header(
+                d_state,
+                d_model,
+                d_inner,
+                nheads,
+                headdim,
+                num_layers,
+                d_cond,
+                fpl * num_layers * 4,
+                mimo_rank,
+            )
+        )
+        for lw in layers:
+            in_proj_w = lw["in_proj_w"]
+            in_proj_w_file = np.zeros((in_proj_out_file, d_model), dtype=np.float32)
+            in_proj_w_file[: d_inner * 2, :] = in_proj_w[: d_inner * 2, :]
+            b_start = d_inner * 2
+            for h_idx in range(nheads):
+                old_offset = b_start + h_idx * d_state
+                new_offset = b_start + h_idx * MAX_MIMO_RANK * d_state
+                in_proj_w_file[new_offset : new_offset + d_state, :] = in_proj_w[
+                    old_offset : old_offset + d_state, :
+                ]
+            c_start = b_start + nheads * MAX_MIMO_RANK * d_state
+            c_start_orig = b_start + nheads * d_state
+            for h_idx in range(nheads):
+                old_offset = c_start_orig + h_idx * d_state
+                new_offset = c_start + h_idx * MAX_MIMO_RANK * d_state
+                in_proj_w_file[new_offset : new_offset + d_state, :] = in_proj_w[
+                    old_offset : old_offset + d_state, :
+                ]
+            rest_start_new = c_start + nheads * MAX_MIMO_RANK * d_state
+            rest_start_old = c_start_orig + nheads * d_state
+            dt_a_trap_size = nheads * 3
+            in_proj_w_file[rest_start_new : rest_start_new + dt_a_trap_size, :] = in_proj_w[
+                rest_start_old : rest_start_old + dt_a_trap_size, :
+            ]
+            angles_start_new = rest_start_new + dt_a_trap_size
+            angles_start_old = rest_start_old + dt_a_trap_size
+            in_proj_w_file[angles_start_new : angles_start_new + num_rope_angles, :] = in_proj_w[
+                angles_start_old : angles_start_old + num_rope_angles, :
+            ]
+
+            B_bias_file = np.zeros((nheads, MAX_MIMO_RANK, d_state), dtype=np.float32)
+            B_bias_file[:, :mimo_rank, :] = lw["B_bias"]
+            C_bias_file = np.zeros((nheads, MAX_MIMO_RANK, d_state), dtype=np.float32)
+            C_bias_file[:, :mimo_rank, :] = lw["C_bias"]
+            if nonzero_mimo_padding:
+                mimo_x = rng.randn(nheads, MAX_MIMO_RANK, headdim).astype(np.float32) * 0.5
+                mimo_z = rng.randn(nheads, MAX_MIMO_RANK, headdim).astype(np.float32) * 0.5
+                mimo_o = rng.randn(nheads, MAX_MIMO_RANK, headdim).astype(np.float32) * 0.5
+            else:
+                mimo_x = np.zeros((nheads, MAX_MIMO_RANK, headdim), dtype=np.float32)
+                mimo_z = np.zeros((nheads, MAX_MIMO_RANK, headdim), dtype=np.float32)
+                mimo_o = np.zeros((nheads, MAX_MIMO_RANK, headdim), dtype=np.float32)
+
+            for arr in (
+                in_proj_w_file,
+                lw["dt_bias"],
+                B_bias_file,
+                C_bias_file,
+                lw["B_norm_weight"],
+                lw["C_norm_weight"],
+                mimo_x,
+                mimo_z,
+                mimo_o,
+                lw["D_proj"],
+                lw["out_proj_w"],
+                lw["film_proj_w"],
+                lw["dt_film_proj_w"],
+            ):
+                f.write(arr.astype(np.float32).tobytes())
+
+    cond = np.zeros(d_cond, dtype=np.float32)
+    if conditioning_active:
+        cond[0] = 0.5
+        cond[1] = -0.25
+
+    expect_path = os.path.join(output_dir, f"{prefix}_expected.bin")
+    with open(expect_path, "wb") as f:
+        for val in test_inputs:
+            layer_in = float(val)
+            out = None
+            for lw in layers:
+                out, lw["ssm_real"], lw["angle_state"] = mamba3_process_sample(
+                    layer_in,
+                    d_state,
+                    d_model,
+                    d_inner,
+                    nheads,
+                    headdim,
+                    mimo_rank,
+                    num_bc_heads,
+                    d_cond,
+                    lw["in_proj_w"],
+                    lw["dt_bias"],
+                    lw["B_bias"],
+                    lw["C_bias"],
+                    lw["B_norm_weight"],
+                    lw["C_norm_weight"],
+                    lw["D_proj"],
+                    lw["out_proj_w"],
+                    lw["film_proj_w"],
+                    lw["dt_film_proj_w"],
+                    lw["ssm_real"],
+                    lw["angle_state"],
+                    cond,
+                    conditioning_active,
+                )
+                layer_in = float(np.sum(out, dtype=np.float32))
+            f.write(out.astype(np.float32).tobytes())
+
+
+def generate_edge_case_vectors(output_dir: str):
+    """Generate multi-layer, train4070-shape, and extreme-delta parity vectors."""
+    inputs_32 = [math.sin(0.37 * i) * 0.8 for i in range(32)]
+    # 1. 2-layer d_model=16 with unconditioned path and non-zero mimo_* padding
+    _write_multilayer_parity(
+        output_dir,
+        "parity_multilayer",
+        seed=101,
+        d_state=16,
+        d_model=16,
+        d_inner=32,
+        nheads=2,
+        num_layers=2,
+        d_cond=128,
+        test_inputs=inputs_32,
+        conditioning_active=False,
+        nonzero_mimo_padding=True,
+    )
+    # 2. train4070 shape (d_model=1, d_state=32, d_inner=64, nheads=2, layers=2, cond=32)
+    _write_multilayer_parity(
+        output_dir,
+        "parity_train4070",
+        seed=202,
+        d_state=32,
+        d_model=1,
+        d_inner=64,
+        nheads=2,
+        num_layers=2,
+        d_cond=32,
+        test_inputs=inputs_32,
+        conditioning_active=True,
+    )
+    # 3. Extreme delta + A saturation regimes (dt_pre < -20 and > +20, dd_A large)
+    inputs_64 = [math.cos(0.23 * i) for i in range(64)]
+    _write_multilayer_parity(
+        output_dir,
+        "parity_extreme_dt",
+        seed=303,
+        d_state=16,
+        d_model=4,
+        d_inner=16,
+        nheads=2,
+        num_layers=1,
+        d_cond=16,
+        test_inputs=inputs_64,
+        conditioning_active=True,
+        dt_bias_override=np.array([-30.0, 30.0], dtype=np.float32),
+        in_proj_scale=2.5,
+    )
 
 
 def main():
