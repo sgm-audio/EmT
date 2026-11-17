@@ -236,3 +236,51 @@ TEST(RecurrenceKernel, AnalyticalImpulseAndStepSteadyState) {
     }
     EXPECT_NEAR(prev_y, 1.0f / std::fabs(A), 1e-5f);
 }
+
+// Adversarial numerical conditioning: extreme pole decay A and step sizes dt
+// driven by Nyquist alternation x[n] = (-1)^n.
+TEST(RecurrenceKernel, ExtremePoleAndDeltaNyquistResonance) {
+    const float extreme_poles[] = {-1.0e4f, -100.0f, -1.0f, -1.0e-3f, -1.0e-5f};
+    const float extreme_dts[] = {1.0e-5f, 1.0e-3f, 0.1f, 10.0f, 1.0e3f};
+    const float B = 0.5f;
+    const float C = 0.5f;
+
+    for (float A : extreme_poles) {
+        for (float dt : extreme_dts) {
+            const auto k = mamba::recurrence::bilinear_coeffs(A, dt);
+
+            // 1. Bilinear A-stability: continuous left half-plane Re(A) < 0 must
+            // map inside or on the unit circle |a_bar| <= 1.0 in float32. In infinite
+            // precision |a_bar| = |(1 + A*dt/2)/(1 - A*dt/2)| < 1 strictly for all A < 0, dt > 0.
+            EXPECT_LE(std::fabs(k.a_bar), 1.0f) << "A=" << A << " dt=" << dt;
+            const double half_d = static_cast<double>(A) * static_cast<double>(dt) * 0.5;
+            const double a_bar_exact = (1.0 + half_d) / (1.0 - half_d);
+            EXPECT_LT(std::fabs(a_bar_exact), 1.0) << "A=" << A << " dt=" << dt;
+
+            EXPECT_GT(k.b_bar_scale, 0.0f) << "A=" << A << " dt=" << dt;
+            EXPECT_FALSE(std::isnan(k.a_bar));
+            EXPECT_FALSE(std::isinf(k.a_bar));
+            EXPECT_FALSE(std::isnan(k.b_bar_scale));
+            EXPECT_FALSE(std::isinf(k.b_bar_scale));
+
+            // 2. Alternating Nyquist drive x[n] = (-1)^n
+            float h = 0.0f;
+            float max_h = 0.0f;
+            for (int n = 0; n < 1000; ++n) {
+                float y = 0.0f;
+                const float x = (n % 2 == 0) ? 1.0f : -1.0f;
+                mamba::recurrence::two_term_element(h, y, k.a_bar, k.b_bar_scale, B, C, x);
+
+                ASSERT_TRUE(std::isfinite(h)) << "A=" << A << " dt=" << dt << " sample " << n;
+                ASSERT_TRUE(std::isfinite(y)) << "A=" << A << " dt=" << dt << " sample " << n;
+                max_h = std::max(max_h, std::fabs(h));
+            }
+
+            // Analytical upper bound on state magnitude for bounded |x| <= 1:
+            // |h_n| <= b_bar * |B| * (1 / (1 - |a_bar|))
+            const float bound = (k.b_bar_scale * std::fabs(B) / (1.0f - std::fabs(k.a_bar))) * 1.01f + 1e-4f;
+            EXPECT_LE(max_h, bound) << "A=" << A << " dt=" << dt;
+        }
+    }
+}
+

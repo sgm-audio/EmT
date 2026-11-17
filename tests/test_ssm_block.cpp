@@ -32,6 +32,12 @@ static std::unique_ptr<SSMWeights> make_test_weights() {
         w->B_norm_weight[s] = 1.0f;
         w->C_norm_weight[s] = 1.0f;
     }
+    for (size_t h = 0; h < MAX_NHEADS; ++h) {
+        for (size_t r = 0; r < MAX_MIMO_RANK; ++r) {
+            w->B_bias[h][r][0] = 0.5f;
+            w->C_bias[h][r][0] = 0.5f;
+        }
+    }
     for (size_t j = 0; j < MAX_D_MODEL && j < MAX_D_INNER; ++j) {
         w->out_proj_w[j][j] = 1.0f;
     }
@@ -42,10 +48,29 @@ TEST(SSMBlock, ResetClearsState) {
     auto block = make_test_block();
     block->set_weights(*make_test_weights());
     alignas(64) float buf[MAX_D_MODEL];
-    for (int i = 0; i < 10; ++i) block->process_sample(1.0f, buf);
+    for (int i = 0; i < 50; ++i) block->process_sample(1.0f, buf);
+
+    // Verify state was populated and non-zero
+    const auto* state_bytes_before = reinterpret_cast<const uint8_t*>(&block->state());
+    bool had_nonzero = false;
+    for (size_t b = 0; b < sizeof(SSMState); ++b) {
+        if (state_bytes_before[b] != 0) {
+            had_nonzero = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(had_nonzero) << "State was never populated before reset";
+
     block->reset();
+
+    // Verify all internal state memory is bit-exact zeroed
+    const auto* state_bytes_after = reinterpret_cast<const uint8_t*>(&block->state());
+    for (size_t b = 0; b < sizeof(SSMState); ++b) {
+        ASSERT_EQ(state_bytes_after[b], 0u) << "Non-zero byte in state at offset " << b;
+    }
+
     block->process_sample(0.0f, buf);
-    EXPECT_NEAR(buf[0], 0.0f, 1e-3f);
+    EXPECT_NEAR(buf[0], 0.0f, 1e-6f);
 }
 
 TEST(SSMBlock, ProcessBlockProducesOutput) {

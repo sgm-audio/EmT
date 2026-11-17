@@ -5,6 +5,7 @@
 #include "common/conditioning_frame.h"
 #include "config.h"
 #include "clap/clap_fx_plugin.h"
+#include "fixtures/weight_fixture.h"
 #include <cmath>
 #include <memory>
 #include <vector>
@@ -297,13 +298,18 @@ bool write_raw_header(const char* path, uint32_t d_state, uint32_t d_model,
 }  // namespace
 
 TEST(RealtimeSafety, FxAcceptsMultiLayerWeightsWithinLimits) {
-    const char* path = std::getenv("MAMBA_TEST_WEIGHTS");
+    const char* path_env = std::getenv("MAMBA_TEST_WEIGHTS");
+    test::TempWeightFile auto_weights("mamba_test_multi_");
+    const char* path = path_env;
     if (!path || path[0] == '\0') {
         const char* require = std::getenv("MAMBA_REQUIRE_PARITY");
         if (require && require[0] != '\0' && require[0] != '0') {
             FAIL() << "MAMBA_REQUIRE_PARITY is set but MAMBA_TEST_WEIGHTS is unset";
         }
-        GTEST_SKIP() << "set MAMBA_TEST_WEIGHTS to a generated .bin to run this";
+        test::WeightFileSpec spec;
+        spec.num_layers = 2;
+        ASSERT_TRUE(test::write_weight_file(auto_weights.path, spec));
+        path = auto_weights.path;
     }
 
     const clap_plugin_t* plugin = mamba_fx_create(nullptr);
@@ -410,15 +416,51 @@ TEST(RealtimeSafety, FxProcessZeroAllocations) {
     proc.audio_outputs = &out_bufs;
     proc.audio_outputs_count = 1;
 
-    // Warm up
+    // Event queue to stream events into process()
+    struct TestEventList {
+        std::array<const clap_event_header_t*, 4> events{};
+        uint32_t count = 0;
+        static uint32_t CLAP_ABI size_fn(const clap_input_events_t* list) {
+            return static_cast<const TestEventList*>(list->ctx)->count;
+        }
+        static const clap_event_header_t* CLAP_ABI get_fn(const clap_input_events_t* list, uint32_t idx) {
+            return static_cast<const TestEventList*>(list->ctx)->events[idx];
+        }
+    } ev_ctx;
+    clap_input_events_t in_events{&ev_ctx, TestEventList::size_fn, TestEventList::get_fn};
+    proc.in_events = &in_events;
+
+    clap_event_param_value_t warmup_ev{};
+    warmup_ev.header.size = sizeof(warmup_ev);
+    warmup_ev.header.time = 0;
+    warmup_ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    warmup_ev.header.type = CLAP_EVENT_PARAM_VALUE;
+    warmup_ev.param_id = FX_PARAM_GAIN;
+    warmup_ev.value = 1.0;
+    ev_ctx.events[0] = &warmup_ev.header;
+    ev_ctx.count = 1;
+
+    // Warm up audio + event processing
     plugin->process(plugin, &proc);
+
 #if defined(__GLIBC__)
+    clap_event_param_value_t loop_ev{};
+    loop_ev.header.size = sizeof(loop_ev);
+    loop_ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    loop_ev.header.type = CLAP_EVENT_PARAM_VALUE;
+    ev_ctx.events[0] = &loop_ev.header;
+    ev_ctx.count = 1;
+
     const size_t before = mallinfo2().uordblks;
     for (int i = 0; i < 500; ++i) {
+        loop_ev.header.time = static_cast<uint32_t>(i % 64);
+        loop_ev.param_id = (i % 2 == 0) ? FX_PARAM_GAIN : FX_PARAM_MIX;
+        loop_ev.value = 0.5 + 0.1 * static_cast<double>(i % 5);
+
         plugin->process(plugin, &proc);
     }
     const size_t after = mallinfo2().uordblks;
-    EXPECT_EQ(before, after) << "heap grew inside fx_process";
+    EXPECT_EQ(before, after) << "heap grew inside fx_process while processing parameter events";
 #endif
     EXPECT_TRUE(std::isfinite(out[0]));
     plugin->stop_processing(plugin);

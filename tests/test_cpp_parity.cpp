@@ -71,7 +71,9 @@ std::string resolve_test_file(const std::string& filename) {
     // 2. Check candidate paths relative to current working directory
     const std::vector<std::string> relative_candidates = {
         "build/" + filename,
+        "build/tests/" + filename,
         filename,
+        "tests/" + filename,
         "apps/emt/build/" + filename,
         "apps/emt/" + filename,
         "apps/emt/models/" + filename,
@@ -101,6 +103,10 @@ std::string resolve_test_file(const std::string& filename) {
         std::filesystem::path p2 = cur / "build" / filename;
         if (std::filesystem::exists(p2, ec)) {
             return p2.string();
+        }
+        std::filesystem::path p3 = cur / "tests" / filename;
+        if (std::filesystem::exists(p3, ec)) {
+            return p3.string();
         }
         if (cur.has_parent_path() && cur.parent_path() != cur) {
             cur = cur.parent_path();

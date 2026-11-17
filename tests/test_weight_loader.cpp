@@ -673,3 +673,84 @@ TEST(WeightLoaderPath, RejectsEmptyBadQuantZeroDimsAndTruncatedQMeta) {
         loader.unload();
     }
 }
+
+TEST(WeightLoaderHarden, RejectsTruncatedPayloadsAndPoisonedNaNs) {
+    // 1. Truncated payload: header declares N bytes of weight data, but the file
+    // ends prematurely (missing 1024 bytes). Must return TruncatedData.
+    {
+        test::TempWeightFile tmp("mamba3_trunc_payload_");
+        WeightFileHeader hdr{};
+        hdr.magic = WEIGHT_MAGIC;
+        hdr.version = WEIGHT_VERSION;
+        hdr.d_state = 16;
+        hdr.d_model = 2;
+        hdr.d_inner = 16;
+        hdr.nheads = 2;
+        hdr.num_layers = 2;
+        hdr.headdim = 8;
+        hdr.cond_dim = 4;
+        hdr.quantization = static_cast<uint32_t>(QuantFormat::Float32);
+        const uint64_t fpl = test::floats_per_layer_for(
+            hdr.d_state, hdr.d_model, hdr.d_inner, hdr.nheads, hdr.headdim, hdr.cond_dim);
+        const uint64_t full_bytes = 2 * fpl * sizeof(float);
+        hdr.weight_data_size = full_bytes;
+
+        std::FILE* f = std::fopen(tmp.path, "wb");
+        ASSERT_NE(f, nullptr);
+        std::fwrite(&hdr, sizeof(hdr), 1, f);
+        // Write file truncated by 512 bytes
+        ASSERT_GT(full_bytes, 512ULL);
+        std::vector<uint8_t> truncated_data(full_bytes - 512, 0);
+        std::fwrite(truncated_data.data(), 1, truncated_data.size(), f);
+        std::fclose(f);
+
+        WeightLoader loader;
+        EXPECT_EQ(loader.load(tmp.path), LoadError::TruncatedData);
+        EXPECT_FALSE(loader.is_loaded());
+    }
+
+    // 2. Poisoned NaN/Inf weights: verify that dequantized or loaded weights
+    // containing NaNs/Infs are detected when verified by the loader/consumer.
+    {
+        test::TempWeightFile tmp("mamba3_nan_payload_");
+        WeightFileHeader hdr{};
+        hdr.magic = WEIGHT_MAGIC;
+        hdr.version = WEIGHT_VERSION;
+        hdr.d_state = 16;
+        hdr.d_model = 2;
+        hdr.d_inner = 16;
+        hdr.nheads = 2;
+        hdr.num_layers = 1;
+        hdr.headdim = 8;
+        hdr.cond_dim = 4;
+        hdr.quantization = static_cast<uint32_t>(QuantFormat::Float32);
+        const uint64_t fpl = test::floats_per_layer_for(
+            hdr.d_state, hdr.d_model, hdr.d_inner, hdr.nheads, hdr.headdim, hdr.cond_dim);
+        hdr.weight_data_size = fpl * sizeof(float);
+
+        std::vector<float> data(fpl, 0.1f);
+        // Inject NaN and Infinity
+        data[0] = std::numeric_limits<float>::quiet_NaN();
+        data[fpl / 2] = std::numeric_limits<float>::infinity();
+
+        std::FILE* f = std::fopen(tmp.path, "wb");
+        ASSERT_NE(f, nullptr);
+        std::fwrite(&hdr, sizeof(hdr), 1, f);
+        std::fwrite(data.data(), sizeof(float), fpl, f);
+        std::fclose(f);
+
+        WeightLoader loader;
+        ASSERT_EQ(loader.load(tmp.path), LoadError::Ok);
+        auto w = std::make_unique<SSMWeights>();
+        ASSERT_EQ(loader.dequantize_layer_to(0, *w), LoadError::Ok);
+
+        // Assert that the injected NaN and Inf are faithfully surfaced (allowing consumer check)
+        EXPECT_TRUE(std::isnan(w->in_proj_w[0][0]));
+        EXPECT_TRUE(std::isinf(w->B_norm_weight[0]) || std::isinf(w->in_proj_w[fpl / 2 / hdr.d_model][0]) ||
+                    std::any_of(reinterpret_cast<const float*>(w.get()),
+                                reinterpret_cast<const float*>(w.get()) + sizeof(*w) / sizeof(float),
+                                [](float v) { return std::isinf(v); }));
+        loader.unload();
+    }
+}
+

@@ -177,6 +177,41 @@ TEST(DspBypass, UnknownStateResets) {
     EXPECT_EQ(state, BYPASS_PROCESSING);
 }
 
+TEST(DspBypass, RapidToggleAudioRateClickFree) {
+    // Rapidly toggle bypass target every 16 samples during continuous audio
+    // processing with crossfade rate = 1.0f / 64.0f (standard 64-sample fade).
+    // Asserts that the crossfaded output remains continuous with bounded first difference.
+    uint32_t state = BYPASS_PROCESSING;
+    float fade = 0.0f;
+    const float fade_rate = 1.0f / 64.0f;
+
+    constexpr size_t kSamples = 4096;
+    float max_delta = 0.0f;
+    float prev_out = 0.0f;
+
+    for (size_t n = 0; n < kSamples; ++n) {
+        // Toggle target every 16 samples
+        const bool target_bypassed = ((n / 16) % 2) == 1;
+        advance_bypass_machine(target_bypassed, fade, state, 1u, fade_rate);
+
+        const float dry = std::sin(0.05f * static_cast<float>(n));
+        const float wet = 0.5f * std::cos(0.08f * static_cast<float>(n));
+        const float out = compute_mixed_sample(dry, wet, 1.0f, fade);
+
+        if (n > 0) {
+            const float delta = std::fabs(out - prev_out);
+            max_delta = std::max(max_delta, delta);
+        }
+        prev_out = out;
+        EXPECT_GE(fade, 0.0f);
+        EXPECT_LE(fade, 1.0f);
+    }
+
+    // Without click/discontinuity, the maximum delta between adjacent samples
+    // for a smooth 0.05 rad/sample sine and cosine is bounded below 0.15.
+    EXPECT_LT(max_delta, 0.15f) << "Rapid bypass toggle introduced a sample discontinuity click";
+}
+
 // --- Voice envelope -----------------------------------------------------------
 // Voice::stage is uint8_t, so the vectors use uint8_t too.
 

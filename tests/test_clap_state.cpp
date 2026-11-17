@@ -582,6 +582,88 @@ TEST(SynthIntegration, SampleAccurateMidBlockEventsAndNoteOff) {
     std::remove(model_path.c_str());
 }
 
+TEST(SynthIntegration, PolyphonicVoiceStealingUnderMidiSpam) {
+    std::string model_path = write_temp_int8_stereo_model();
+    ASSERT_FALSE(model_path.empty());
+
+    const clap_plugin_t* plugin = mamba_synth_create(nullptr);
+    ASSERT_NE(plugin, nullptr);
+    ASSERT_TRUE(plugin->init(plugin));
+    auto* m = static_cast<MambaSynth*>(plugin->plugin_data);
+    ASSERT_NE(m, nullptr);
+    ASSERT_TRUE(m->load_weights(model_path.c_str()));
+
+    ASSERT_TRUE(plugin->activate(plugin, 48000.0, 16, 256));
+    ASSERT_TRUE(plugin->start_processing(plugin));
+
+    constexpr uint32_t kFrames = 256;
+    std::vector<float> in_l(kFrames, 0.25f), in_r(kFrames, 0.25f);
+    std::vector<float> out_l(kFrames, 0.0f), out_r(kFrames, 0.0f);
+    float* in_ptrs[2] = {in_l.data(), in_r.data()};
+    float* out_ptrs[2] = {out_l.data(), out_r.data()};
+    clap_audio_buffer_t in_buf{};
+    in_buf.data32 = in_ptrs;
+    in_buf.channel_count = 2;
+    clap_audio_buffer_t out_buf{};
+    out_buf.data32 = out_ptrs;
+    out_buf.channel_count = 2;
+
+    clap_process_t proc{};
+    proc.frames_count = kFrames;
+    proc.audio_inputs = &in_buf;
+    proc.audio_inputs_count = 1;
+    proc.audio_outputs = &out_buf;
+    proc.audio_outputs_count = 1;
+
+    // Spam 128 note-on events without note-offs across consecutive blocks,
+    // greatly exceeding MAX_VOICES (which is 8 or 16).
+    constexpr int kTotalNotes = 128;
+    std::vector<clap_event_note_t> notes(kTotalNotes);
+
+    for (int block = 0; block < 8; ++block) {
+        EventList ev_list;
+        for (int i = 0; i < 16; ++i) {
+            int idx = block * 16 + i;
+            auto& n = notes[idx];
+            n.header.size = sizeof(clap_event_note_t);
+            n.header.time = static_cast<uint32_t>(i * 10);
+            n.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+            n.header.type = CLAP_EVENT_NOTE_ON;
+            n.note_id = 1000 + idx;
+            n.channel = 0;
+            n.key = static_cast<int16_t>(20 + (idx % 60));
+            n.velocity = 0.9;
+            ev_list.events.push_back(&n.header);
+        }
+
+        clap_input_events_t in_ev{&ev_list, EventList::size_fn, EventList::get_fn};
+        proc.in_events = &in_ev;
+        plugin->process(plugin, &proc);
+
+        // Assert all outputs remain finite and bounded
+        for (uint32_t f = 0; f < kFrames; ++f) {
+            ASSERT_TRUE(std::isfinite(out_l[f])) << "block " << block << " frame " << f;
+            ASSERT_TRUE(std::isfinite(out_r[f])) << "block " << block << " frame " << f;
+        }
+
+        // Check active voice count never exceeds MAX_VOICES and voice states are valid
+        uint32_t active_voices = 0;
+        for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+            uint8_t st = m->voice_atomics[v].stage.load(std::memory_order_relaxed);
+            EXPECT_TRUE(st == VOICE_IDLE || st == VOICE_ATTACK ||
+                        st == VOICE_SUSTAIN || st == VOICE_RELEASE || st == VOICE_SILENT);
+            if (st != VOICE_IDLE) {
+                ++active_voices;
+            }
+        }
+        EXPECT_LE(active_voices, MAX_VOICES);
+    }
+
+    plugin->stop_processing(plugin);
+    plugin->destroy(plugin);
+    std::remove(model_path.c_str());
+}
+
 TEST(PluginIntegration, BypassAndGainSmoothingClickFreeAndDryInvariant) {
     std::string model_path = write_temp_int8_stereo_model();
     ASSERT_FALSE(model_path.empty());

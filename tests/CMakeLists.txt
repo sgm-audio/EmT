@@ -135,5 +135,24 @@ emt_add_test(test_cpp_parity
     test_cpp_parity.cpp
     DISCOVER_PROPERTIES ENVIRONMENT "MAMBA_PARITY_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures\;MAMBA_REQUIRE_PARITY=1")
 
+# Generate parity vectors automatically during build if Python3 is available,
+# ensuring tests run locally without manual pre-generation steps.
+if(Python3_FOUND)
+    add_custom_target(generate_parity_vectors
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/reference_mamba3.py --generate --output-dir ${CMAKE_CURRENT_BINARY_DIR}
+        BYPRODUCTS
+            ${CMAKE_CURRENT_BINARY_DIR}/parity_test_weights.bin
+            ${CMAKE_CURRENT_BINARY_DIR}/parity_expected.bin
+            ${CMAKE_CURRENT_BINARY_DIR}/parity_multilayer_weights.bin
+            ${CMAKE_CURRENT_BINARY_DIR}/parity_multilayer_expected.bin
+            ${CMAKE_CURRENT_BINARY_DIR}/parity_train4070_weights.bin
+            ${CMAKE_CURRENT_BINARY_DIR}/parity_train4070_expected.bin
+            ${CMAKE_CURRENT_BINARY_DIR}/parity_extreme_dt_weights.bin
+            ${CMAKE_CURRENT_BINARY_DIR}/parity_extreme_dt_expected.bin
+        COMMENT "Generating C++ parity test vectors via reference_mamba3.py"
+    )
+    add_dependencies(test_cpp_parity generate_parity_vectors)
+endif()
+
 emt_add_test(test_ara test_ara.cpp)
 target_link_libraries(test_ara PRIVATE ara_plugin Threads::Threads)
