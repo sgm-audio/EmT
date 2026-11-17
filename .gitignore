@@ -24,3 +24,4 @@ test_*_output.txt
 test_*_error.txt
 .venv/
 venv/
+tests/fixtures/*.bin

@@ -13,14 +13,19 @@ find_package(Threads REQUIRED)
 # MSVC targets get a 16 MB stack: SSMWeights is ~4 MB at max config while
 # the default 1 MB stack is too small.
 function(emt_add_test target)
-    add_executable(${target} ${ARGN})
+    cmake_parse_arguments(PARSE_ARGV 1 EMT_TEST "" "" "DISCOVER_PROPERTIES")
+    add_executable(${target} ${EMT_TEST_UNPARSED_ARGUMENTS})
     target_link_libraries(${target} PRIVATE
         core common test_fixtures GTest::gtest GTest::gtest_main)
     target_compile_options(${target} PRIVATE ${EMT_WARN_FLAGS})
     if(MSVC)
         target_link_options(${target} PRIVATE "/STACK:16777216")
     endif()
-    gtest_discover_tests(${target})
+    if(EMT_TEST_DISCOVER_PROPERTIES)
+        gtest_discover_tests(${target} PROPERTIES ${EMT_TEST_DISCOVER_PROPERTIES})
+    else()
+        gtest_discover_tests(${target})
+    endif()
 endfunction()
 
 emt_add_test(test_ssm_block test_ssm_block.cpp)
@@ -121,11 +126,14 @@ emt_add_test(test_realtime_safety
     ${PROJECT_SOURCE_DIR}/src/clap/clap_fx_plugin.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/param_table.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/clap_audio_ports.cpp
-    ${PROJECT_SOURCE_DIR}/src/clap/clap_latency.cpp)
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_latency.cpp
+    DISCOVER_PROPERTIES ENVIRONMENT "MAMBA_TEST_WEIGHTS=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/parity_multilayer_weights.bin")
 target_include_directories(test_realtime_safety PRIVATE
     ${PROJECT_SOURCE_DIR}/extern/clap/include)
 
-emt_add_test(test_cpp_parity test_cpp_parity.cpp)
+emt_add_test(test_cpp_parity
+    test_cpp_parity.cpp
+    DISCOVER_PROPERTIES ENVIRONMENT "MAMBA_PARITY_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures\;MAMBA_REQUIRE_PARITY=1")
 
 emt_add_test(test_ara test_ara.cpp)
 target_link_libraries(test_ara PRIVATE ara_plugin Threads::Threads)

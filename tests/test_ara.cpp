@@ -234,6 +234,7 @@ TEST(ARAConditioningExchangeTest, ConcurrentARAWriterAndAudioReader) {
     doc.createDocument();
 
     constexpr int kNumUpdates = 10000;
+    std::atomic<bool> reader_ready{false};
     std::atomic<bool> start_flag{false};
     std::atomic<bool> writer_done{false};
     std::atomic<int64_t> valid_reads{0};
@@ -241,6 +242,7 @@ TEST(ARAConditioningExchangeTest, ConcurrentARAWriterAndAudioReader) {
 
     // ARA Thread: writes rapid musical context updates
     std::thread ara_thread([&]() {
+        while (!reader_ready.load(std::memory_order_acquire)) {}
         while (!start_flag.load(std::memory_order_acquire)) {}
 
         for (int i = 0; i < kNumUpdates; ++i) {
@@ -256,6 +258,7 @@ TEST(ARAConditioningExchangeTest, ConcurrentARAWriterAndAudioReader) {
 
     // Audio Thread: reads continuously without locking
     std::thread audio_thread([&]() {
+        reader_ready.store(true, std::memory_order_release);
         while (!start_flag.load(std::memory_order_acquire)) {}
 
         ARAConditioningFrame frame{};
