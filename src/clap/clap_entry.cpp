@@ -51,6 +51,7 @@ static bool entry_init(const char* plugin_path) {
 static void entry_deinit(void) {}
 
 static const void* entry_get_factory(const char* factory_id) {
+    if (!factory_id) return nullptr;
     if (strcmp(factory_id, CLAP_PLUGIN_FACTORY_ID) == 0) {
         return &s_factory;
     }

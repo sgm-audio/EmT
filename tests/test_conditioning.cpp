@@ -504,3 +504,71 @@ TEST(PresetManagement, ExportFactoryPresetJson) {
     EXPECT_NEAR(synth->param_values[PARAM_RELEASE].load(), 0.4, 1e-6);
     EXPECT_NEAR(synth->param_values[PARAM_MIX].load(), 0.85, 1e-6);
 }
+
+TEST(ConditioningModulation, PerVoiceFilmConditioningIsolated) {
+    auto core = std::make_unique<SSMInferenceCore>(MambaConfig{16, 4, 32, 2, 16, 1, 1, 8, 1, COND_DIM});
+    ASSERT_NE(core, nullptr);
+
+    auto w = std::make_unique<SSMWeights>();
+    std::memset(w.get(), 0, sizeof(SSMWeights));
+    for (size_t i = 0; i < 4; ++i) {
+        w->in_proj_w[i][i] = 0.25f;
+        w->out_proj_w[i][i] = 0.5f;
+        w->film_proj_w[2 * i][0] = 0.5f;
+        w->film_proj_w[2 * i + 1][1] = 0.3f;
+    }
+    w->D_proj[0] = 1.0f;
+    core->set_layer_weights(0, *w);
+
+    auto st_a = std::make_unique<MambaState>();
+    auto st_b = std::make_unique<MambaState>();
+    auto st_a_ref = std::make_unique<MambaState>();
+    std::memset(st_a.get(), 0, sizeof(MambaState));
+    std::memset(st_b.get(), 0, sizeof(MambaState));
+    std::memset(st_a_ref.get(), 0, sizeof(MambaState));
+
+    ConditioningFrame cf_a{};
+    cf_a.tempo_bpm = 120.0f;
+    cf_a.key_sig = 2.0f;
+
+    ConditioningFrame cf_b{};
+    cf_b.tempo_bpm = 60.0f;
+    cf_b.key_sig = 9.0f;
+
+    float out_a[MAX_D_MODEL]{};
+    float out_b[MAX_D_MODEL]{};
+    float out_a_ref[MAX_D_MODEL]{};
+
+    // Interleave voice A and voice B through the SAME core instance; voice A
+    // must match a standalone reference run with identical state/conditioning.
+    core->process_sample(0.5f, out_a, *st_a, &cf_a.tempo_bpm, true);
+    core->process_sample(0.5f, out_b, *st_b, &cf_b.tempo_bpm, true);
+    core->process_sample(0.5f, out_a_ref, *st_a_ref, &cf_a.tempo_bpm, true);
+
+    EXPECT_FLOAT_EQ(out_a[0], out_a_ref[0]);
+    EXPECT_NE(out_a[0], out_b[0]);
+}
+
+TEST(PresetManagement, JsonParserHardening) {
+    auto synth = create_test_synth();
+    ASSERT_NE(synth, nullptr);
+
+    // Valid UTF-8 \u0041 and surrogate pair \uD834\uDD1E
+    EXPECT_TRUE(import_preset_json_string(
+        synth.get(),
+        R"({"name": "A\u0041\uD834\uDD1E", "parameters": {"gain": 1.25}})"));
+    EXPECT_NEAR(synth->param_values[PARAM_GAIN].load(), 1.25, 1e-6);
+
+    // Reject RFC 8259 violations: invalid escape, unescaped control char,
+    // lone UTF-16 surrogate, leading '+', leading zero '01', and NaN.
+    EXPECT_FALSE(import_preset_json_string(synth.get(), R"({"name": "bad\x", "parameters": {"gain": 1.0}})"));
+    EXPECT_FALSE(import_preset_json_string(synth.get(), "{\"name\": \"bad\nline\", \"parameters\": {\"gain\": 1.0}}"));
+    EXPECT_FALSE(import_preset_json_string(synth.get(), R"({"name": "\uD800", "parameters": {"gain": 1.0}})"));
+    EXPECT_FALSE(import_preset_json_string(synth.get(), R"({"parameters": {"gain": +1.0}})"));
+    EXPECT_FALSE(import_preset_json_string(synth.get(), R"({"parameters": {"gain": 01}})"));
+    EXPECT_FALSE(import_preset_json_string(synth.get(), R"({"parameters": {"gain": NaN}})"));
+    EXPECT_FALSE(import_preset_json_string(synth.get(), R"({"param_values": ["not-a-number"]})"));
+
+    // Gain must remain 1.25 after failed imports
+    EXPECT_NEAR(synth->param_values[PARAM_GAIN].load(), 1.25, 1e-6);
+}

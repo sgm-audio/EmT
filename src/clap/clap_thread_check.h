@@ -2,7 +2,10 @@
 #define CLAP_THREAD_CHECK_H
 
 #include <clap/clap.h>
+#include <array>
 #include <atomic>
+#include <cstdint>
+#include <functional>
 #include <thread>
 
 namespace mamba {
@@ -19,14 +22,16 @@ namespace mamba {
 // by stashing the host extension pointer in the plugin struct, then offering
 // small inline helpers used from process() and the various flush hooks.
 //
-// We also expose a static-std::thread::id cache that the plugin can fall back
-// to if the host does not implement thread-check.
+// We also expose a lock-free multi-thread fallback set for hosts that process
+// audio across a worker pool without implementing clap.thread-check.
 class ThreadCheck {
 public:
+    static constexpr size_t kMaxAudioThreads = 32;
+    static_assert(std::atomic<uint64_t>::is_always_lock_free,
+                  "ThreadCheck requires lock-free 64-bit atomics");
+
     ThreadCheck() : host_(nullptr), ext_(nullptr) {
-        main_thread_id_ = std::this_thread::get_id();
-        audio_thread_id_.store(std::thread::id{}, std::memory_order_relaxed);
-        has_audio_id_.store(false, std::memory_order_relaxed);
+        main_thread_token_ = current_thread_token();
     }
 
     // Must be called from the main thread (e.g. during plugin_init or first
@@ -42,50 +47,61 @@ public:
         }
     }
 
-    // Main-thread predicate. Falls back to std::thread::id comparison if
+    // Main-thread predicate. Falls back to thread token comparison if
     // the host does not provide the extension.
     bool is_main_thread() const {
         if (ext_ && ext_->is_main_thread) {
             return ext_->is_main_thread(host_);
         }
-        return std::this_thread::get_id() == main_thread_id_;
+        return current_thread_token() == main_thread_token_;
     }
 
     // Audio-thread predicate. We use the host's extension as the source of
-    // truth; the cached audio thread id is only used as a coarse fallback
-    // (recorded the first time we observe a process() call).
+    // truth; the lock-free audio thread token set is used as a fallback
+    // (recorded whenever process() runs on a thread).
     bool is_audio_thread() const {
         if (ext_ && ext_->is_audio_thread) {
             return ext_->is_audio_thread(host_);
         }
-        if (has_audio_id_.load(std::memory_order_acquire)) {
-            return std::this_thread::get_id() ==
-                audio_thread_id_.load(std::memory_order_acquire);
+        const uint64_t token = current_thread_token();
+        for (size_t i = 0; i < kMaxAudioThreads; ++i) {
+            const uint64_t slot = audio_threads_[i].load(std::memory_order_acquire);
+            if (slot == 0) break;
+            if (slot == token) return true;
         }
         return false;
     }
 
-    // Called from process() to record the audio thread id when the host
-    // does not provide the extension. Idempotent.
+    // Called from process() to record audio worker thread tokens when the host
+    // does not provide the extension. Lock-free and idempotent.
     void mark_audio_thread() {
-        bool expected = false;
-        if (has_audio_id_.compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel)) {
-            audio_thread_id_.store(std::this_thread::get_id(),
-                std::memory_order_release);
+        const uint64_t token = current_thread_token();
+        for (size_t i = 0; i < kMaxAudioThreads; ++i) {
+            uint64_t cur = audio_threads_[i].load(std::memory_order_acquire);
+            if (cur == token) return;
+            if (cur == 0) {
+                uint64_t expected = 0;
+                if (audio_threads_[i].compare_exchange_strong(
+                        expected, token, std::memory_order_acq_rel, std::memory_order_acquire)) {
+                    return;
+                }
+                if (expected == token) return;
+            }
         }
     }
 
     const clap_host_thread_check_t* host_ext() const { return ext_; }
 
 private:
+    static uint64_t current_thread_token() noexcept {
+        uint64_t h = static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        return h == 0 ? 1u : h;
+    }
+
     const clap_host_t* host_;
     const clap_host_thread_check_t* ext_;
-    std::thread::id main_thread_id_;
-    static_assert(std::atomic<std::thread::id>::is_always_lock_free,
-                  "ThreadCheck requires lock-free std::atomic<std::thread::id>");
-    std::atomic<std::thread::id> audio_thread_id_;
-    std::atomic<bool> has_audio_id_;
+    uint64_t main_thread_token_{0};
+    std::array<std::atomic<uint64_t>, kMaxAudioThreads> audio_threads_{};
 };
 
 } // namespace mamba

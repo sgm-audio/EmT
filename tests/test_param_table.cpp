@@ -98,11 +98,12 @@ TEST(ParamTable, FxRowsMatchReference) {
     EXPECT_EQ(kFxParamTable[2].curve, PARAM_CURVE_STEPPED);
     EXPECT_FLOAT_EQ(kFxParamTable[2].smooth_time_s, 0.0f);
     EXPECT_EQ(kFxParamTable[2].clap_flags,
-              CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_BYPASS);
+              static_cast<uint32_t>(CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED |
+                                    CLAP_PARAM_IS_BYPASS));
     EXPECT_EQ(kFxParamTable[2].format, ParamFormat::BypassFx);
 
     for (size_t i = 0; i < kFxParamTableCount; ++i) {
-        EXPECT_EQ(kFxParamTable[i].id, i) << "FX row " << i;
+        EXPECT_EQ(static_cast<size_t>(kFxParamTable[i].id), i) << "FX row " << i;
     }
 }
 
@@ -214,10 +215,8 @@ TEST(ParamTable, ParseGainDb) {
     EXPECT_DOUBLE_EQ(Parse(ParamFormat::GainDb, "-3", 0.0, 2.0).value, 0.0);
     EXPECT_FALSE(Parse(ParamFormat::GainDb, "garbage", 0.0, 2.0).ok);
     EXPECT_FALSE(Parse(ParamFormat::GainDb, "", 0.0, 2.0).ok);
-    // QUIRK (O7): no isfinite validation -- "nan" parses successfully.
-    ParseResult nan = Parse(ParamFormat::GainDb, "nan", 0.0, 2.0);
-    EXPECT_TRUE(nan.ok);
-    EXPECT_TRUE(std::isnan(nan.value));
+    EXPECT_FALSE(Parse(ParamFormat::GainDb, "nan", 0.0, 2.0).ok);
+    EXPECT_FALSE(Parse(ParamFormat::GainDb, "inf", 0.0, 2.0).ok);
 }
 
 TEST(ParamTable, ParsePercent) {
@@ -227,6 +226,7 @@ TEST(ParamTable, ParsePercent) {
     EXPECT_DOUBLE_EQ(Parse(ParamFormat::Percent, "50 %", 0.0, 1.0).value, 0.5);
     EXPECT_DOUBLE_EQ(Parse(ParamFormat::Percent, "150%", 0.0, 1.0).value, 1.0);
     EXPECT_FALSE(Parse(ParamFormat::Percent, "mix", 0.0, 1.0).ok);
+    EXPECT_FALSE(Parse(ParamFormat::Percent, "nan", 0.0, 1.0).ok);
 }
 
 TEST(ParamTable, ParseMilliseconds) {
@@ -235,9 +235,10 @@ TEST(ParamTable, ParseMilliseconds) {
     EXPECT_DOUBLE_EQ(Parse(ParamFormat::Milliseconds, "100 ms", 0.001, 1.0).value, 0.1);
     EXPECT_DOUBLE_EQ(Parse(ParamFormat::Milliseconds, "100 MS", 0.001, 1.0).value, 0.1);
     EXPECT_NEAR(Parse(ParamFormat::Milliseconds, "0.1 s", 0.001, 1.0).value, 0.1, 1e-12);
-    // QUIRK (O7): bare "0.1" means 0.1 ms, clamped up to the 1 ms minimum.
+    // Bare "0.1" means 0.1 ms, clamped up to the 1 ms minimum.
     EXPECT_DOUBLE_EQ(Parse(ParamFormat::Milliseconds, "0.1", 0.001, 1.0).value, 0.001);
     EXPECT_FALSE(Parse(ParamFormat::Milliseconds, "fast", 0.001, 1.0).ok);
+    EXPECT_FALSE(Parse(ParamFormat::Milliseconds, "nan", 0.001, 1.0).ok);
 }
 
 TEST(ParamTable, ParseBypassSynth) {
@@ -256,30 +257,31 @@ TEST(ParamTable, ParseBypassSynth) {
     // Trailing junk after "On" fails the exact match and is not numeric.
     EXPECT_FALSE(Parse(ParamFormat::Bypass, "On ", 0.0, 1.0).ok);
     EXPECT_FALSE(Parse(ParamFormat::Bypass, "garbage", 0.0, 1.0).ok);
+    EXPECT_FALSE(Parse(ParamFormat::Bypass, "nan", 0.0, 1.0).ok);
 }
 
 TEST(ParamTable, ParseBypassFx) {
-    // QUIRK (O7): FX bypass parsing is case-sensitive and never fails --
-    // anything but "On"/"1" silently becomes 0.
+    // FX uses '>=' 0.5 threshold, case-insensitive On/Off, rejects garbage/nan.
     ParseResult on = Parse(ParamFormat::BypassFx, "On", 0.0, 1.0);
     EXPECT_TRUE(on.ok);
     EXPECT_DOUBLE_EQ(on.value, 1.0);
     EXPECT_DOUBLE_EQ(Parse(ParamFormat::BypassFx, "1", 0.0, 1.0).value, 1.0);
-    ParseResult off = Parse(ParamFormat::BypassFx, "on", 0.0, 1.0);
-    EXPECT_TRUE(off.ok);
-    EXPECT_DOUBLE_EQ(off.value, 0.0);
+    ParseResult on_lc = Parse(ParamFormat::BypassFx, "on", 0.0, 1.0);
+    EXPECT_TRUE(on_lc.ok);
+    EXPECT_DOUBLE_EQ(on_lc.value, 1.0);
     EXPECT_DOUBLE_EQ(Parse(ParamFormat::BypassFx, "Off", 0.0, 1.0).value, 0.0);
-    EXPECT_DOUBLE_EQ(Parse(ParamFormat::BypassFx, "0.7", 0.0, 1.0).value, 0.0);
-    ParseResult junk = Parse(ParamFormat::BypassFx, "garbage", 0.0, 1.0);
-    EXPECT_TRUE(junk.ok);
-    EXPECT_DOUBLE_EQ(junk.value, 0.0);
+    EXPECT_DOUBLE_EQ(Parse(ParamFormat::BypassFx, "0.7", 0.0, 1.0).value, 1.0);
+    EXPECT_DOUBLE_EQ(Parse(ParamFormat::BypassFx, "0.5", 0.0, 1.0).value, 1.0);
+    EXPECT_FALSE(Parse(ParamFormat::BypassFx, "garbage", 0.0, 1.0).ok);
+    EXPECT_FALSE(Parse(ParamFormat::BypassFx, "nan", 0.0, 1.0).ok);
 }
 
 TEST(ParamTable, ParsePlainFx) {
-    // QUIRK (O7): FX gain/mix parsing handles no suffixes and never clamps.
+    // FX plain parsing parses finite decimals and clamps to [min, max].
     EXPECT_DOUBLE_EQ(Parse(ParamFormat::Plain, "1.5", 0.0, 2.0).value, 1.5);
-    EXPECT_DOUBLE_EQ(Parse(ParamFormat::Plain, "75%", 0.0, 1.0).value, 75.0);
-    EXPECT_DOUBLE_EQ(Parse(ParamFormat::Plain, "5", 0.0, 2.0).value, 5.0);
+    EXPECT_DOUBLE_EQ(Parse(ParamFormat::Plain, "75%", 0.0, 1.0).value, 1.0);
+    EXPECT_DOUBLE_EQ(Parse(ParamFormat::Plain, "5", 0.0, 2.0).value, 2.0);
+    EXPECT_DOUBLE_EQ(Parse(ParamFormat::Plain, "-1", 0.0, 2.0).value, 0.0);
     EXPECT_FALSE(Parse(ParamFormat::Plain, "nan", 0.0, 2.0).ok);
     EXPECT_FALSE(Parse(ParamFormat::Plain, "inf", 0.0, 2.0).ok);
     EXPECT_FALSE(Parse(ParamFormat::Plain, "gain", 0.0, 2.0).ok);

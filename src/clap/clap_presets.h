@@ -65,7 +65,7 @@ bool apply_factory_preset(MambaSynth* m, const char* name);
 bool apply_factory_preset(MambaSynth* m, const FactoryPreset* preset);
 
 // Resolve preset directory path, returns true if dir exists/created.
-// Uses XDG_DATA_HOME/clap/presets/com.mamba-ssm.synth/ on Linux,
+// Uses XDG_DATA_HOME/clap/presets/com.emt.synth/ on Linux,
 // or equivalent on other platforms.
 bool get_preset_directory(char* out, size_t out_size);
 

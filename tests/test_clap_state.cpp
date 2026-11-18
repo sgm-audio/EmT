@@ -465,6 +465,73 @@ TEST(SynthIntegration, AraZeroFrameDoesNotClobberMidiAndStereoInt8LargeBlock) {
         fx_plugin->destroy(fx_plugin);
     }
 
+    // 3. Transactional weight loading + null safety + 128-float ARA conditioning
+    {
+        const clap_plugin_t* plugin = mamba_synth_create(nullptr);
+        ASSERT_NE(plugin, nullptr);
+        ASSERT_TRUE(plugin->init(plugin));
+        auto* m = static_cast<MambaSynth*>(plugin->plugin_data);
+        ASSERT_NE(m, nullptr);
+
+        // Null pointer guards on CLAP dispatch
+        EXPECT_EQ(plugin->get_extension(nullptr, CLAP_EXT_PARAMS), nullptr);
+        EXPECT_EQ(plugin->get_extension(plugin, nullptr), nullptr);
+        auto* params = static_cast<const clap_plugin_params_t*>(
+            plugin->get_extension(plugin, CLAP_EXT_PARAMS));
+        ASSERT_NE(params, nullptr);
+        char text_buf[32]{};
+        EXPECT_FALSE(params->value_to_text(nullptr, PARAM_GAIN, 1.0, text_buf, sizeof(text_buf)));
+        double parsed = 0.0;
+        EXPECT_FALSE(params->text_to_value(nullptr, PARAM_GAIN, "1.0", &parsed));
+
+        // Load valid weights, then attempt failed load -> old engine/path preserved
+        ASSERT_TRUE(m->load_weights(model_path.c_str()));
+        const auto saved_layers = m->core_cfg.num_layers;
+        EXPECT_TRUE(m->weights_loaded.load(std::memory_order_acquire));
+        EXPECT_FALSE(m->load_weights("/nonexistent/missing_weights.bin"));
+        EXPECT_TRUE(m->weights_loaded.load(std::memory_order_acquire));
+        EXPECT_STREQ(m->weight_path, model_path.c_str());
+        EXPECT_EQ(m->core_cfg.num_layers, saved_layers);
+
+        // Full 128-float ARAConditioningFrame (including f0_probs/semantic) runs cleanly
+        ARAConditioningFrame ara{};
+        ara.tempo_bpm = 132.0f;
+        ara.f0_probs[0] = 0.75f;
+        ara.semantic[0] = -0.5f;
+        m->ara_conditioning.write(ara);
+
+        ASSERT_TRUE(plugin->activate(plugin, 48000.0, 32, 256));
+        ASSERT_TRUE(plugin->start_processing(plugin));
+        clap_event_note_t note_on{};
+        note_on.header.size = sizeof(note_on);
+        note_on.header.time = 0;
+        note_on.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+        note_on.header.type = CLAP_EVENT_NOTE_ON;
+        note_on.note_id = 1;
+        note_on.channel = 0;
+        note_on.key = 60;
+        note_on.velocity = 1.0;
+        EventList list;
+        list.events = {&note_on.header};
+        clap_input_events_t in_ev{&list, EventList::size_fn, EventList::get_fn};
+        std::vector<float> out_l(64, 0.0f), out_r(64, 0.0f);
+        float* out_ptrs[2] = {out_l.data(), out_r.data()};
+        clap_audio_buffer_t out_buf{};
+        out_buf.data32 = out_ptrs;
+        out_buf.channel_count = 2;
+        clap_process_t proc{};
+        proc.frames_count = 64;
+        proc.audio_outputs = &out_buf;
+        proc.audio_outputs_count = 1;
+        proc.in_events = &in_ev;
+        EXPECT_EQ(plugin->process(plugin, &proc), CLAP_PROCESS_CONTINUE);
+        for (float s : out_l) EXPECT_TRUE(std::isfinite(s));
+        for (float s : out_r) EXPECT_TRUE(std::isfinite(s));
+
+        plugin->stop_processing(plugin);
+        plugin->destroy(plugin);
+    }
+
     std::remove(model_path.c_str());
 }
 
@@ -901,6 +968,90 @@ TEST(PluginIntegration, ConcurrentParamFlushAndProcessAndStateSave) {
     plugin->stop_processing(plugin);
     plugin->destroy(plugin);
     std::remove(model_path.c_str());
+}
+
+TEST(SynthIntegration, LoadWeightsAndFxLoadRejectPoisonedNaNPreservingCore) {
+    std::string good_path = write_temp_int8_stereo_model();
+    ASSERT_FALSE(good_path.empty());
+
+    char nan_path[256];
+    std::snprintf(nan_path, sizeof(nan_path), "/tmp/emt_poison_f32_%p.bin",
+                  static_cast<const void*>(&nan_path));
+    {
+        WeightFileHeader hdr{};
+        hdr.magic = WEIGHT_MAGIC;
+        hdr.version = WEIGHT_VERSION;
+        hdr.d_state = 16;
+        hdr.d_model = 2;
+        hdr.d_inner = 16;
+        hdr.nheads = 2;
+        hdr.num_layers = 1;
+        hdr.headdim = 8;
+        hdr.cond_dim = 16;
+        hdr.mimo_rank = 1;
+        hdr.quantization = static_cast<uint32_t>(QuantFormat::Float32);
+        const size_t in_proj_out = 2 * hdr.d_inner +
+            2 * hdr.nheads * MAX_MIMO_RANK * hdr.d_state +
+            3 * hdr.nheads + MAX_NUM_ROPE_ANGLES;
+        const size_t fpl =
+            in_proj_out * hdr.d_model +
+            hdr.nheads +
+            2 * hdr.nheads * MAX_MIMO_RANK * hdr.d_state +
+            2 * hdr.d_state +
+            3 * hdr.nheads * MAX_MIMO_RANK * hdr.headdim +
+            hdr.nheads +
+            hdr.d_model * hdr.d_inner +
+            2 * hdr.d_model * hdr.cond_dim +
+            2 * hdr.nheads * hdr.cond_dim;
+        hdr.q_metadata_size = 0;
+        hdr.weight_data_size = fpl * sizeof(float);
+        std::vector<float> weights(fpl, 0.0f);
+        weights[0] = std::numeric_limits<float>::quiet_NaN();
+        std::FILE* f = std::fopen(nan_path, "wb");
+        ASSERT_NE(f, nullptr);
+        std::fwrite(&hdr, sizeof(hdr), 1, f);
+        std::fwrite(weights.data(), sizeof(float), weights.size(), f);
+        std::fclose(f);
+    }
+
+    // 1. MambaSynth rejects poisoned Float32 weights without replacing live core
+    {
+        const clap_plugin_t* plugin = mamba_synth_create(nullptr);
+        ASSERT_NE(plugin, nullptr);
+        ASSERT_TRUE(plugin->init(plugin));
+        auto* m = static_cast<MambaSynth*>(plugin->plugin_data);
+        ASSERT_TRUE(m->load_weights(good_path.c_str()));
+        auto* saved_core = m->core.published();
+        ASSERT_NE(saved_core, nullptr);
+
+        EXPECT_FALSE(m->load_weights(nan_path));
+        EXPECT_TRUE(m->weights_loaded.load(std::memory_order_acquire));
+        EXPECT_EQ(m->core.published(), saved_core);
+        EXPECT_STREQ(m->weight_path, good_path.c_str());
+
+        plugin->destroy(plugin);
+    }
+
+    // 2. FX rejects poisoned Float32 weights without replacing live core
+    {
+        const clap_plugin_t* fx_p = mamba_fx_create(nullptr);
+        ASSERT_NE(fx_p, nullptr);
+        ASSERT_TRUE(fx_p->init(fx_p));
+        auto* fx = static_cast<FxState*>(fx_p->plugin_data);
+        ASSERT_TRUE(fx_load_weights(fx, good_path.c_str()));
+        auto* saved_core = fx->core.published();
+        ASSERT_NE(saved_core, nullptr);
+
+        EXPECT_FALSE(fx_load_weights(fx, nan_path));
+        EXPECT_TRUE(fx->weights_loaded.load(std::memory_order_acquire));
+        EXPECT_EQ(fx->core.published(), saved_core);
+        EXPECT_STREQ(fx->weight_path, good_path.c_str());
+
+        fx_p->destroy(fx_p);
+    }
+
+    std::remove(nan_path);
+    std::remove(good_path.c_str());
 }
 
 int main(int argc, char** argv) {

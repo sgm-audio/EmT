@@ -15,12 +15,13 @@
 namespace mamba {
 
 static GuiInstance* gui(const clap_plugin_t* plugin) {
+    if (!plugin) return nullptr;
     auto* synth = static_cast<MambaSynth*>(plugin->plugin_data);
     return synth ? static_cast<GuiInstance*>(synth->gui_data) : nullptr;
 }
 
 void set_param(GuiInstance* g, clap_id id, double value) {
-    if (!g || id >= PARAM_COUNT || !std::isfinite(value)) return;
+    if (!g || !g->synth || id >= PARAM_COUNT || !std::isfinite(value)) return;
     ParamSmooth& p = g->synth->params[id];
     value = std::clamp(value, p.min_value, p.max_value);
     if (p.curve == PARAM_CURVE_STEPPED) value = value >= 0.5 ? 1.0 : 0.0;
@@ -36,6 +37,7 @@ void set_param(GuiInstance* g, clap_id id, double value) {
 }
 
 void default_preset_path(char* path, size_t size) {
+    if (!path || size == 0) return;
     char dir[512]{};
     if (!get_preset_directory(dir, sizeof(dir))) { path[0] = '\0'; return; }
     std::snprintf(path, size, "%s/Default.mambapreset", dir);
@@ -58,7 +60,7 @@ static bool gui_get_preferred_api(const clap_plugin_t* plugin, const char** api,
 }
 
 static bool gui_create(const clap_plugin_t* plugin, const char* api, bool floating) {
-    if (!clap_gui_is_api_supported(plugin, api, floating)) return false;
+    if (!plugin || !clap_gui_is_api_supported(plugin, api, floating)) return false;
     auto* synth = static_cast<MambaSynth*>(plugin->plugin_data);
     if (!synth || synth->gui_data) return false;
 
@@ -87,14 +89,14 @@ static void gui_destroy(const clap_plugin_t* plugin) {
     GuiInstance* g = gui(plugin);
     if (!g) return;
 
-    if (g->host_timer && g->timer_id != CLAP_INVALID_ID && g->host_timer->unregister_timer) {
+    if (g->synth && g->host_timer && g->timer_id != CLAP_INVALID_ID && g->host_timer->unregister_timer) {
         g->host_timer->unregister_timer(g->synth->host, g->timer_id);
         g->timer_id = CLAP_INVALID_ID;
     }
 
     gui_backend_destroy(g);
 
-    g->synth->gui_data = nullptr;
+    if (g->synth) g->synth->gui_data = nullptr;
     delete g;
 }
 

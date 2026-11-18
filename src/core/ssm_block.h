@@ -161,6 +161,8 @@ public:
     // Process one sample: input is scalar (from previous layer sum), output is d_model floats.
     void process_sample(float input, float* output);
     void process_sample(float input, float* output, SSMState& state);
+    void process_sample(float input, float* output, SSMState& state,
+                        const float* cond_vector, bool cond_active);
 
     // Process a block of scalar samples.
     void process_block(const float* input, float* output, size_t size);
@@ -221,11 +223,12 @@ private:
     bool weights_loaded_; 
 
     // === Decomposed execution steps (inlined in Release) ===
-    void step_film_conditioning(float input);
+    void step_film_conditioning(float input, const float* cond_ptr, bool cond_active);
     void step_in_proj(const float*& z_ptr, const float*& x_ptr,
                       const float*& B_ptr, const float*& C_ptr,
                       const float*& angle_ptr);
-    void step_preprocess_decay_and_dt(const float* C_ptr);
+    void step_preprocess_decay_and_dt(const float* C_ptr,
+                                      const float* cond_ptr, bool cond_active);
     void step_rmsnorm_bc(const float* B_ptr, const float* C_ptr,
                          float* B_norm, float* C_norm);
     void step_rope_bc(SSMState& state, float* B_norm, float* C_norm, const float* angle_ptr);

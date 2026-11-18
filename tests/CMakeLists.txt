@@ -126,14 +126,11 @@ emt_add_test(test_realtime_safety
     ${PROJECT_SOURCE_DIR}/src/clap/clap_fx_plugin.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/param_table.cpp
     ${PROJECT_SOURCE_DIR}/src/clap/clap_audio_ports.cpp
-    ${PROJECT_SOURCE_DIR}/src/clap/clap_latency.cpp
-    DISCOVER_PROPERTIES ENVIRONMENT "MAMBA_TEST_WEIGHTS=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/parity_multilayer_weights.bin")
+    ${PROJECT_SOURCE_DIR}/src/clap/clap_latency.cpp)
 target_include_directories(test_realtime_safety PRIVATE
     ${PROJECT_SOURCE_DIR}/extern/clap/include)
 
-emt_add_test(test_cpp_parity
-    test_cpp_parity.cpp
-    DISCOVER_PROPERTIES ENVIRONMENT "MAMBA_PARITY_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures\;MAMBA_REQUIRE_PARITY=1")
+emt_add_test(test_cpp_parity test_cpp_parity.cpp)
 
 # Generate parity vectors automatically during build if Python3 is available,
 # ensuring tests run locally without manual pre-generation steps.

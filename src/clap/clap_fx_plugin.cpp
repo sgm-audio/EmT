@@ -26,7 +26,7 @@ static_assert(FX_PARAM_COUNT == kFxParamTableCount,
               "FX param table row count must match FxParamId");
 
 static FxState* get_fx(const clap_plugin_t* plugin) {
-    return static_cast<FxState*>(plugin->plugin_data);
+    return plugin ? static_cast<FxState*>(plugin->plugin_data) : nullptr;
 }
 
 static void recompute_smooth_coefficients(FxState* f) {
@@ -44,7 +44,9 @@ static void init_param_metadata(FxState* f) {
 // ---- CLAP plugin callbacks ----
 
 static bool fx_init(const clap_plugin_t* plugin) {
+    if (!plugin) return false;
     auto* f = get_fx(plugin);
+    if (!f) return false;
     f->core_cfg = MambaConfig::max_config();
     f->core_cfg.num_layers = 1;
     auto* core = new (std::nothrow) SSMInferenceCore(f->core_cfg);
@@ -72,45 +74,68 @@ static bool fx_init(const clap_plugin_t* plugin) {
 }
 
 static void fx_destroy(const clap_plugin_t* plugin) {
+    if (!plugin) return;
     auto* f = get_fx(plugin);
-    f->core.destroy();
-    delete f;
+    if (f) {
+        f->core.destroy();
+        delete f;
+    }
     delete plugin;
 }
 
 static bool fx_activate(const clap_plugin_t* plugin, double sample_rate,
                          uint32_t min_frames, uint32_t max_frames) {
     auto* f = get_fx(plugin);
+    if (!f) return false;
     (void)min_frames;
     f->sample_rate = sample_rate;
     f->block_size = max_frames;
     f->is_active = true;
     recompute_smooth_coefficients(f);
     if (auto* c = f->core.published()) c->reset();
+    for (uint32_t i = 0; i < FX_PARAM_COUNT; ++i) {
+        f->params[i].current.store(
+            f->params[i].target.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+    }
+    const bool bypassed = f->bypass_target.load(std::memory_order_acquire);
+    f->bypass_state.store(bypassed ? BYPASS_BYPASSED : BYPASS_PROCESSING, std::memory_order_relaxed);
+    f->bypass_fade.store(bypassed ? 1.0f : 0.0f, std::memory_order_relaxed);
     return true;
 }
 
 static void fx_deactivate(const clap_plugin_t* plugin) {
     auto* f = get_fx(plugin);
+    if (!f) return;
     f->is_active = false;
 }
 
 static bool fx_start_processing(const clap_plugin_t* plugin) {
     auto* f = get_fx(plugin);
+    if (!f) return false;
     f->is_processing.store(true, std::memory_order_release);
     return true;
 }
 
 static void fx_stop_processing(const clap_plugin_t* plugin) {
     auto* f = get_fx(plugin);
+    if (!f) return;
     f->is_processing.store(false, std::memory_order_release);
 }
 
 static void fx_reset(const clap_plugin_t* plugin) {
     auto* f = get_fx(plugin);
+    if (!f) return;
     if (auto* c = f->core.published()) c->reset();
-    f->bypass_state.store(BYPASS_PROCESSING, std::memory_order_relaxed);
-    f->bypass_fade.store(0.0f, std::memory_order_relaxed);
+    for (uint32_t i = 0; i < FX_PARAM_COUNT; ++i) {
+        f->params[i].current.store(
+            f->params[i].target.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+    }
+    const bool bypassed = f->param_values[FX_PARAM_BYPASS].load(std::memory_order_acquire) >= 0.5;
+    f->bypass_target.store(bypassed, std::memory_order_release);
+    f->bypass_state.store(bypassed ? BYPASS_BYPASSED : BYPASS_PROCESSING, std::memory_order_relaxed);
+    f->bypass_fade.store(bypassed ? 1.0f : 0.0f, std::memory_order_relaxed);
 }
 
 static void apply_param_value(FxState* f, clap_id id, double value) {
@@ -129,8 +154,10 @@ static void apply_param_value(FxState* f, clap_id id, double value) {
 
 static uint32_t fx_params_count(const clap_plugin_t*) { return FX_PARAM_COUNT; }
 static bool fx_params_get_info(const clap_plugin_t* plugin, uint32_t index, clap_param_info_t* info) {
-    if (!info || index >= FX_PARAM_COUNT) return false;
-    auto* f = get_fx(plugin); std::memset(info, 0, sizeof(*info));
+    if (!plugin || !info || index >= FX_PARAM_COUNT) return false;
+    auto* f = get_fx(plugin);
+    if (!f) return false;
+    std::memset(info, 0, sizeof(*info));
     const ParamDesc& desc = kFxParamTable[index];
     info->id = desc.id; info->cookie = &f->params[index];
     info->min_value = desc.min_value; info->max_value = desc.max_value;
@@ -139,21 +166,26 @@ static bool fx_params_get_info(const clap_plugin_t* plugin, uint32_t index, clap
     std::strncpy(info->name, desc.name, CLAP_NAME_SIZE - 1); return true;
 }
 static bool fx_params_get_value(const clap_plugin_t* plugin, clap_id id, double* value) {
-    if (!value || id >= FX_PARAM_COUNT) return false;
-    *value = get_fx(plugin)->param_values[id].load(std::memory_order_acquire); return true;
+    if (!plugin || !value || id >= FX_PARAM_COUNT) return false;
+    auto* f = get_fx(plugin);
+    if (!f) return false;
+    *value = f->param_values[id].load(std::memory_order_acquire); return true;
 }
-static bool fx_params_value_to_text(const clap_plugin_t*, clap_id id, double value, char* out, uint32_t size) {
+static bool fx_params_value_to_text(const clap_plugin_t* plugin, clap_id id, double value, char* out, uint32_t size) {
+    if (!plugin || !get_fx(plugin)) return false;
     if (!out || size == 0 || id >= FX_PARAM_COUNT || !std::isfinite(value)) return false;
     return param_value_to_text(kFxParamTable[id].format, value, out, size);
 }
-static bool fx_params_text_to_value(const clap_plugin_t*, clap_id id, const char* text, double* value) {
+static bool fx_params_text_to_value(const clap_plugin_t* plugin, clap_id id, const char* text, double* value) {
+    if (!plugin || !get_fx(plugin)) return false;
     if (!text || !value || id >= FX_PARAM_COUNT) return false;
     const ParamDesc& desc = kFxParamTable[id];
     return param_text_to_value(desc.format, text, desc.min_value, desc.max_value, value);
 }
 static void fx_params_flush(const clap_plugin_t* plugin, const clap_input_events_t* in, const clap_output_events_t*) {
-    if (!in) return;
+    if (!plugin || !in) return;
     auto* f = get_fx(plugin);
+    if (!f) return;
     const uint32_t count = in->size(in);
     for (uint32_t i = 0; i < count; ++i) {
         const clap_event_header_t* hdr = in->get(in, i);
@@ -178,16 +210,19 @@ static clap_process_status fx_process(const clap_plugin_t* plugin, const clap_pr
     const clap_audio_buffer_t* in = process->audio_inputs && process->audio_inputs_count ? &process->audio_inputs[0] : nullptr;
     if ((!out.data32 && !out.data64) || out.channel_count == 0) return CLAP_PROCESS_ERROR;
     const size_t core_d_model = core ? core->config().d_model : 1;
+    const bool loaded = f->weights_loaded.load(std::memory_order_acquire);
     double gain = f->params[FX_PARAM_GAIN].current.load(std::memory_order_relaxed);
     double mix = f->params[FX_PARAM_MIX].current.load(std::memory_order_relaxed);
     const double c_gain = f->params[FX_PARAM_GAIN].coeff;
     const double c_mix = f->params[FX_PARAM_MIX].coeff;
     double target_gain = f->params[FX_PARAM_GAIN].target.load(std::memory_order_acquire);
     double target_mix = f->params[FX_PARAM_MIX].target.load(std::memory_order_acquire);
-    bool bypass = f->params[FX_PARAM_BYPASS].target.load(std::memory_order_acquire) >= 0.5;
+    uint32_t bypass_state = f->bypass_state.load(std::memory_order_relaxed);
     float fade = f->bypass_fade.load(std::memory_order_relaxed);
+    bool bypass = f->bypass_target.load(std::memory_order_acquire);
     const uint32_t event_count = process->in_events ? process->in_events->size(process->in_events) : 0;
     uint32_t event_index = 0;
+    const uint32_t nc = in ? std::min<uint32_t>(in->channel_count, 2) : 0;
     for (uint32_t n = 0; n < process->frames_count; ++n) {
         bool param_updated = false;
         while (event_index < event_count) {
@@ -204,27 +239,31 @@ static clap_process_status fx_process(const clap_plugin_t* plugin, const clap_pr
         if (param_updated) {
             target_gain = f->params[FX_PARAM_GAIN].target.load(std::memory_order_relaxed);
             target_mix = f->params[FX_PARAM_MIX].target.load(std::memory_order_relaxed);
-            bypass = f->params[FX_PARAM_BYPASS].target.load(std::memory_order_relaxed) >= 0.5;
+            bypass = f->bypass_target.load(std::memory_order_acquire);
         }
-        fade = std::clamp(fade + (bypass ? FxState::BYPASS_FADE_RATE : -FxState::BYPASS_FADE_RATE), 0.0f, 1.0f);
+        advance_bypass_machine(bypass, fade, bypass_state, 1u, FxState::BYPASS_FADE_RATE);
         advance_one_pole(gain, target_gain, c_gain);
         advance_one_pole(mix, target_mix, c_mix);
-        float dry[2]{}; const uint32_t nc = in ? std::min<uint32_t>(in->channel_count, 2) : 0;
-        for (uint32_t ch=0; ch<nc; ++ch) {
+        float dry[2]{};
+        for (uint32_t ch = 0; ch < nc; ++ch) {
             float raw = 0.0f;
             if (in->data32 && in->data32[ch]) raw = in->data32[ch][n];
             else if (in->data64 && in->data64[ch]) raw = static_cast<float>(in->data64[ch][n]);
             dry[ch] = std::isfinite(raw) ? std::clamp(raw, -1e6f, 1e6f) : 0.0f;
         }
-        const float mono = nc > 1 ? 0.5f*(dry[0]+dry[1]) : dry[0];
+        const float mono = nc > 1 ? 0.5f * (dry[0] + dry[1]) : dry[0];
         alignas(64) float processed[MAX_D_MODEL]{};
-        if (core) core->process_sample(mono, processed);
-        for (uint32_t ch=0; ch<out.channel_count; ++ch) {
+        const bool run_ssm = loaded && core && !(bypass_state == BYPASS_BYPASSED && fade >= 1.0f);
+        if (run_ssm) {
+            core->process_sample(mono, processed);
+        }
+        for (uint32_t ch = 0; ch < out.channel_count; ++ch) {
             const float d = ch < nc ? dry[ch] : mono;
             const float wet = processed[ch < core_d_model ? ch : 0] * static_cast<float>(gain);
-            const float sample = (d*static_cast<float>(1.0-mix)+wet*static_cast<float>(mix))*(1.0f-fade)+d*fade;
-            if (out.data32 && out.data32[ch]) out.data32[ch][n]=sample;
-            if (out.data64 && out.data64[ch]) out.data64[ch][n]=sample;
+            float sample = compute_mixed_sample(d, wet, static_cast<float>(mix), fade);
+            if (!std::isfinite(sample)) sample = 0.0f;
+            if (out.data32 && out.data32[ch]) out.data32[ch][n] = sample;
+            if (out.data64 && out.data64[ch]) out.data64[ch][n] = sample;
         }
     }
     while (event_index < event_count) {
@@ -237,14 +276,18 @@ static clap_process_status fx_process(const clap_plugin_t* plugin, const clap_pr
         }
         ++event_index;
     }
-    f->params[FX_PARAM_GAIN].current.store(gain,std::memory_order_relaxed);
-    f->params[FX_PARAM_MIX].current.store(mix,std::memory_order_relaxed);
-    f->bypass_fade.store(fade,std::memory_order_relaxed);
+    f->params[FX_PARAM_GAIN].current.store(gain, std::memory_order_relaxed);
+    f->params[FX_PARAM_MIX].current.store(mix, std::memory_order_relaxed);
+    f->bypass_fade.store(fade, std::memory_order_relaxed);
+    f->bypass_state.store(bypass_state, std::memory_order_relaxed);
     return CLAP_PROCESS_CONTINUE;
 }
 static uint32_t fx_tail_get(const clap_plugin_t* plugin) {
+    if (!plugin) return 0;
     const auto* f = get_fx(plugin);
-    return static_cast<uint32_t>(std::clamp(0.1 * f->sample_rate, 0.0, 4294967294.0));
+    if (!f) return 0;
+    const double sr = f->sample_rate > 1.0 ? f->sample_rate : 48000.0;
+    return static_cast<uint32_t>(std::clamp(0.1 * sr, 0.0, 4294967294.0));
 }
 static const clap_plugin_tail_t s_fx_tail = {fx_tail_get};
 
@@ -255,47 +298,53 @@ static const clap_plugin_tail_t s_fx_tail = {fx_tail_get};
 // Shared stream serialization helpers provided by clap/clap_common_utils.h
 
 bool fx_load_weights(FxState* f, const char* path) {
-    if (!path || path[0] == '\0') return false;
-    if (f->weight_loader.load(path) != LoadError::Ok) return false;
+    if (!f || !path || path[0] == '\0') return false;
 
-    const auto& hdr = f->weight_loader.header();
-    // Same rule as the synth: accept any shape that fits the compiled limits.
-    // (The previous comparison was against core_cfg.num_layers, which is
-    // still the constructor's 1-layer placeholder here - it rejected every
-    // multi-layer model, including those from training/configs/*.yaml.)
+    WeightLoader tmp_loader;
+    if (tmp_loader.load(path) != LoadError::Ok) return false;
+
+    const auto& hdr = tmp_loader.header();
     if (!WeightLoader::fits_in_static_weights_with(hdr)) {
-        f->weight_loader.unload();
         return false;
     }
 
-    f->core_cfg.d_state = hdr.d_state;
-    f->core_cfg.d_model = hdr.d_model;
-    f->core_cfg.d_inner = hdr.d_inner;
-    f->core_cfg.nheads = hdr.nheads;
-    f->core_cfg.headdim = hdr.headdim;
-    f->core_cfg.cond_dim = hdr.cond_dim;
-    if (hdr.version == 2) {
-        f->core_cfg.num_layers = hdr.num_layers;
-    }
+    MambaConfig new_cfg = f->core_cfg;
+    new_cfg.d_state = hdr.d_state;
+    new_cfg.d_model = hdr.d_model;
+    new_cfg.d_inner = hdr.d_inner;
+    new_cfg.nheads = hdr.nheads;
+    new_cfg.headdim = hdr.headdim;
+    new_cfg.mimo_rank = 1;  // D3 enforces rank-1 SISO; compact MAX_MIMO_RANK stride below
+    new_cfg.cond_dim = hdr.cond_dim;
+    new_cfg.num_layers = hdr.num_layers;
+    new_cfg.num_rope_angles = hdr.d_state / 2;
 
     // Build the new engine off the audio path and publish it (E12).
-    auto* new_core = new (std::nothrow) SSMInferenceCore(f->core_cfg);
+    auto* new_core = new (std::nothrow) SSMInferenceCore(new_cfg);
     auto w_ptr = std::unique_ptr<SSMWeights>(new (std::nothrow) SSMWeights());
     if (!new_core || !w_ptr) {
         delete new_core;
-        f->weight_loader.unload();
         return false;
     }
     SSMWeights& w = *w_ptr;
 
-    for (uint32_t layer = 0; layer < f->core_cfg.num_layers; ++layer) {
-        if (f->weight_loader.dequantize_layer_to(layer, w) != LoadError::Ok) {
+    for (uint32_t layer = 0; layer < new_cfg.num_layers; ++layer) {
+        if (tmp_loader.dequantize_layer_to(layer, w) != LoadError::Ok) {
             delete new_core;
-            f->weight_loader.unload();
             return false;
+        }
+        const float* raw_w = reinterpret_cast<const float*>(&w);
+        const size_t n_floats = sizeof(SSMWeights) / sizeof(float);
+        for (size_t idx = 0; idx < n_floats; ++idx) {
+            if (!std::isfinite(raw_w[idx])) {
+                delete new_core;
+                return false;
+            }
         }
         new_core->set_layer_weights(layer, w);
     }
+
+    f->core_cfg = new_cfg;
     f->core.reclaim();   // free any previously retired core (main thread)
     f->core.publish(new_core);
     f->weights_loaded.store(true, std::memory_order_release);
@@ -310,6 +359,7 @@ static constexpr uint32_t kFxStateVersion = 1u;
 static bool fx_state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream) {
     if (!plugin || !stream) return false;
     auto* f = get_fx(plugin);
+    if (!f) return false;
 
     if (!stream_write_u32(stream, kFxStateMagic)) return false;
     if (!stream_write_u32(stream, kFxStateVersion)) return false;
@@ -342,6 +392,7 @@ static bool fx_state_save(const clap_plugin_t* plugin, const clap_ostream_t* str
 static bool fx_state_load(const clap_plugin_t* plugin, const clap_istream_t* stream) {
     if (!plugin || !stream) return false;
     auto* f = get_fx(plugin);
+    if (!f) return false;
 
     uint32_t magic = 0;
     if (!stream_read_u32(stream, magic)) return false;
@@ -380,7 +431,20 @@ static bool fx_state_load(const clap_plugin_t* plugin, const clap_istream_t* str
     }
     path_buf[path_len] = '\0';
 
-    // Apply parameters
+    // Validate/load weights BEFORE mutating live parameters or state.
+    bool loaded_ok = false;
+    if (path_len > 0) {
+        std::FILE* probe = std::fopen(path_buf, "rb");
+        if (probe) {
+            std::fclose(probe);
+            if (std::strcmp(path_buf, f->weight_path) != 0) {
+                if (!fx_load_weights(f, path_buf)) return false;
+            }
+            loaded_ok = f->weights_loaded.load(std::memory_order_acquire);
+        }
+    }
+
+    // Commit parameter and weight-path changes atomically after validation.
     apply_param_value(f, FX_PARAM_GAIN, gain);
     f->params[FX_PARAM_GAIN].current.store(gain, std::memory_order_release);
 
@@ -402,13 +466,7 @@ static bool fx_state_load(const clap_plugin_t* plugin, const clap_istream_t* str
     if (path_len > 0) {
         std::memcpy(f->weight_path, path_buf, path_len);
         f->weight_path[path_len] = '\0';
-        std::FILE* probe = std::fopen(path_buf, "rb");
-        if (probe) {
-            std::fclose(probe);
-            if (!fx_load_weights(f, path_buf)) {
-                return false;
-            }
-        } else {
+        if (!loaded_ok) {
             f->weights_loaded.store(false, std::memory_order_release);
         }
     } else {
@@ -430,7 +488,7 @@ static bool fx_state_load(const clap_plugin_t* plugin, const clap_istream_t* str
 const clap_plugin_state_t s_fx_state = { fx_state_save, fx_state_load };
 
 static const void* fx_get_extension(const clap_plugin_t* plugin, const char* id) {
-    (void)plugin;
+    if (!plugin || !id) return nullptr;
     if (std::strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0) {
         // Reuse synth's audio port extension (stereo I/O)
         extern const clap_plugin_audio_ports_t s_audio_ports;

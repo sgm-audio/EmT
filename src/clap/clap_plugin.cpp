@@ -2,6 +2,7 @@
 #include "clap/clap_common_utils.h"
 #include "clap/clap_gui.h"
 #include "clap/param_table.h"
+#include "core/weight_loader.h"
 #include "config.h"
 #include <cstring>
 #include <cmath>
@@ -45,7 +46,7 @@ const clap_plugin_descriptor_t emt_synth_descriptor = s_descriptor;
 const clap_plugin_descriptor_t mamba_synth_descriptor = s_descriptor;
 
 static MambaSynth* get_synth(const clap_plugin_t* plugin) {
-    return static_cast<MambaSynth*>(plugin->plugin_data);
+    return plugin ? static_cast<MambaSynth*>(plugin->plugin_data) : nullptr;
 }
 
 // Recompute smoothing coefficients after a sample-rate change. Called
@@ -84,6 +85,7 @@ static bool plugin_init(const clap_plugin_t* plugin) {
     m->block_size = 512;
     m->is_active = false;
     m->is_processing.store(false, std::memory_order_relaxed);
+    m->state_mirror_idle_published = false;
     m->latency = 0;  // Mamba-3: no conv1d
 
     init_param_metadata(m);
@@ -157,9 +159,12 @@ static bool plugin_init(const clap_plugin_t* plugin) {
 }
 
 static void plugin_destroy(const clap_plugin_t* plugin) {
+    if (!plugin) return;
     auto* m = get_synth(plugin);
-    m->core.destroy();
-    delete m;
+    if (m) {
+        m->core.destroy();
+        delete m;
+    }
     delete plugin;
 }
 
@@ -167,17 +172,23 @@ static bool plugin_activate(const clap_plugin_t* plugin,
     double sample_rate,
     uint32_t min_frames,
     uint32_t max_frames) {
+    if (!plugin) return false;
     auto* m = get_synth(plugin);
+    if (!m) return false;
     (void)min_frames;
     m->sample_rate = sample_rate;
     m->block_size = max_frames;
     m->is_active = true;
+    m->state_mirror_idle_published = false;
+    m->steal_residual[0] = 0.0f;
+    m->steal_residual[1] = 0.0f;
 
     recompute_smooth_coefficients(m);
 
     if (auto* c = m->core.published()) c->reset();
-    m->bypass_state.store(BYPASS_PROCESSING, std::memory_order_relaxed);
-    m->bypass_fade.store(0.0f, std::memory_order_relaxed);
+    const bool bypassed = m->bypass_target.load(std::memory_order_acquire);
+    m->bypass_state.store(bypassed ? BYPASS_BYPASSED : BYPASS_PROCESSING, std::memory_order_relaxed);
+    m->bypass_fade.store(bypassed ? 1.0f : 0.0f, std::memory_order_relaxed);
 
     // Snap smoothing currents to current target so a stream restart
     // doesn't produce a click.
@@ -193,6 +204,9 @@ static bool plugin_activate(const clap_plugin_t* plugin,
         voice.channel = -1;
         voice.clap_note_id = -1;
         voice.velocity = 0.0f;
+        voice.last_out[0] = 0.0f;
+        voice.last_out[1] = 0.0f;
+        m->mirror_zeroed_count[v] = 2;
         voice.attack_rate = MambaSynth::VOICE_ATTACK_RATE;
         voice.release_rate = MambaSynth::VOICE_RELEASE_RATE;
         auto& va = m->voice_atomics[v];
@@ -208,28 +222,34 @@ static bool plugin_activate(const clap_plugin_t* plugin,
 
 static void plugin_deactivate(const clap_plugin_t* plugin) {
     auto* m = get_synth(plugin);
+    if (!m) return;
     m->is_active = false;
 }
 
 static bool plugin_start_processing(const clap_plugin_t* plugin) {
     auto* m = get_synth(plugin);
+    if (!m) return false;
     m->is_processing.store(true, std::memory_order_release);
     return true;
 }
 
 static void plugin_stop_processing(const clap_plugin_t* plugin) {
     auto* m = get_synth(plugin);
+    if (!m) return;
     m->is_processing.store(false, std::memory_order_release);
 }
 
 static void plugin_reset(const clap_plugin_t* plugin) {
     auto* m = get_synth(plugin);
+    if (!m) return;
     if (auto* c = m->core.published()) c->reset();
-    m->bypass_state.store(BYPASS_PROCESSING, std::memory_order_relaxed);
-    m->bypass_fade.store(0.0f, std::memory_order_relaxed);
-    m->bypass_target.store(
-        m->param_values[PARAM_BYPASS].load(std::memory_order_acquire) > 0.5,
-        std::memory_order_release);
+    const bool bypassed = m->param_values[PARAM_BYPASS].load(std::memory_order_acquire) > 0.5;
+    m->bypass_target.store(bypassed, std::memory_order_release);
+    m->bypass_state.store(bypassed ? BYPASS_BYPASSED : BYPASS_PROCESSING, std::memory_order_relaxed);
+    m->bypass_fade.store(bypassed ? 1.0f : 0.0f, std::memory_order_relaxed);
+    m->state_mirror_idle_published = false;
+    m->steal_residual[0] = 0.0f;
+    m->steal_residual[1] = 0.0f;
 
     reset_smoothing_to_targets(m);
 
@@ -243,6 +263,9 @@ static void plugin_reset(const clap_plugin_t* plugin) {
         voice.channel = -1;
         voice.clap_note_id = -1;
         voice.velocity = 0.0f;
+        voice.last_out[0] = 0.0f;
+        voice.last_out[1] = 0.0f;
+        m->mirror_zeroed_count[v] = 2;
         auto& va = m->voice_atomics[v];
         va.stage.store(VOICE_IDLE, std::memory_order_relaxed);
         va.env.store(0.0f, std::memory_order_relaxed);
@@ -349,74 +372,60 @@ static void start_voice(MambaSynth* m, uint32_t v, int32_t key, int32_t channel,
 // frame offsets. Each event's time is the offset within the current
 // process() block at which the event should take effect.
 
-// Build a conditioning frame from the most recently pressed voice
-// (highest note_id in ATTACK or SUSTAIN) and ARA context.
-static void refresh_conditioning(MambaSynth* m, SSMInferenceCore* core) {
-    if (!core) return;
-    ConditioningFrame cf{};
+static uint64_t next_monotonic_note_id(MambaSynth* m) {
+    uint64_t id = (m->next_note_id == 0) ? 1u : m->next_note_id;
+    m->next_note_id = (id == UINT64_MAX) ? 1u : (id + 1u);
+    return id;
+}
 
-    // Find the most recent active voice for conditioning.
-    uint64_t newest_id = 0;
-    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-        uint8_t st = m->voices[v].stage;
-        if ((st == VOICE_ATTACK || st == VOICE_SUSTAIN) &&
-            m->voices[v].note_id > newest_id) {
-            newest_id = m->voices[v].note_id;
-            cf.tempo_bpm = 120.0f;
-            int32_t key = m->voices[v].key;
-            float vel = m->voices[v].velocity;
-            if (key >= 0) {
-                int pitch_class = key % 12;
-                cf.key_sig = static_cast<float>(pitch_class);
-                cf.chord_one_hot[pitch_class] = vel;
-                cf.reserved[0] = static_cast<float>(key) / 127.0f;
-                cf.reserved[1] = vel;
-            }
-        }
+static bool cf_any_nonzero(const ConditioningFrame& cf) {
+    const float* p = &cf.tempo_bpm;
+    for (size_t i = 0; i < COND_DIM; ++i) {
+        if (std::isfinite(p[i]) && std::fabs(p[i]) > 0.0f) return true;
     }
+    return false;
+}
 
-    // ARA overrides conditioning when an active frame has been published.
-    ARAConditioningFrame ara_cf;
-    if (m->ara_conditioning.read(ara_cf) && ara_cf.tempo_bpm > 0.0f) {
-        cf.tempo_bpm = ara_cf.tempo_bpm;
-        cf.key_sig = ara_cf.key_sig;
-        std::memcpy(cf.chord_one_hot, ara_cf.chord_one_hot, sizeof(cf.chord_one_hot));
-        std::memcpy(cf.f0_probs, ara_cf.f0_probs, sizeof(cf.f0_probs));
-        std::memcpy(cf.semantic, ara_cf.semantic, sizeof(cf.semantic));
+static void sanitize_conditioning_frame(ConditioningFrame& cf) {
+    float* p = &cf.tempo_bpm;
+    for (size_t i = 0; i < COND_DIM; ++i) {
+        if (!std::isfinite(p[i])) p[i] = 0.0f;
     }
-
-    core->set_conditioning(&cf.tempo_bpm);
 }
 
 // Push a fresh state-mirror snapshot to the double-buffer seqlock. The
-// audio thread calls this at the end of each process() call.
-static void publish_state_mirror(MambaSynth* m, uint32_t active_layers) {
+// audio thread calls this at the end of each process() call only when
+// weights are loaded and voice state changed (avoiding multi-MB idle copies).
+static void publish_state_mirror(MambaSynth* m, uint32_t active_layers, bool any_voice_active) {
+    const bool has_weights = m->weights_loaded.load(std::memory_order_acquire);
+    if (!has_weights) return;
+    if (!any_voice_active && m->state_mirror_idle_published) return;
     StateMirror* slot = m->state_mirror.begin_write();
     if (!slot) return;
-    const bool has_weights = m->weights_loaded.load(std::memory_order_acquire);
     const uint32_t nlayers = std::min<uint32_t>(active_layers, MAX_LAYERS);
-    if (has_weights) {
-        for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-            if (m->voices[v].stage != VOICE_IDLE) {
-                for (uint32_t l = 0; l < nlayers; ++l) {
-                    slot->voice_snapshots[v].ssm_state.layers[l] = m->voices[v].ssm_state.layers[l];
-                }
-                slot->voice_snapshots[v].env = m->voices[v].env;
-                slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
-                slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
-                slot->voice_snapshots[v].velocity = m->voices[v].velocity;
-                slot->voice_snapshots[v].key = m->voices[v].key;
-                slot->voice_snapshots[v].channel = m->voices[v].channel;
-                slot->voice_snapshots[v].note_id = m->voices[v].note_id;
-                slot->voice_snapshots[v].stage = m->voices[v].stage;
-                m->mirror_zeroed_count[v] = 0;
-            } else if (m->mirror_zeroed_count[v] < 2) {
-                std::memset(&slot->voice_snapshots[v], 0, sizeof(VoiceSnapshot));
-                slot->voice_snapshots[v].key = -1;
-                slot->voice_snapshots[v].channel = -1;
-                slot->voice_snapshots[v].stage = VOICE_IDLE;
-                ++m->mirror_zeroed_count[v];
+    bool all_zeroed = true;
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+        if (m->voices[v].stage != VOICE_IDLE) {
+            for (uint32_t l = 0; l < nlayers; ++l) {
+                slot->voice_snapshots[v].ssm_state.layers[l] = m->voices[v].ssm_state.layers[l];
             }
+            slot->voice_snapshots[v].env = m->voices[v].env;
+            slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
+            slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
+            slot->voice_snapshots[v].velocity = m->voices[v].velocity;
+            slot->voice_snapshots[v].key = m->voices[v].key;
+            slot->voice_snapshots[v].channel = m->voices[v].channel;
+            slot->voice_snapshots[v].note_id = m->voices[v].note_id;
+            slot->voice_snapshots[v].stage = m->voices[v].stage;
+            m->mirror_zeroed_count[v] = 0;
+            all_zeroed = false;
+        } else if (m->mirror_zeroed_count[v] < 2) {
+            std::memset(&slot->voice_snapshots[v], 0, sizeof(VoiceSnapshot));
+            slot->voice_snapshots[v].key = -1;
+            slot->voice_snapshots[v].channel = -1;
+            slot->voice_snapshots[v].stage = VOICE_IDLE;
+            ++m->mirror_zeroed_count[v];
+            if (m->mirror_zeroed_count[v] < 2) all_zeroed = false;
         }
     }
     for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
@@ -426,6 +435,7 @@ static void publish_state_mirror(MambaSynth* m, uint32_t active_layers) {
     slot->bypass_fade = m->bypass_fade.load(std::memory_order_relaxed);
     m->state_mirror.end_write();
     m->state_mirror.swap();
+    m->state_mirror_idle_published = !any_voice_active && all_zeroed;
 }
 
 static bool match_voice(const Voice& voice, int32_t key, int32_t channel, int32_t clap_note_id) {
@@ -483,7 +493,7 @@ static bool apply_process_event(MambaSynth* m, const clap_event_header_t* hdr) {
             if (v >= 0) {
                 start_voice(m, static_cast<uint32_t>(v), ev->key, ev->channel,
                             ev->note_id, static_cast<float>(ev->velocity),
-                            m->next_note_id++);
+                            next_monotonic_note_id(m));
             }
         }
         return true;
@@ -505,7 +515,7 @@ static bool apply_process_event(MambaSynth* m, const clap_event_header_t* hdr) {
             const int32_t v = allocate_voice(m);
             if (v >= 0) {
                 start_voice(m, static_cast<uint32_t>(v), d1, channel, -1,
-                            static_cast<float>(d2) / 127.0f, m->next_note_id++);
+                            static_cast<float>(d2) / 127.0f, next_monotonic_note_id(m));
             }
             return true;
         } else if (status == 0x80u || (status == 0x90u && d2 == 0)) {
@@ -567,8 +577,48 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
     SSMInferenceCore* core = m->core.adopt();
     const size_t core_d_model = core ? core->config().d_model : 1;
     const uint32_t core_num_layers = core ? static_cast<uint32_t>(core->config().num_layers) : 0u;
+    const bool loaded = m->weights_loaded.load(std::memory_order_acquire);
 
-    refresh_conditioning(m, core);
+    // Read base conditioning once per block (preserves m->conditioning and
+    // full 128-float ARA frame including f0_probs and semantic embedding).
+    ConditioningFrame base_cf{};
+    if (!m->conditioning.read(base_cf)) {
+        std::memset(&base_cf, 0, sizeof(base_cf));
+    } else {
+        sanitize_conditioning_frame(base_cf);
+    }
+
+    ARAConditioningFrame ara_cf{};
+    const bool ara_active = m->ara_conditioning.read(ara_cf) && ara_cf.tempo_bpm > 0.0f;
+    if (ara_active) {
+        sanitize_conditioning_frame(ara_cf);
+        base_cf = ara_cf;
+    }
+
+    ConditioningFrame voice_cf[MAX_VOICES]{};
+    bool voice_cond_active[MAX_VOICES]{};
+    auto rebuild_voice_conditioning = [&]() {
+        for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+            const Voice& voice = m->voices[v];
+            if (voice.stage == VOICE_IDLE) {
+                voice_cond_active[v] = false;
+                continue;
+            }
+            voice_cf[v] = base_cf;
+            if (voice.key >= 0) {
+                const int pitch_class = voice.key % 12;
+                if (!ara_active) {
+                    voice_cf[v].key_sig = static_cast<float>(pitch_class);
+                    std::memset(voice_cf[v].chord_one_hot, 0, sizeof(voice_cf[v].chord_one_hot));
+                    voice_cf[v].chord_one_hot[pitch_class] = voice.velocity;
+                }
+                voice_cf[v].reserved[0] = static_cast<float>(voice.key) / 127.0f;
+                voice_cf[v].reserved[1] = voice.velocity;
+            }
+            voice_cond_active[v] = cf_any_nonzero(voice_cf[v]);
+        }
+    };
+    rebuild_voice_conditioning();
 
     const uint32_t frames = process->frames_count;
     uint32_t bypass_state = m->bypass_state.load(std::memory_order_relaxed);
@@ -581,6 +631,15 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
     double cur_attack = m->params[PARAM_ATTACK].current.load(std::memory_order_relaxed);
     double cur_release = m->params[PARAM_RELEASE].current.load(std::memory_order_relaxed);
     double cur_mix = m->params[PARAM_MIX].current.load(std::memory_order_relaxed);
+    double prev_attack = cur_attack;
+    double prev_release = cur_release;
+    float live_attack_rate = compute_envelope_rate(
+        cur_attack, m->params[PARAM_ATTACK].min_value,
+        m->params[PARAM_ATTACK].max_value, m->sample_rate);
+    float live_release_rate = compute_envelope_rate(
+        cur_release, m->params[PARAM_RELEASE].min_value,
+        m->params[PARAM_RELEASE].max_value, m->sample_rate);
+
     const uint32_t event_count = process->in_events ? process->in_events->size(process->in_events) : 0;
     uint32_t event_index = 0;
     uint32_t sample_pos = 0;
@@ -620,7 +679,7 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
             break;
         }
         if (cond_dirty) {
-            refresh_conditioning(m, core);
+            rebuild_voice_conditioning();
         }
 
         const bool bypass_target = m->bypass_target.load(std::memory_order_acquire);
@@ -628,18 +687,10 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
         const double target_attack = m->params[PARAM_ATTACK].target.load(std::memory_order_relaxed);
         const double target_release = m->params[PARAM_RELEASE].target.load(std::memory_order_relaxed);
         const double target_mix = m->params[PARAM_MIX].target.load(std::memory_order_relaxed);
-
-        float live_attack_rate = compute_envelope_rate(
-            cur_attack, m->params[PARAM_ATTACK].min_value,
-            m->params[PARAM_ATTACK].max_value, m->sample_rate);
-        float live_release_rate = compute_envelope_rate(
-            cur_release, m->params[PARAM_RELEASE].min_value,
-            m->params[PARAM_RELEASE].max_value, m->sample_rate);
+        const uint32_t in_channels = in_bus ? std::min<uint32_t>(in_bus->channel_count, 2) : 0;
 
         for (uint32_t n = sample_pos; n < sub_block_end; ++n) {
             advance_one_pole(cur_gain, target_gain, c_gain);
-            const double prev_attack = cur_attack;
-            const double prev_release = cur_release;
             advance_one_pole(cur_attack, target_attack, c_attack);
             advance_one_pole(cur_release, target_release, c_release);
             advance_one_pole(cur_mix, target_mix, c_mix);
@@ -649,15 +700,16 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
                 live_attack_rate = compute_envelope_rate(
                     cur_attack, m->params[PARAM_ATTACK].min_value,
                     m->params[PARAM_ATTACK].max_value, m->sample_rate);
+                prev_attack = cur_attack;
             }
             if (std::fabs(cur_release - prev_release) > 1e-12) {
                 live_release_rate = compute_envelope_rate(
                     cur_release, m->params[PARAM_RELEASE].min_value,
                     m->params[PARAM_RELEASE].max_value, m->sample_rate);
+                prev_release = cur_release;
             }
 
             float dry[2] = {0.0f, 0.0f};
-            const uint32_t in_channels = in_bus ? std::min<uint32_t>(in_bus->channel_count, 2) : 0;
             for (uint32_t ch = 0; ch < in_channels; ++ch) {
                 float raw = 0.0f;
                 if (in_bus->data32 && in_bus->data32[ch]) raw = in_bus->data32[ch][n];
@@ -666,17 +718,17 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
             }
             const float mono = in_channels > 1 ? 0.5f * (dry[0] + dry[1]) : dry[0];
             alignas(64) float voice_sum[MAX_D_MODEL]{};
+            const bool run_ssm = loaded && core && !(bypass_state == BYPASS_BYPASSED && fade >= 1.0f);
             for (uint32_t v = 0; v < MAX_VOICES; ++v) {
                 Voice& voice = m->voices[v];
                 if (voice.stage == VOICE_IDLE) continue;
                 voice.attack_rate = live_attack_rate;
                 voice.release_rate = live_release_rate;
                 voice_envelope_step(voice.env, voice.stage, live_attack_rate, live_release_rate);
-                m->voice_atomics[v].stage.store(voice.stage, std::memory_order_relaxed);
-                m->voice_atomics[v].env.store(voice.env, std::memory_order_relaxed);
-                if (voice.env <= 0.0f || !core) continue;
+                if (voice.env <= 0.0f || !run_ssm) continue;
                 alignas(64) float outbuf[MAX_D_MODEL]{};
-                core->process_sample(mono, outbuf, voice.ssm_state);
+                core->process_sample(mono, outbuf, voice.ssm_state,
+                                     &voice_cf[v].tempo_bpm, voice_cond_active[v]);
                 voice.last_out[0] = outbuf[0];
                 voice.last_out[1] = (core_d_model > 1) ? outbuf[1] : outbuf[0];
                 const float voice_amp = voice.env * voice.velocity;
@@ -707,9 +759,9 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
             for (uint32_t ch = 0; ch < out_bus.channel_count; ++ch) {
                 const float channel_dry = ch < in_channels ? dry[ch] : mono;
                 const float wet = stereo_wet[ch & 1u] * static_cast<float>(cur_gain);
-                const float mixed = channel_dry * static_cast<float>(1.0 - cur_mix)
-                                  + wet * static_cast<float>(cur_mix);
-                const float sample = mixed * (1.0f - fade) + channel_dry * fade;
+                float sample = compute_mixed_sample(
+                    channel_dry, wet, static_cast<float>(cur_mix), fade);
+                if (!std::isfinite(sample)) sample = 0.0f;
                 if (out_bus.data32 && out_bus.data32[ch]) out_bus.data32[ch][n] = sample;
                 if (out_bus.data64 && out_bus.data64[ch]) out_bus.data64[ch][n] = sample;
             }
@@ -725,13 +777,22 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
         }
         ++event_index;
     }
+
+    bool any_voice_active = false;
+    for (uint32_t v = 0; v < MAX_VOICES; ++v) {
+        const Voice& voice = m->voices[v];
+        m->voice_atomics[v].stage.store(voice.stage, std::memory_order_relaxed);
+        m->voice_atomics[v].env.store(voice.env, std::memory_order_relaxed);
+        if (voice.stage != VOICE_IDLE) any_voice_active = true;
+    }
+
     m->params[PARAM_GAIN].current.store(cur_gain, std::memory_order_relaxed);
     m->params[PARAM_ATTACK].current.store(cur_attack, std::memory_order_relaxed);
     m->params[PARAM_RELEASE].current.store(cur_release, std::memory_order_relaxed);
     m->params[PARAM_MIX].current.store(cur_mix, std::memory_order_relaxed);
     m->bypass_fade.store(fade, std::memory_order_relaxed);
     m->bypass_state.store(bypass_state, std::memory_order_relaxed);
-    publish_state_mirror(m, core_num_layers);
+    publish_state_mirror(m, core_num_layers, any_voice_active);
     return CLAP_PROCESS_CONTINUE;
 }
 // Default behaviour: thread-check is queried from the host, not provided
@@ -740,7 +801,7 @@ static clap_process_status plugin_process(const clap_plugin_t* plugin,
 // cached host pointer instead. We keep the slot here so get_extension
 // is unambiguous about which IDs the plugin recognizes.
 static const void* plugin_get_extension(const clap_plugin_t* plugin, const char* id) {
-    (void)plugin;
+    if (!plugin || !id) return nullptr;
 
     if (strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0) {
         return &s_audio_ports;
@@ -794,60 +855,57 @@ static const clap_plugin_t s_plugin_class = {
 
 bool MambaSynth::load_weights(const char* path) {
     if (!path || path[0] == '\0') return false;
-    if (weight_loader.load(path) != LoadError::Ok) return false;
 
-    // Validate dimensions against the loaded header
-    const auto& hdr = weight_loader.header();
-    // The file may describe any shape that fits the compiled MAX_* limits;
-    // core_cfg is re-initialised from the header below. Do NOT compare the
-    // header against core_cfg.num_layers here: at this point that is still
-    // the 1-layer placeholder set in the constructor, so such a comparison
-    // rejects every multi-layer model.
+    // Load into a local WeightLoader so failed loads leave the currently
+    // active engine, config, and weight_path completely untouched.
+    WeightLoader tmp_loader;
+    if (tmp_loader.load(path) != LoadError::Ok) return false;
+
+    const auto& hdr = tmp_loader.header();
     if (!WeightLoader::fits_in_static_weights_with(hdr)) {
-        weight_loader.unload();
         return false;
     }
 
-    // Update core config from header
-    core_cfg.d_state = hdr.d_state;
-    core_cfg.d_model = hdr.d_model;
-    core_cfg.d_inner = hdr.d_inner;
-    core_cfg.nheads = hdr.nheads;
-    core_cfg.headdim = hdr.headdim;
-    core_cfg.cond_dim = hdr.cond_dim;
-    if (hdr.version >= 2) {
-        core_cfg.num_layers = hdr.num_layers;
-        core_cfg.mimo_rank = hdr.mimo_rank > 0 ? hdr.mimo_rank : 1;
-    } else {
-        core_cfg.mimo_rank = 1;
-    }
+    MambaConfig new_cfg = core_cfg;
+    new_cfg.d_state = hdr.d_state;
+    new_cfg.d_model = hdr.d_model;
+    new_cfg.d_inner = hdr.d_inner;
+    new_cfg.nheads = hdr.nheads;
+    new_cfg.headdim = hdr.headdim;
+    new_cfg.mimo_rank = 1;  // D3 enforces rank-1 SISO; step_in_proj reads MAX_MIMO_RANK stride
+    new_cfg.cond_dim = hdr.cond_dim;
+    new_cfg.num_layers = (hdr.version >= 2) ? hdr.num_layers : 1;
+    new_cfg.num_rope_angles = hdr.d_state / 2;
 
-    // Build the new engine fully OFF the audio path, then publish it. The
-    // audio thread keeps running on the old core until it adopt()s this one
-    // at the next block start; the old core is freed by reclaim() once the
-    // audio thread reports it retired (E12). A failed load leaves the old
-    // core running, unlike the previous in-place init that could destroy it
-    // mid-flight.
-    auto* new_core = new (std::nothrow) SSMInferenceCore(core_cfg);
+    // Build the new engine fully OFF the audio path, then publish it (E12).
+    auto* new_core = new (std::nothrow) SSMInferenceCore(new_cfg);
     auto w = std::unique_ptr<SSMWeights>(new (std::nothrow) SSMWeights());
     if (!new_core || !w) {
         delete new_core;
-        weight_loader.unload();
         return false;
     }
 
-    for (uint32_t layer = 0; layer < core_cfg.num_layers; ++layer) {
-        if (weight_loader.dequantize_layer_to(layer, *w) != LoadError::Ok) {
+    for (uint32_t layer = 0; layer < new_cfg.num_layers; ++layer) {
+        if (tmp_loader.dequantize_layer_to(layer, *w) != LoadError::Ok) {
             delete new_core;
-            weight_loader.unload();
             return false;
+        }
+        const float* raw_w = reinterpret_cast<const float*>(w.get());
+        const size_t n_floats = sizeof(SSMWeights) / sizeof(float);
+        for (size_t idx = 0; idx < n_floats; ++idx) {
+            if (!std::isfinite(raw_w[idx])) {
+                delete new_core;
+                return false;
+            }
         }
         new_core->set_layer_weights(layer, *w);
     }
 
+    core_cfg = new_cfg;
     core.reclaim();   // free any previously retired core (main thread)
     core.publish(new_core);
     weights_loaded.store(true, std::memory_order_release);
+    state_mirror_idle_published = false;
 
     // Record the loaded path so state save can round-trip it.
     std::strncpy(weight_path, path, MAX_WEIGHT_PATH - 1);
@@ -864,6 +922,7 @@ const clap_plugin_t* mamba_synth_create(const clap_host_t* host) {
     m->block_size = 512;
     m->is_active = false;
     m->is_processing.store(false, std::memory_order_relaxed);
+    m->state_mirror_idle_published = false;
     m->steal_residual[0] = 0.0f;
     m->steal_residual[1] = 0.0f;
     for (uint32_t v = 0; v < MAX_VOICES; ++v) m->mirror_zeroed_count[v] = 2;

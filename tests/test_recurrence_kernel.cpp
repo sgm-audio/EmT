@@ -203,6 +203,30 @@ TEST(RecurrenceKernel, ZeroInputDecaysForEveryClampedPole) {
     }
 }
 
+TEST(RecurrenceKernel, SanitizesNonFiniteAndExtremeInputs) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    const std::pair<float, float> edge_cases[] = {
+        {nan, 0.1f},
+        {-1.0f, nan},
+        {-inf, 0.1f},
+        {-1.0f, inf},
+        {-1.0f, -0.5f},
+        {2.0f, 1.0f},
+        {-1e8f, 1e6f},
+    };
+    for (const auto& [A, dt] : edge_cases) {
+        const auto k = mamba::recurrence::bilinear_coeffs(A, dt);
+        EXPECT_TRUE(std::isfinite(k.a_bar));
+        EXPECT_TRUE(std::isfinite(k.b_bar_scale));
+        EXPECT_LT(std::fabs(k.a_bar), 1.0f);
+        EXPECT_GE(k.b_bar_scale, 0.0f);
+    }
+    const auto k_freeze = mamba::recurrence::bilinear_coeffs(-1.0f, 0.0f);
+    EXPECT_FLOAT_EQ(k_freeze.a_bar, 1.0f);
+    EXPECT_FLOAT_EQ(k_freeze.b_bar_scale, 0.0f);
+}
+
 // Closed-form LTI verification: for constant A, dt, B, C:
 // 1. Unit impulse x = [1, 0, 0, ...] produces y[n] = C * b_bar * a_bar^n.
 // 2. Unit step x = 1.0 converges monotonically to DC gain 1 / |A| (when B=C=1).
@@ -283,4 +307,3 @@ TEST(RecurrenceKernel, ExtremePoleAndDeltaNyquistResonance) {
         }
     }
 }
-

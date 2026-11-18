@@ -55,6 +55,8 @@ public:
 
     void process_sample(float input, float* output);
     void process_sample(float input, float* output, MambaState& state);
+    void process_sample(float input, float* output, MambaState& state,
+                        const float* cond_vector, bool cond_active);
     void process_block(const float* input, float* output, size_t size);
     void process_block(const float* input, float* output, size_t size, MambaState& state);
 
@@ -76,8 +78,9 @@ private:
     SSMBlock* layers_;
     size_t num_constructed_;
     alignas(64) std::array<float, COND_DIM> cond_;
-    alignas(64) std::array<float, MAX_BLOCK_SIZE * MAX_D_MODEL> scratch_dm_{};
-    alignas(64) std::array<float, MAX_BLOCK_SIZE> scratch_mono_{};
+    bool cond_active_{false};
+    alignas(64) std::array<float, MAX_BLOCK_SIZE * MAX_D_MODEL> block_scratch_dm_{};
+    alignas(64) std::array<float, MAX_BLOCK_SIZE> block_scratch_mono_{};
 };
 
 } // namespace mamba

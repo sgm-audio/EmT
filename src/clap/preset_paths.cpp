@@ -11,7 +11,8 @@
 namespace mamba {
 
 bool get_preset_directory(char* out, size_t out_size) {
-    // Linux: $XDG_DATA_HOME/clap/presets/com.mamba-ssm.synth/
+    if (!out || out_size == 0) return false;
+    // Linux: $XDG_DATA_HOME/clap/presets/com.emt.synth/
     const char* xdg = std::getenv("XDG_DATA_HOME");
     std::string base;
     if (xdg && xdg[0]) {
@@ -25,7 +26,7 @@ bool get_preset_directory(char* out, size_t out_size) {
         if (!home) return false;
         base = std::string(home) + "/.local/share";
     }
-    std::string dir = base + "/clap/presets/com.mamba-ssm.synth";
+    std::string dir = base + "/clap/presets/com.emt.synth";
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     if (ec) return false;

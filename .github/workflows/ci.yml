@@ -54,3 +54,44 @@ jobs:
         env:
           PYTHON: python3
         run: bash scripts/ci.sh
+
+      - name: Verify architecture deviations gate
+        run: python3 scripts/verify_deviations.py
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: asan-ubsan
+            sanitizer: ASAN
+            env: ASAN_OPTIONS=detect_leaks=1
+          - name: tsan
+            sanitizer: TSAN
+            env: TSAN_OPTIONS=halt_on_error=1
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ python3 python3-pip libx11-dev
+
+      - name: Install Python dependencies
+        run: pip3 install --break-system-packages numpy pyyaml
+
+      - name: Configure and build (${{ matrix.name }})
+        run: |
+          cmake -B build-${{ matrix.name }} -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DEMT_WERROR=ON -DEMT_SANITIZER=${{ matrix.sanitizer }}
+          cmake --build build-${{ matrix.name }} --parallel "$(nproc)"
+
+      - name: Generate parity vectors and run ctest (${{ matrix.name }})
+        run: |
+          python3 scripts/reference_mamba3.py --generate --output-dir build-${{ matrix.name }}
+          MAMBA_PARITY_DIR="$PWD/build-${{ matrix.name }}" MAMBA_REQUIRE_PARITY=1 \
+            MAMBA_TEST_WEIGHTS="$PWD/build-${{ matrix.name }}/parity_multilayer_weights.bin" \
+            ${{ matrix.env }} ctest --test-dir build-${{ matrix.name }} --output-on-failure --timeout 600 -E '^clap-validator$'

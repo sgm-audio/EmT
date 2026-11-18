@@ -204,7 +204,7 @@ TEST(ARADocumentControllerTest, PlaybackRegionTimelineLookup) {
     r2.chord_one_hot[5] = 1.0f;
     doc.addPlaybackRegion(r2);
 
-    EXPECT_EQ(doc.playbackRegionCount(), 2);
+    EXPECT_EQ(doc.playbackRegionCount(), 2u);
 
     float bpm = 0.0f, key = 0.0f;
     float chord[12] = {0.0f};

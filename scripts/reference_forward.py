@@ -87,6 +87,13 @@ class WeightFileHeader:
         assert self.headdim > 0
         assert self.cond_dim > 0
         assert self.num_layers > 0
+        assert self.d_inner == self.nheads * self.headdim, (
+            f"d_inner ({self.d_inner}) != nheads * headdim ({self.nheads * self.headdim})"
+        )
+        assert self.quantization == 0, (
+            f"Unsupported quantization={self.quantization}; reference_forward supports float32 only"
+        )
+        assert self.mimo_rank <= 1, f"Unsupported mimo_rank={self.mimo_rank} (must be <= 1)"
 
 
 class SSMWeights:
@@ -115,8 +122,14 @@ class WeightLoader:
         with open(path, "rb") as f:
             self.data = f.read()
 
+        if len(self.data) < HEADER_SIZE:
+            raise ValueError(f"Weight file too small for header: {len(self.data)} bytes")
         self.header = WeightFileHeader(self.data[:HEADER_SIZE])
         self.header.validate()
+        if len(self.data) < HEADER_SIZE + self.header.q_metadata_size:
+            raise ValueError(
+                f"Weight file truncated before quantization metadata: {len(self.data)} bytes"
+            )
 
         self.weight_data = self.data[HEADER_SIZE + self.header.q_metadata_size :]
         self._validate_size()
@@ -258,12 +271,15 @@ class ReferenceForward:
 
     def set_conditioning(self, cond_vector):
         """Set FiLM conditioning vector (like C++ set_conditioning)."""
+        self.cond.fill(0.0)
         if cond_vector is not None and len(cond_vector) > 0:
             n = min(len(cond_vector), self.h.cond_dim)
-            self.cond[:n] = cond_vector[:n]
-            self.conditioning_active = np.any(self.cond != 0.0)
+            vals = np.asarray(cond_vector[:n], dtype=np.float32)
+            if not np.all(np.isfinite(vals)):
+                raise ValueError("Non-finite value in conditioning vector")
+            self.cond[:n] = vals
+            self.conditioning_active = bool(np.any(self.cond != 0.0))
         else:
-            self.cond.fill(0.0)
             self.conditioning_active = False
 
     def reset(self):
@@ -278,6 +294,8 @@ class ReferenceForward:
         Process one sample through the Mamba-3 SSM layer.
         Returns: d_model output vector (np.ndarray, float32)
         """
+        if not math.isfinite(input_scalar):
+            return np.zeros(self.h.d_model, dtype=np.float32)
         h = self.h
         w = self.w
         d_state = h.d_state
@@ -442,9 +460,14 @@ class ReferenceForward:
         # ===== Step 6: MIMO combine (SiLU z-gating) =====
         for h_idx in range(nheads):
             for d in range(headdim):
-                z_val = z[h_idx * headdim + d]
-                z_sig = 1.0 / (1.0 + math.exp(-z_val))
-                z_gated = z_val * z_sig
+                z_val = float(z[h_idx * headdim + d])
+                if not math.isfinite(z_val):
+                    z_gated = 0.0
+                elif -z_val > 709.0:
+                    z_gated = 0.0
+                else:
+                    z_sig = 1.0 / (1.0 + math.exp(-z_val))
+                    z_gated = z_val * z_sig
                 y_head[h_idx * headdim + d] *= z_gated
 
         # ===== Step 7: Output projection + D skip + residual =====
