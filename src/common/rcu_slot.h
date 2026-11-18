@@ -1,9 +1,10 @@
 #ifndef MAMBA_RCU_SLOT_H
 #define MAMBA_RCU_SLOT_H
 
+#include <array>
 #include <atomic>
 #include <cstddef>
-#include <vector>
+#include <new>
 #include "common/ring_buffer.h"
 
 namespace mamba {
@@ -22,20 +23,21 @@ namespace mamba {
 //
 // The published object must be immutable once published: the writer builds
 // each new object from scratch and never mutates one that has been published.
-// An object the reader skips (two publishes within one reader interval) stays
-// in hold_ and is freed by destroy(); with weight loads that is a bounded,
-// short-lived case (one engine object per skipped reload).
+// Uses fixed inline storage plus nothrow linked nodes so publish() never throws
+// under -fno-exceptions and any skipped pointers are freed by destroy().
 template <typename T>
 class RcuSlot {
 public:
     RcuSlot() = default;
+    ~RcuSlot() { destroy(); }
     RcuSlot(const RcuSlot&) = delete;
     RcuSlot& operator=(const RcuSlot&) = delete;
 
     // Writer (main thread): publish the next object.
     void publish(T* next) {
-        T* old = published_.exchange(next, std::memory_order_release);
-        if (old) hold_.push_back(old);
+        reclaim();
+        T* old = published_.exchange(next, std::memory_order_acq_rel);
+        if (old) push_hold(old);
     }
 
     // Reader (audio thread): return the current object (stable across the
@@ -44,8 +46,6 @@ public:
         T* p = published_.load(std::memory_order_acquire);
         if (p != active_) {
             if (active_) {
-                // If the queue is full (64+ swaps without reclaim), active_
-                // remains in hold_ and will be freed by destroy().
                 (void)retired_queue_.push(active_);
             }
             active_ = p;
@@ -57,7 +57,7 @@ public:
 
     // Writer (main thread): the currently published object (null before the
     // first publish).
-    T* published() const { return published_.load(std::memory_order_relaxed); }
+    T* published() const { return published_.load(std::memory_order_acquire); }
 
     // Writer (main thread): free objects the reader has reported. Call before
     // each publish and on any main-thread hook (e.g. on_main_thread).
@@ -75,25 +75,64 @@ public:
     void destroy() {
         reclaim();
         if (T* p = published_.exchange(nullptr, std::memory_order_acq_rel)) delete p;
-        for (T* p : hold_) delete p;
-        hold_.clear();
+        for (size_t i = 0; i < hold_count_; ++i) {
+            delete hold_[i];
+            hold_[i] = nullptr;
+        }
+        hold_count_ = 0;
+        while (overflow_head_) {
+            HoldNode* n = overflow_head_;
+            overflow_head_ = n->next;
+            delete n->ptr;
+            delete n;
+        }
         active_ = nullptr;
     }
 
 private:
-    void remove_from_hold(T* p) {
-        for (auto it = hold_.begin(); it != hold_.end(); ++it) {
-            if (*it == p) {
-                hold_.erase(it);
-                return;
-            }
+    static constexpr size_t kInlineHoldCapacity = 64;
+
+    struct HoldNode {
+        T* ptr;
+        HoldNode* next;
+    };
+
+    void push_hold(T* old) {
+        if (hold_count_ < kInlineHoldCapacity) {
+            hold_[hold_count_++] = old;
+            return;
+        }
+        if (auto* node = new (std::nothrow) HoldNode{old, overflow_head_}) {
+            overflow_head_ = node;
         }
     }
 
-    std::atomic<T*> published_{nullptr};
-    SPSCRingBuffer<T*, 64> retired_queue_;
-    T* active_ = nullptr;   // reader only
-    std::vector<T*> hold_;  // writer only
+    void remove_from_hold(T* p) {
+        for (size_t i = 0; i < hold_count_; ++i) {
+            if (hold_[i] == p) {
+                hold_[i] = hold_[--hold_count_];
+                hold_[hold_count_] = nullptr;
+                return;
+            }
+        }
+        HoldNode** curr = &overflow_head_;
+        while (*curr) {
+            if ((*curr)->ptr == p) {
+                HoldNode* victim = *curr;
+                *curr = victim->next;
+                delete victim;
+                return;
+            }
+            curr = &((*curr)->next);
+        }
+    }
+
+    alignas(64) std::atomic<T*> published_{nullptr};
+    alignas(64) SPSCRingBuffer<T*, 64> retired_queue_;
+    alignas(64) T* active_ = nullptr;   // reader only
+    std::array<T*, kInlineHoldCapacity> hold_{}; // writer only
+    size_t hold_count_ = 0;             // writer only
+    HoldNode* overflow_head_ = nullptr; // writer only
 };
 
 } // namespace mamba

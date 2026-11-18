@@ -3,6 +3,7 @@
 // (Phase 1 #3); see preset_bank.cpp (factory data) and preset_paths.cpp
 // (directories).
 #include "clap/clap_presets.h"
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -93,12 +94,13 @@ public:
     bool parse(JsonVal& out) {
         skip_ws();
         if (pos_ >= src_.size()) return false;
-        if (!parse_value(out)) return false;
+        if (!parse_value(out, 0)) return false;
         skip_ws();
         return pos_ == src_.size();
     }
 
 private:
+    static constexpr int kMaxDepth = 64;
     std::string_view src_;
     size_t pos_;
 
@@ -113,12 +115,47 @@ private:
         }
     }
 
-    bool parse_value(JsonVal& v) {
+    static bool parse_hex4(std::string_view sv, size_t pos, uint32_t& out) {
+        if (pos + 4 > sv.size()) return false;
+        uint32_t v = 0;
+        for (size_t i = 0; i < 4; ++i) {
+            char c = sv[pos + i];
+            uint32_t d = 0;
+            if (c >= '0' && c <= '9') d = static_cast<uint32_t>(c - '0');
+            else if (c >= 'a' && c <= 'f') d = static_cast<uint32_t>(10 + c - 'a');
+            else if (c >= 'A' && c <= 'F') d = static_cast<uint32_t>(10 + c - 'A');
+            else return false;
+            v = (v << 4) | d;
+        }
+        out = v;
+        return true;
+    }
+
+    static void append_utf8(std::string& s, uint32_t cp) {
+        if (cp < 0x80) {
+            s += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            s += static_cast<char>(0xC0u | (cp >> 6));
+            s += static_cast<char>(0x80u | (cp & 0x3Fu));
+        } else if (cp < 0x10000) {
+            s += static_cast<char>(0xE0u | (cp >> 12));
+            s += static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu));
+            s += static_cast<char>(0x80u | (cp & 0x3Fu));
+        } else {
+            s += static_cast<char>(0xF0u | (cp >> 18));
+            s += static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu));
+            s += static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu));
+            s += static_cast<char>(0x80u | (cp & 0x3Fu));
+        }
+    }
+
+    bool parse_value(JsonVal& v, int depth) {
+        if (depth > kMaxDepth) return false;
         skip_ws();
         if (pos_ >= src_.size()) return false;
         char c = src_[pos_];
-        if (c == '{') return parse_object(v);
-        if (c == '[') return parse_array(v);
+        if (c == '{') return parse_object(v, depth);
+        if (c == '[') return parse_array(v, depth);
         if (c == '"') return parse_string(v.str_val) && (v.type = JsonVal::TypeString, true);
         if (c == 't' || c == 'f') return parse_bool(v);
         if (c == 'n') return parse_null(v);
@@ -126,7 +163,7 @@ private:
         return false;
     }
 
-    bool parse_object(JsonVal& v) {
+    bool parse_object(JsonVal& v, int depth) {
         if (pos_ >= src_.size() || src_[pos_] != '{') return false;
         ++pos_;
         v.type = JsonVal::TypeObject;
@@ -145,7 +182,7 @@ private:
             if (pos_ >= src_.size() || src_[pos_] != ':') return false;
             ++pos_;
             JsonVal val;
-            if (!parse_value(val)) return false;
+            if (!parse_value(val, depth + 1)) return false;
             v.obj_val.emplace_back(std::move(key), std::move(val));
             skip_ws();
             if (pos_ < src_.size() && src_[pos_] == '}') {
@@ -158,7 +195,7 @@ private:
         return false;
     }
 
-    bool parse_array(JsonVal& v) {
+    bool parse_array(JsonVal& v, int depth) {
         if (pos_ >= src_.size() || src_[pos_] != '[') return false;
         ++pos_;
         v.type = JsonVal::TypeArray;
@@ -170,7 +207,7 @@ private:
         }
         while (pos_ < src_.size()) {
             JsonVal val;
-            if (!parse_value(val)) return false;
+            if (!parse_value(val, depth + 1)) return false;
             v.arr_val.push_back(std::move(val));
             skip_ws();
             if (pos_ < src_.size() && src_[pos_] == ']') {
@@ -188,9 +225,10 @@ private:
         ++pos_;
         s.clear();
         while (pos_ < src_.size()) {
-            char c = src_[pos_++];
-            if (c == '"') return true;
-            if (c == '\\') {
+            unsigned char uc = static_cast<unsigned char>(src_[pos_++]);
+            if (uc == '"') return true;
+            if (uc < 0x20u) return false;  // RFC 8259 forbids unescaped control chars
+            if (uc == '\\') {
                 if (pos_ >= src_.size()) return false;
                 char esc = src_[pos_++];
                 switch (esc) {
@@ -203,34 +241,62 @@ private:
                     case 'r':  s += '\r'; break;
                     case 't':  s += '\t'; break;
                     case 'u': {
-                        if (pos_ + 4 > src_.size()) return false;
-                        char hex[5] = { src_[pos_], src_[pos_ + 1], src_[pos_ + 2], src_[pos_ + 3], '\0' };
+                        uint32_t cp = 0;
+                        if (!parse_hex4(src_, pos_, cp)) return false;
                         pos_ += 4;
-                        char* end = nullptr;
-                        long cp = std::strtol(hex, &end, 16);
-                        if (end != hex + 4) return false;
-                        if (cp >= 0 && cp < 0x80) {
-                            s += static_cast<char>(cp);
-                        } else {
-                            s += '?';
+                        if (cp >= 0xD800u && cp <= 0xDBFFu) {
+                            if (pos_ + 6 > src_.size() || src_[pos_] != '\\' || src_[pos_ + 1] != 'u') {
+                                return false;
+                            }
+                            uint32_t low = 0;
+                            if (!parse_hex4(src_, pos_ + 2, low) || low < 0xDC00u || low > 0xDFFFu) {
+                                return false;
+                            }
+                            pos_ += 6;
+                            cp = 0x10000u + (((cp - 0xD800u) << 10) | (low - 0xDC00u));
+                        } else if (cp >= 0xDC00u && cp <= 0xDFFFu) {
+                            return false;  // Lone low surrogate
                         }
+                        append_utf8(s, cp);
                         break;
                     }
-                    default: s += esc; break;
+                    default: return false;  // Invalid RFC 8259 escape
                 }
             } else {
-                s += c;
+                s += static_cast<char>(uc);
             }
         }
         return false;
     }
 
     bool parse_number(JsonVal& v) {
-        const char* start = src_.data() + pos_;
-        char* end = nullptr;
-        double val = std::strtod(start, &end);
-        if (end == start) return false;
-        pos_ += static_cast<size_t>(end - start);
+        size_t p = pos_;
+        if (p < src_.size() && src_[p] == '-') ++p;
+        if (p >= src_.size()) return false;
+        if (src_[p] == '0') {
+            ++p;
+        } else if (src_[p] >= '1' && src_[p] <= '9') {
+            while (p < src_.size() && src_[p] >= '0' && src_[p] <= '9') ++p;
+        } else {
+            return false;
+        }
+        if (p < src_.size() && src_[p] == '.') {
+            ++p;
+            if (p >= src_.size() || src_[p] < '0' || src_[p] > '9') return false;
+            while (p < src_.size() && src_[p] >= '0' && src_[p] <= '9') ++p;
+        }
+        if (p < src_.size() && (src_[p] == 'e' || src_[p] == 'E')) {
+            ++p;
+            if (p < src_.size() && (src_[p] == '+' || src_[p] == '-')) ++p;
+            if (p >= src_.size() || src_[p] < '0' || src_[p] > '9') return false;
+            while (p < src_.size() && src_[p] >= '0' && src_[p] <= '9') ++p;
+        }
+        double val = 0.0;
+        auto res = std::from_chars(src_.data() + pos_, src_.data() + p, val);
+        if (res.ec != std::errc{} || res.ptr != src_.data() + p || !std::isfinite(val)) {
+            return false;
+        }
+        pos_ = p;
         v.type = JsonVal::TypeNumber;
         v.num_val = val;
         return true;
@@ -264,46 +330,48 @@ private:
 
 } // namespace
 
+static bool all_finite_floats(const float* p, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(p[i])) return false;
+    }
+    return true;
+}
+
+static bool ssm_state_all_finite(const MambaState& s) {
+    for (size_t l = 0; l < MAX_LAYERS; ++l) {
+        const SSMState& st = s.layers[l];
+        if (!all_finite_floats(&st.ssm_real[0][0][0], sizeof(st.ssm_real) / sizeof(float)) ||
+            !all_finite_floats(&st.ssm_imag[0][0][0], sizeof(st.ssm_imag) / sizeof(float)) ||
+            !all_finite_floats(&st.k_state[0][0][0], sizeof(st.k_state) / sizeof(float)) ||
+            !all_finite_floats(&st.angle_state[0][0], sizeof(st.angle_state) / sizeof(float))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool save_preset(MambaSynth* m, const char* path, const char* name) {
     if (!m || !path) return false;
 
-    // If not processing, ensure state mirror is synchronized with current synth state
-    if (!m->is_processing.load(std::memory_order_acquire)) {
-        StateMirror* slot = m->state_mirror.begin_write();
-        if (slot) {
-            std::memset(slot, 0, sizeof(StateMirror));
-            for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-                slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
-                slot->voice_snapshots[v].env = m->voices[v].env;
-                slot->voice_snapshots[v].attack_rate = m->voices[v].attack_rate;
-                slot->voice_snapshots[v].release_rate = m->voices[v].release_rate;
-                slot->voice_snapshots[v].velocity = m->voices[v].velocity;
-                slot->voice_snapshots[v].key = m->voices[v].key;
-                slot->voice_snapshots[v].channel = m->voices[v].channel;
-                slot->voice_snapshots[v].note_id = m->voices[v].note_id;
-                slot->voice_snapshots[v].stage = m->voices[v].stage;
-            }
-            for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
-                slot->param_values[i] = m->param_values[i].load(std::memory_order_acquire);
-            }
-            slot->bypass_target = m->bypass_target.load(std::memory_order_acquire);
-            slot->bypass_fade = m->bypass_fade.load(std::memory_order_relaxed);
-            m->state_mirror.end_write();
-        }
+    double pv[PARAM_COUNT]{};
+    for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
+        pv[i] = m->param_values[i].load(std::memory_order_acquire);
     }
+    const bool bypass_target = m->bypass_target.load(std::memory_order_acquire);
+    const float bypass_fade = m->bypass_fade.load(std::memory_order_relaxed);
+    const bool h_present = m->weights_loaded.load(std::memory_order_acquire);
 
-    // Pull a fresh state mirror from the audio thread.
-    auto mirror_ptr = std::unique_ptr<StateMirror>(new (std::nothrow) StateMirror());
-    if (!mirror_ptr) return false;
-    StateMirror& mirror = *mirror_ptr;
-    {
+    std::unique_ptr<StateMirror> mirror_ptr;
+    if (h_present && m->is_processing.load(std::memory_order_acquire)) {
+        mirror_ptr.reset(new (std::nothrow) StateMirror());
+        if (!mirror_ptr) return false;
         constexpr int kMaxRetries = 8;
-        bool ok = false;
+        bool ok_read = false;
         for (int retry = 0; retry < kMaxRetries; ++retry) {
-            std::memset(&mirror, 0, sizeof(StateMirror));
-            if (m->state_mirror.read(mirror)) { ok = true; break; }
+            std::memset(mirror_ptr.get(), 0, sizeof(StateMirror));
+            if (m->state_mirror.read(*mirror_ptr)) { ok_read = true; break; }
         }
-        if (!ok) return false;
+        if (!ok_read) return false;
     }
 
     std::FILE* f = std::fopen(path, "wb");
@@ -315,15 +383,30 @@ bool save_preset(MambaSynth* m, const char* path, const char* name) {
     ok = ok && file_write_u32(f, 0); // reserved
     ok = ok && file_write_u32(f, PARAM_COUNT);
     for (uint32_t i = 0; i < PARAM_COUNT && ok; ++i)
-        ok = file_write_f64(f, mirror.param_values[i]);
-    ok = ok && file_write_u32(f, mirror.bypass_target ? 1u : 0u);
-    ok = ok && file_write_f32(f, mirror.bypass_fade);
+        ok = file_write_f64(f, pv[i]);
+    ok = ok && file_write_u32(f, bypass_target ? 1u : 0u);
+    ok = ok && file_write_f32(f, bypass_fade);
 
-    const bool h_present = m->weights_loaded.load(std::memory_order_acquire);
     ok = ok && file_write_u32(f, h_present ? 1u : 0u);
     if (h_present && ok) {
-        for (uint32_t v = 0; v < MAX_VOICES; ++v) {
-            ok = file_write_all(f, &mirror.voice_snapshots[v], sizeof(VoiceSnapshot));
+        if (mirror_ptr) {
+            for (uint32_t v = 0; v < MAX_VOICES && ok; ++v) {
+                ok = file_write_all(f, &mirror_ptr->voice_snapshots[v], sizeof(VoiceSnapshot));
+            }
+        } else {
+            for (uint32_t v = 0; v < MAX_VOICES && ok; ++v) {
+                VoiceSnapshot snap{};
+                snap.ssm_state = m->voices[v].ssm_state;
+                snap.env = m->voices[v].env;
+                snap.attack_rate = m->voices[v].attack_rate;
+                snap.release_rate = m->voices[v].release_rate;
+                snap.velocity = m->voices[v].velocity;
+                snap.key = m->voices[v].key;
+                snap.channel = m->voices[v].channel;
+                snap.note_id = m->voices[v].note_id;
+                snap.stage = m->voices[v].stage;
+                ok = file_write_all(f, &snap, sizeof(VoiceSnapshot));
+            }
         }
     }
 
@@ -395,13 +478,18 @@ bool load_preset(MambaSynth* m, const char* path) {
         for (uint32_t v = 0; v < MAX_VOICES; ++v) {
             if (version >= kPresetVersion) {
                 if (!file_read_all(f, &vstates[v], sizeof(VoiceSnapshot))) return fail();
-                if (vstates[v].stage > VOICE_SILENT || !std::isfinite(vstates[v].env) ||
-                    !std::isfinite(vstates[v].velocity) ||
+                if (vstates[v].stage > VOICE_SILENT ||
+                    !std::isfinite(vstates[v].env) || vstates[v].env < 0.0f || vstates[v].env > 1.0f ||
+                    !std::isfinite(vstates[v].velocity) || vstates[v].velocity < 0.0f || vstates[v].velocity > 1.0f ||
+                    vstates[v].key < -1 || vstates[v].key > 127 ||
                     !std::isfinite(vstates[v].attack_rate) || vstates[v].attack_rate < 0.0f ||
-                    !std::isfinite(vstates[v].release_rate) || vstates[v].release_rate < 0.0f) return fail();
+                    !std::isfinite(vstates[v].release_rate) || vstates[v].release_rate < 0.0f ||
+                    !ssm_state_all_finite(vstates[v].ssm_state)) return fail();
             } else {
                 if (!file_read_all(f, &vstates[v].ssm_state, sizeof(MambaState))) return fail();
-                if (!file_read_f32(f, vstates[v].env) || !std::isfinite(vstates[v].env)) return fail();
+                if (!ssm_state_all_finite(vstates[v].ssm_state)) return fail();
+                if (!file_read_f32(f, vstates[v].env) || !std::isfinite(vstates[v].env) ||
+                    vstates[v].env < 0.0f || vstates[v].env > 1.0f) return fail();
                 vstates[v].stage = vstates[v].env > 0.0f ? VOICE_SUSTAIN : VOICE_IDLE;
             }
         }
@@ -475,7 +563,9 @@ bool load_preset(MambaSynth* m, const char* path) {
             m->voice_atomics[v].key.store(saved.key, std::memory_order_relaxed);
             m->voice_atomics[v].channel.store(saved.channel, std::memory_order_relaxed);
             m->voice_atomics[v].velocity.store(saved.velocity, std::memory_order_relaxed);
-            m->next_note_id = std::max(m->next_note_id, saved.note_id + 1);
+            if (saved.note_id < UINT64_MAX) {
+                m->next_note_id = std::max(m->next_note_id, saved.note_id + 1);
+            }
         }
         // Set voice 0 into core as starting state (main thread; audio is
         // stopped while a preset/state load runs - CLAP contract).
@@ -487,9 +577,11 @@ bool load_preset(MambaSynth* m, const char* path) {
     if (!m->is_processing.load(std::memory_order_acquire)) {
         StateMirror* slot = m->state_mirror.begin_write();
         if (slot) {
-            std::memset(slot, 0, sizeof(StateMirror));
             for (uint32_t i = 0; i < param_count; ++i) {
                 slot->param_values[i] = pv[i];
+            }
+            for (uint32_t i = param_count; i < PARAM_COUNT; ++i) {
+                slot->param_values[i] = m->param_values[i].load(std::memory_order_acquire);
             }
             slot->bypass_target = (bypass_int != 0);
             slot->bypass_fade = fade;
@@ -509,6 +601,7 @@ bool load_preset(MambaSynth* m, const char* path) {
                 }
             }
             m->state_mirror.end_write();
+            m->state_mirror.swap();
         }
     }
 
@@ -516,10 +609,19 @@ bool load_preset(MambaSynth* m, const char* path) {
 }
 
 namespace {
+std::string format_json_fixed(double v, int precision) {
+    if (!std::isfinite(v)) v = 0.0;
+    char buf[64];
+    auto res = std::to_chars(buf, buf + sizeof(buf), v, std::chars_format::fixed, precision);
+    if (res.ec == std::errc{}) {
+        return std::string(buf, static_cast<size_t>(res.ptr - buf));
+    }
+    return "0.0";
+}
+
 std::string build_preset_json(const std::string& name, const std::string& category,
                               const std::string& weight_path, bool bypass_target,
                               float bypass_fade, const double* param_values) {
-    char num_buf[512];
     std::string out;
     out.reserve(1024);
     out += "{\n"
@@ -531,35 +633,22 @@ std::string build_preset_json(const std::string& name, const std::string& catego
            "  \"bypass\": ";
     out += (bypass_target ? "true" : "false");
     out += ",\n";
-    std::snprintf(num_buf, sizeof(num_buf),
-        "  \"bypass_fade\": %.4f,\n"
-        "  \"parameters\": {\n"
-        "    \"gain\": %.6f,\n"
-        "    \"attack\": %.6f,\n"
-        "    \"release\": %.6f,\n"
-        "    \"mix\": %.6f,\n"
-        "    \"bypass\": %.6f\n"
-        "  },\n"
-        "  \"param_values\": [\n"
-        "    %.6f,\n"
-        "    %.6f,\n"
-        "    %.6f,\n"
-        "    %.6f,\n"
-        "    %.6f\n"
-        "  ]\n"
-        "}\n",
-        static_cast<double>(bypass_fade),
-        param_values[PARAM_GAIN],
-        param_values[PARAM_ATTACK],
-        param_values[PARAM_RELEASE],
-        param_values[PARAM_MIX],
-        param_values[PARAM_BYPASS],
-        param_values[0],
-        param_values[1],
-        param_values[2],
-        param_values[3],
-        param_values[4]);
-    out += num_buf;
+    out += "  \"bypass_fade\": " + format_json_fixed(static_cast<double>(bypass_fade), 4) + ",\n"
+           "  \"parameters\": {\n"
+           "    \"gain\": " + format_json_fixed(param_values[PARAM_GAIN], 6) + ",\n"
+           "    \"attack\": " + format_json_fixed(param_values[PARAM_ATTACK], 6) + ",\n"
+           "    \"release\": " + format_json_fixed(param_values[PARAM_RELEASE], 6) + ",\n"
+           "    \"mix\": " + format_json_fixed(param_values[PARAM_MIX], 6) + ",\n"
+           "    \"bypass\": " + format_json_fixed(param_values[PARAM_BYPASS], 6) + "\n"
+           "  },\n"
+           "  \"param_values\": [\n"
+           "    " + format_json_fixed(param_values[0], 6) + ",\n"
+           "    " + format_json_fixed(param_values[1], 6) + ",\n"
+           "    " + format_json_fixed(param_values[2], 6) + ",\n"
+           "    " + format_json_fixed(param_values[3], 6) + ",\n"
+           "    " + format_json_fixed(param_values[4], 6) + "\n"
+           "  ]\n"
+           "}\n";
     return out;
 }
 } // namespace
@@ -607,12 +696,12 @@ bool import_preset_json_string(MambaSynth* m, const std::string& json_str) {
 
     // Check "param_values" array first
     const JsonVal* pv_arr = root.get("param_values");
-    if (pv_arr && pv_arr->type == JsonVal::TypeArray) {
+    if (pv_arr) {
+        if (pv_arr->type != JsonVal::TypeArray) return false;
         size_t count = std::min(pv_arr->arr_val.size(), static_cast<size_t>(PARAM_COUNT));
         for (size_t i = 0; i < count; ++i) {
-            if (pv_arr->arr_val[i].type == JsonVal::TypeNumber) {
-                pv[i] = pv_arr->arr_val[i].num_val;
-            }
+            if (pv_arr->arr_val[i].type != JsonVal::TypeNumber) return false;
+            pv[i] = pv_arr->arr_val[i].num_val;
         }
     }
 
@@ -691,7 +780,6 @@ bool import_preset_json_string(MambaSynth* m, const std::string& json_str) {
     if (!m->is_processing.load(std::memory_order_acquire)) {
         StateMirror* slot = m->state_mirror.begin_write();
         if (slot) {
-            std::memset(slot, 0, sizeof(StateMirror));
             for (uint32_t v = 0; v < MAX_VOICES; ++v) {
                 slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
                 slot->voice_snapshots[v].env = m->voices[v].env;
@@ -709,6 +797,7 @@ bool import_preset_json_string(MambaSynth* m, const std::string& json_str) {
             slot->bypass_target = bypass_target;
             slot->bypass_fade = bypass_fade;
             m->state_mirror.end_write();
+            m->state_mirror.swap();
         }
     }
 

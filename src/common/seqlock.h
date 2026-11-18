@@ -14,20 +14,20 @@ public:
     SeqLock() : seq_(0) {}
 
     void write_lock() {
-        seq_.fetch_add(1, std::memory_order_seq_cst);
+        seq_.fetch_add(1, std::memory_order_acq_rel);
     }
 
     void write_unlock() {
-        seq_.fetch_add(1, std::memory_order_seq_cst);
+        seq_.fetch_add(1, std::memory_order_release);
     }
 
     bool read_begin(uint64_t& start_seq) const {
-        start_seq = seq_.load(std::memory_order_seq_cst);
+        start_seq = seq_.load(std::memory_order_acquire);
         return (start_seq & 1) == 0;
     }
 
     bool read_retry(uint64_t start_seq) const {
-        uint64_t end_seq = seq_.load(std::memory_order_seq_cst);
+        uint64_t end_seq = seq_.load(std::memory_order_acquire);
         return start_seq != end_seq;
     }
 
@@ -48,7 +48,6 @@ struct Seqlocked {
     alignas(64) std::atomic<uint64_t> words[kWords]{};
     SeqLock seqlock;
 
-#if defined(__SANITIZE_THREAD__)
     void write(const T& value) {
         uint64_t buf[kWords]{};
         std::memcpy(buf, &value, sizeof(T));
@@ -75,37 +74,6 @@ struct Seqlocked {
         }
         return false;
     }
-#else
-    void write(const T& value) {
-        uint64_t buf[kWords]{};
-        std::memcpy(buf, &value, sizeof(T));
-        seqlock.write_lock();
-        std::atomic_thread_fence(std::memory_order_release);
-        for (size_t i = 0; i < kWords; ++i) {
-            words[i].store(buf[i], std::memory_order_relaxed);
-        }
-        seqlock.write_unlock();
-    }
-
-    bool read(T& out) const {
-        uint64_t buf[kWords];
-        for (int attempt = 0; attempt < 4096; ++attempt) {
-            uint64_t start_seq = 0;
-            if (seqlock.read_begin(start_seq)) {
-                std::atomic_thread_fence(std::memory_order_acquire);
-                for (size_t i = 0; i < kWords; ++i) {
-                    buf[i] = words[i].load(std::memory_order_relaxed);
-                }
-                std::atomic_thread_fence(std::memory_order_acquire);
-                if (!seqlock.read_retry(start_seq)) {
-                    std::memcpy(&out, buf, sizeof(T));
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-#endif
 };
 
 } // namespace mamba

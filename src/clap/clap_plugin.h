@@ -11,10 +11,10 @@
 
 #include "core/ssm_inference_core.h"
 #include "core/weight_loader.h"
-#include "common/ring_buffer.h"
 #include "common/seqlock.h"
 #include "common/conditioning_frame.h"
 #include "common/double_buffer_seqlock.h"
+#include "common/ring_buffer.h"
 #include "common/aligned_storage.h"
 #include "common/rcu_slot.h"
 #include "dsp/bypass_fader.h"
@@ -140,15 +140,13 @@ struct MambaSynth {
     std::atomic<bool> is_processing{false};
 
     std::atomic<bool> weights_loaded;
-
-    // SPSC queue from main thread to audio thread for parameter changes
-    // delivered with sample-accurate offsets via params_flush().
-    SPSCRingBuffer<ParamAtom, 256> param_queue;
+    bool state_mirror_idle_published{false};
 
     // Per-parameter smoothing state, with cache-line alignment on the
     // first one. The audio thread reads target/current atomically.
     alignas(64) ParamSmooth params[PARAM_COUNT];
     std::atomic<double> param_values[PARAM_COUNT];
+    SPSCRingBuffer<ParamAtom, 256> param_queue;
 
     // Bypass state machine.
     std::atomic<bool> bypass_target;
@@ -180,7 +178,6 @@ struct MambaSynth {
 
     static constexpr size_t MAX_WEIGHT_PATH = kMaxWeightPath;
     alignas(64) char weight_path[kMaxWeightPath];
-    WeightLoader weight_loader;
 
     // Host thread-check extension cache.
     alignas(64) ThreadCheck thread_check;

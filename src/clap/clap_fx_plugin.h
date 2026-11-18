@@ -44,8 +44,7 @@ struct alignas(64) FxState {
     alignas(64) std::atomic<float> bypass_fade;
     static constexpr float BYPASS_FADE_RATE = 1.0f / 64.0f;
 
-    // Weight loader
-    WeightLoader weight_loader;
+    // Weight path (loaded via local transactional WeightLoader in fx_load_weights)
     char weight_path[512];
 
     // Thread check

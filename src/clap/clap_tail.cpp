@@ -13,6 +13,7 @@ namespace mamba {
 //
 // INT32_MAX is reserved for "infinite tail" per the CLAP spec.
 static uint32_t tail_get(const clap_plugin_t* plugin) {
+    if (!plugin) return 0;
     auto* m = static_cast<MambaSynth*>(plugin->plugin_data);
     if (!m) return 0;
     const double sr = m->sample_rate > 1.0 ? m->sample_rate : 48000.0;

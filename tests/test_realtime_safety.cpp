@@ -73,7 +73,7 @@ TEST(RealtimeSafety, SeqLockReadFunctionsDontAllocate) {
     ConditioningFrame init{};
     init.tempo_bpm = 120.0f;
     sl.write(init);
-    ConditioningFrame out;
+    ConditioningFrame out{};
     EXPECT_TRUE(sl.read(out));
     EXPECT_FLOAT_EQ(out.tempo_bpm, 120.0f);
 }
@@ -320,7 +320,7 @@ TEST(RealtimeSafety, FxAcceptsMultiLayerWeightsWithinLimits) {
 
     WeightLoader probe;
     ASSERT_EQ(probe.load(path), LoadError::Ok);
-    const auto& hdr = probe.header();
+    const WeightFileHeader hdr = probe.header();
     ASSERT_GT(hdr.num_layers, 1u) << "this test needs a multi-layer model";
     ASSERT_TRUE(WeightLoader::fits_in_static_weights_with(hdr))
         << "test model does not fit the compiled limits; regenerate it smaller";

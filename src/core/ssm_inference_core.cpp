@@ -1,5 +1,6 @@
 #include "core/ssm_inference_core.h"
 #include <cstring>
+#include <cmath>
 #include <algorithm>
 #include <new>
 
@@ -9,6 +10,8 @@ SSMInferenceCore::SSMInferenceCore()
     : cfg_(), layers_(nullptr), num_constructed_(0) {
     std::memset(layers_storage_, 0, sizeof(layers_storage_));
     std::memset(cond_.data(), 0, cond_.size() * sizeof(float));
+    std::memset(block_scratch_dm_.data(), 0, block_scratch_dm_.size() * sizeof(float));
+    std::memset(block_scratch_mono_.data(), 0, block_scratch_mono_.size() * sizeof(float));
 }
 
 SSMInferenceCore::SSMInferenceCore(const MambaConfig& cfg)
@@ -47,6 +50,9 @@ void SSMInferenceCore::init(const MambaConfig& cfg) {
     }
 
     std::memset(cond_.data(), 0, cond_.size() * sizeof(float));
+    cond_active_ = false;
+    std::memset(block_scratch_dm_.data(), 0, block_scratch_dm_.size() * sizeof(float));
+    std::memset(block_scratch_mono_.data(), 0, block_scratch_mono_.size() * sizeof(float));
 }
 
 SSMInferenceCore::~SSMInferenceCore() {
@@ -61,7 +67,9 @@ void SSMInferenceCore::reset() {
     }
 }
 
-void SSMInferenceCore::process_sample(float input, float* output, MambaState& state) {
+void SSMInferenceCore::process_sample(float input, float* output, MambaState& state,
+                                      const float* cond_vector, bool cond_active) {
+    if (!std::isfinite(input)) input = 0.0f;
     if (cfg_.num_layers == 0) {
         if (cfg_.d_model > 1) {
             std::memset(output, 0, cfg_.d_model * sizeof(float));
@@ -70,19 +78,24 @@ void SSMInferenceCore::process_sample(float input, float* output, MambaState& st
         return;
     }
     alignas(64) float buf[MAX_D_MODEL];
-    layers_[0].process_sample(input, buf, state.layers[0]);
+    layers_[0].process_sample(input, buf, state.layers[0], cond_vector, cond_active);
     for (size_t i = 1; i < cfg_.num_layers; ++i) {
         // Sum d_model outputs to mono for next layer's scalar input
         float next = 0.0f;
         for (size_t j = 0; j < cfg_.d_model; ++j) {
             next += buf[j];
         }
-        layers_[i].process_sample(next, buf, state.layers[i]);
+        layers_[i].process_sample(next, buf, state.layers[i], cond_vector, cond_active);
     }
     std::copy(buf, buf + cfg_.d_model, output);
 }
 
+void SSMInferenceCore::process_sample(float input, float* output, MambaState& state) {
+    process_sample(input, output, state, cond_.data(), cond_active_);
+}
+
 void SSMInferenceCore::process_sample(float input, float* output) {
+    if (!std::isfinite(input)) input = 0.0f;
     if (cfg_.num_layers == 0) {
         if (cfg_.d_model > 1) {
             std::memset(output, 0, cfg_.d_model * sizeof(float));
@@ -122,8 +135,8 @@ void SSMInferenceCore::process_block(const float* input, float* output, size_t s
         layers_[0].process_block(input, output, size, state.layers[0]);
         return;
     }
-    float* buf_dm = scratch_dm_.data();
-    float* buf_mono = scratch_mono_.data();
+    float* buf_dm = block_scratch_dm_.data();
+    float* buf_mono = block_scratch_mono_.data();
     size_t offset = 0;
     while (offset < size) {
         size_t chunk = size - offset;
@@ -170,8 +183,8 @@ void SSMInferenceCore::process_block(const float* input, float* output, size_t s
         layers_[0].process_block(input, output, size);
         return;
     }
-    float* buf_dm = scratch_dm_.data();
-    float* buf_mono = scratch_mono_.data();
+    float* buf_dm = block_scratch_dm_.data();
+    float* buf_mono = block_scratch_mono_.data();
     size_t offset = 0;
     while (offset < size) {
         size_t chunk = size - offset;
@@ -215,12 +228,19 @@ void SSMInferenceCore::set_conditioning(const float* cond_vector) {
     if (cond_vector) {
         const size_t n = std::min(cfg_.cond_dim, cond_.size());
         std::memset(cond_.data(), 0, cond_.size() * sizeof(float));
-        std::memcpy(cond_.data(), cond_vector, n * sizeof(float));
+        bool any_nonzero = false;
+        for (size_t i = 0; i < n; ++i) {
+            const float v = std::isfinite(cond_vector[i]) ? cond_vector[i] : 0.0f;
+            cond_[i] = v;
+            if (std::fabs(v) > 0.0f) any_nonzero = true;
+        }
+        cond_active_ = any_nonzero;
         for (size_t i = 0; i < cfg_.num_layers; ++i) {
-            layers_[i].set_conditioning(cond_.data());
+            layers_[i].set_conditioning(any_nonzero ? cond_.data() : nullptr);
         }
     } else {
         std::memset(cond_.data(), 0, cond_.size() * sizeof(float));
+        cond_active_ = false;
         for (size_t i = 0; i < cfg_.num_layers; ++i) {
             layers_[i].set_conditioning(nullptr);
         }

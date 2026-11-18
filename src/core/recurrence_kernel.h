@@ -31,6 +31,8 @@
 // on (re, im).  Both land here, and the signatures stay explicit so the
 // Python reference can be checked against them term by term.
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 
 namespace mamba {
@@ -42,13 +44,41 @@ struct BilinearCoeffs {
     float b_bar_scale;  // multiplier on the input term B . x
 };
 
-// Coeffs for one head.  `A` is negative (SSMBlock clamps it) and `dt > 0`;
-// the caller keeps |a_bar| < 1 by construction — no clamping here, so a broken
-// caller is visible in the tests instead of being silently corrected.
+// Coeffs for one head.  For normal finite poles `A < 0` and steps `dt > 0`,
+// this computes the exact Tustin expression `(1 + half) / (1 - half)` and
+// `dt / (1 - half)`.  When `dt == 0` with finite `A`, zero time elapsed so
+// `a_bar = 1, b_bar_scale = 0` (the state freezes cleanly).  Negative `dt`
+// or non-finite inputs return `{0, 0}`, and extreme negative products that
+// would round `a_bar` to -1.0f (Nyquist ringing) are clamped strictly inside
+// (-1, 1).
 inline BilinearCoeffs bilinear_coeffs(float A, float dt) noexcept {
+    if (!std::isfinite(A) || !std::isfinite(dt) || dt < 0.0f) {
+        return {0.0f, 0.0f};
+    }
+    if (!(dt > 0.0f)) {
+        return {1.0f, 0.0f};
+    }
     const float half = A * dt * 0.5f;
-    const float inv = 1.0f / (1.0f - half);
-    return {(1.0f + half) * inv, dt * inv};
+    if (!std::isfinite(half)) {
+        return {A < 0.0f ? -0.999999f : 0.0f, 0.0f};
+    }
+    if (half >= 1.0f) {
+        return {0.0f, 0.0f};
+    }
+    const float denom = 1.0f - half;
+    if (!std::isfinite(denom) || denom <= 0.0f) {
+        return {0.0f, 0.0f};
+    }
+    const float inv = 1.0f / denom;
+    float a_bar = (1.0f + half) * inv;
+    float b_bar = dt * inv;
+    if (!std::isfinite(a_bar) || a_bar <= -1.0f || a_bar >= 1.0f) {
+        a_bar = std::isfinite(a_bar) ? std::clamp(a_bar, -0.999999f, 0.999999f) : 0.0f;
+    }
+    if (!std::isfinite(b_bar)) {
+        b_bar = 0.0f;
+    }
+    return {a_bar, b_bar};
 }
 
 // One state element for one (head, head-dim, state-index) triple:

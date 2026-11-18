@@ -50,6 +50,13 @@ struct GuiInstance {
     Display* display{};
     Window window{};
     GC gc{};
+    unsigned long color_bg{0};
+    unsigned long color_fg{0};
+    unsigned long color_bar{0};
+    bool colors_init{false};
+    bool dirty{true};
+    double last_params[PARAM_COUNT]{};
+    uint8_t last_voice_stages[MAX_VOICES]{};
 #elif defined(_WIN32)
     HWND hwnd{};
     uintptr_t win32_timer_id{0};  // UINT_PTR without needing <windows.h>

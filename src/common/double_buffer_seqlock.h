@@ -38,7 +38,7 @@ public:
         writer_ = 1;
         writing_.store(false, std::memory_order_relaxed);
         for (uint32_t i = 0; i < kSlots; ++i) {
-            readers_[i].store(0, std::memory_order_relaxed);
+            readers_[i].count.store(0, std::memory_order_relaxed);
         }
         generation_.store(0, std::memory_order_relaxed);
     }
@@ -48,10 +48,10 @@ public:
         if (!writing_.compare_exchange_strong(expected, true, std::memory_order_acquire)) {
             return nullptr;
         }
-        const uint32_t f = front_.load(std::memory_order_seq_cst);
+        const uint32_t f = front_.load(std::memory_order_acquire);
         for (uint32_t off = 0; off < kSlots; ++off) {
             const uint32_t candidate = (writer_ + off) % kSlots;
-            if (candidate != f && readers_[candidate].load(std::memory_order_seq_cst) == 0) {
+            if (candidate != f && readers_[candidate].count.load(std::memory_order_acquire) == 0) {
                 writer_ = candidate;
                 return &slots_[candidate * slot_size_];
             }
@@ -66,6 +66,8 @@ public:
         }
         const uint32_t published = writer_;
         writer_ = (published + 1) % kSlots;
+        // Release semantics via seq_cst store so StoreLoad ordering against
+        // reader's fetch_add(readers_[f]) + load(front_) holds on ARM64/x86.
         front_.store(published, std::memory_order_seq_cst);
         generation_.fetch_add(1, std::memory_order_release);
         writing_.store(false, std::memory_order_release);
@@ -73,16 +75,16 @@ public:
 
     bool read(void* out) const {
         if (!out) return false;
-        uint32_t f = front_.load(std::memory_order_seq_cst);
+        uint32_t f = front_.load(std::memory_order_acquire);
         for (int attempt = 0; attempt < 64; ++attempt) {
-            readers_[f].fetch_add(1, std::memory_order_seq_cst);
+            readers_[f].count.fetch_add(1, std::memory_order_seq_cst);
             const uint32_t f2 = front_.load(std::memory_order_seq_cst);
             if (f2 == f) {
                 std::memcpy(out, &slots_[f * slot_size_], slot_size_);
-                readers_[f].fetch_sub(1, std::memory_order_release);
+                readers_[f].count.fetch_sub(1, std::memory_order_release);
                 return true;
             }
-            readers_[f].fetch_sub(1, std::memory_order_release);
+            readers_[f].count.fetch_sub(1, std::memory_order_release);
             f = f2;
         }
         return false;
@@ -99,12 +101,16 @@ public:
     size_t slot_size() const { return slot_size_; }
 
 private:
+    struct alignas(64) PaddedReader {
+        std::atomic<uint32_t> count{0};
+    };
+
     std::byte* slots_;
     size_t slot_size_;
     uint32_t writer_{1};
     alignas(64) std::atomic<bool> writing_{false};
     alignas(64) std::atomic<uint32_t> front_{0};
-    alignas(64) mutable std::atomic<uint32_t> readers_[kSlots]{};
+    mutable PaddedReader readers_[kSlots]{};
     alignas(64) std::atomic<uint64_t> generation_{0};
 };
 

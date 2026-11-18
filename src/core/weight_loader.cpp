@@ -1,4 +1,5 @@
 #include "core/weight_loader.h"
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <cstdio>
@@ -112,6 +113,7 @@ WeightLoader::~WeightLoader() {
 
 LoadError WeightLoader::load(const char* path) {
     unload();
+    cached_header_ = WeightFileHeader{};
 
     char resolved[1024];
     resolve_path(path, resolved, sizeof(resolved));
@@ -249,6 +251,7 @@ LoadError WeightLoader::load(const char* path) {
         return LoadError::TruncatedData;
     }
 
+    cached_header_ = *header_;
     return LoadError::Ok;
 }
 
@@ -574,6 +577,7 @@ LoadError WeightLoader::dequantize_layer_to(uint32_t layer, SSMWeights& out_f32)
             if (LoadError err = get_layer_pointers_i8(layer, p); err != LoadError::Ok) return err;
             TensorQParam qp;
             if (LoadError err = get_tensor_qparam(qp); err != LoadError::Ok) return err;
+            if (!std::isfinite(qp.scale)) return LoadError::BadQuantFormat;
 
             auto deq = [&](int8_t v) { return qp.scale * (static_cast<float>(v) - static_cast<float>(qp.zero_point)); };
 
@@ -599,6 +603,7 @@ LoadError WeightLoader::dequantize_layer_to(uint32_t layer, SSMWeights& out_f32)
             if (LoadError err = get_layer_pointers_i8(layer, p); err != LoadError::Ok) return err;
             LayerQParam qp;
             if (LoadError err = get_layer_qparam(layer, qp); err != LoadError::Ok) return err;
+            if (!std::isfinite(qp.scale)) return LoadError::BadQuantFormat;
 
             auto deq = [&](int8_t v) { return qp.scale * (static_cast<float>(v) - static_cast<float>(qp.zero_point)); };
 

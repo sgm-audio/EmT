@@ -3,6 +3,7 @@
 // preset_codec.cpp (file/JSON codecs) and preset_paths.cpp (directories).
 #include "clap/clap_presets.h"
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -86,6 +87,23 @@ bool apply_factory_preset(MambaSynth* m, const FactoryPreset* fp) {
     if (!m || !fp) return false;
 
     for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
+        if (!std::isfinite(fp->param_values[i])) return false;
+    }
+    if (!std::isfinite(fp->bypass_fade) || fp->bypass_fade < 0.0f || fp->bypass_fade > 1.0f) {
+        return false;
+    }
+
+    if (fp->weight_path && fp->weight_path[0]) {
+        char resolved[MambaSynth::MAX_WEIGHT_PATH]{};
+        if (!resolve_weight_path(fp->weight_path, resolved, sizeof(resolved))) {
+            return false;
+        }
+        if (std::strcmp(resolved, m->weight_path) != 0 && !m->load_weights(resolved)) {
+            return false;
+        }
+    }
+
+    for (uint32_t i = 0; i < PARAM_COUNT; ++i) {
         double v = fp->param_values[i];
         if (v < m->params[i].min_value) v = m->params[i].min_value;
         if (v > m->params[i].max_value) v = m->params[i].max_value;
@@ -99,19 +117,9 @@ bool apply_factory_preset(MambaSynth* m, const FactoryPreset* fp) {
         fp->bypass_target ? BYPASS_BYPASSED : BYPASS_PROCESSING,
         std::memory_order_relaxed);
 
-    if (fp->weight_path && fp->weight_path[0]) {
-        char resolved[MambaSynth::MAX_WEIGHT_PATH]{};
-        if (resolve_weight_path(fp->weight_path, resolved, sizeof(resolved))) {
-            if (std::strcmp(resolved, m->weight_path) != 0) {
-                m->load_weights(resolved);
-            }
-        }
-    }
-
     if (!m->is_processing.load(std::memory_order_acquire)) {
         StateMirror* slot = m->state_mirror.begin_write();
         if (slot) {
-            std::memset(slot, 0, sizeof(StateMirror));
             for (uint32_t v = 0; v < MAX_VOICES; ++v) {
                 slot->voice_snapshots[v].ssm_state = m->voices[v].ssm_state;
                 slot->voice_snapshots[v].env = m->voices[v].env;
@@ -129,6 +137,7 @@ bool apply_factory_preset(MambaSynth* m, const FactoryPreset* fp) {
             slot->bypass_target = fp->bypass_target;
             slot->bypass_fade = fp->bypass_fade;
             m->state_mirror.end_write();
+            m->state_mirror.swap();
         }
     }
 

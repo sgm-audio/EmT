@@ -15,6 +15,7 @@ namespace {
 static constexpr float PI_f = 3.14159265358979323846f;
 
 inline float softplus(float x) {
+    if (!std::isfinite(x)) return (x > 0.0f) ? 20.0f : 0.0f;
     if (x > 20.0f) return x;
     if (x < -20.0f) return 0.0f;
     return log1pf(expf(x));
@@ -97,13 +98,13 @@ void SSMBlock::reset() {
 // measured 14.8 % output gain step every 4096 samples.  The trapezoidal update
 // is A-stable for the clamped A <= -1, so the state stays bounded on its own.
 
-void SSMBlock::step_film_conditioning(float input) {
-    if (conditioning_active_) {
-        const float* cond_ptr = cond_.data();
+void SSMBlock::step_film_conditioning(float input, const float* cond_ptr, bool cond_active) {
+    if (cond_active && cond_ptr) {
         for (size_t j = 0; j < d_model_; ++j) {
             float gamma = simd::dot_product(weights_.film_proj_w[2 * j], cond_ptr, d_cond_);
             float beta  = simd::dot_product(weights_.film_proj_w[2 * j + 1], cond_ptr, d_cond_);
-            u_film_[j] = input * (1.0f + gamma) + beta;
+            float v = input * (1.0f + gamma) + beta;
+            u_film_[j] = std::isfinite(v) ? v : 0.0f;
         }
     } else {
         for (size_t j = 0; j < d_model_; ++j) {
@@ -169,7 +170,8 @@ void SSMBlock::step_in_proj(const float*& z_ptr, const float*& x_ptr,
     angle_ptr = trap_ptr + nheads_;
 }
 
-void SSMBlock::step_preprocess_decay_and_dt(const float* C_ptr) {
+void SSMBlock::step_preprocess_decay_and_dt(const float* C_ptr,
+                                              const float* cond_ptr, bool cond_active) {
     size_t bc_size = nheads_ * mimo_rank_ * d_state_;
     const float* dd_dt_ptr = C_ptr + bc_size;
     const float* dd_A_ptr  = dd_dt_ptr + nheads_;
@@ -194,11 +196,11 @@ void SSMBlock::step_preprocess_decay_and_dt(const float* C_ptr) {
         // vector to a per-head (γ, β) pair and uses the same convention as the
         // input FiLM path: v ↦ v * (1 + γ) + β.  Only applied when conditioning
         // is active, so unconditioned inference is bit-identical to before.
-        if (conditioning_active_) {
+        if (cond_active && cond_ptr) {
             const float* gamma_row = weights_.dt_film_proj_w[2 * h];
             const float* beta_row  = weights_.dt_film_proj_w[2 * h + 1];
-            float gamma = simd::dot_product(gamma_row, cond_.data(), d_cond_);
-            float beta  = simd::dot_product(beta_row,  cond_.data(), d_cond_);
+            float gamma = simd::dot_product(gamma_row, cond_ptr, d_cond_);
+            float beta  = simd::dot_product(beta_row,  cond_ptr, d_cond_);
             dt_pre = dt_pre * (1.0f + gamma) + beta;
         }
 
@@ -224,12 +226,21 @@ void SSMBlock::step_rmsnorm_bc(const float* B_ptr, const float* C_ptr,
                     rms += val * val;
                 }
                 rms = std::sqrt(rms / static_cast<float>(d_state_) + 1e-5f);
+                if (!std::isfinite(rms) || rms <= 0.0f) {
+                    for (size_t s = 0; s < d_state_; ++s) {
+                        size_t idx = (g * nheads_ + h) * mimo_rank_ * d_state_
+                                   + r * d_state_ + s;
+                        B_norm[idx] = weights_.B_bias[h][r][s];
+                    }
+                    continue;
+                }
                 float inv_rms = 1.0f / rms;
                 for (size_t s = 0; s < d_state_; ++s) {
                     size_t idx = (g * nheads_ + h) * mimo_rank_ * d_state_
                                + r * d_state_ + s;
-                    B_norm[idx] = B_ptr[idx] * inv_rms * weights_.B_norm_weight[s]
-                                + weights_.B_bias[h][r][s];
+                    float v = B_ptr[idx] * inv_rms * weights_.B_norm_weight[s]
+                            + weights_.B_bias[h][r][s];
+                    B_norm[idx] = std::isfinite(v) ? v : 0.0f;
                 }
             }
         }
@@ -246,12 +257,21 @@ void SSMBlock::step_rmsnorm_bc(const float* B_ptr, const float* C_ptr,
                     rms += val * val;
                 }
                 rms = std::sqrt(rms / static_cast<float>(d_state_) + 1e-5f);
+                if (!std::isfinite(rms) || rms <= 0.0f) {
+                    for (size_t s = 0; s < d_state_; ++s) {
+                        size_t idx = (g * nheads_ + h) * mimo_rank_ * d_state_
+                                   + r * d_state_ + s;
+                        C_norm[idx] = weights_.C_bias[h][r][s];
+                    }
+                    continue;
+                }
                 float inv_rms = 1.0f / rms;
                 for (size_t s = 0; s < d_state_; ++s) {
                     size_t idx = (g * nheads_ + h) * mimo_rank_ * d_state_
                                + r * d_state_ + s;
-                    C_norm[idx] = C_ptr[idx] * inv_rms * weights_.C_norm_weight[s]
-                                + weights_.C_bias[h][r][s];
+                    float v = C_ptr[idx] * inv_rms * weights_.C_norm_weight[s]
+                            + weights_.C_bias[h][r][s];
+                    C_norm[idx] = std::isfinite(v) ? v : 0.0f;
                 }
             }
         }
@@ -259,29 +279,38 @@ void SSMBlock::step_rmsnorm_bc(const float* B_ptr, const float* C_ptr,
 }
 
 void SSMBlock::step_rope_bc(SSMState& state, float* B_norm, float* C_norm, const float* angle_ptr) {
+    // RoPE angles are shared across all heads (num_rope_angles_ values), so
+    // compute phase accumulation and cos/sin once per angle rather than nheads_ times.
     static constexpr float TWO_PI_f = 2.0f * PI_f;
     for (size_t a = 0; a < num_rope_angles_; ++a) {
-        const float delta = std::isfinite(angle_ptr[a]) ? angle_ptr[a] : 0.0f;
         const size_t s0 = a;
         const size_t s1 = a + num_rope_angles_;
+        const float delta = std::isfinite(angle_ptr[a]) ? angle_ptr[a] : 0.0f;
+        const float prev = std::isfinite(state.angle_state[0][a]) ? state.angle_state[0][a] : 0.0f;
+        float angle = prev + delta;
+        if (!std::isfinite(angle)) {
+            angle = 0.0f;
+        } else if (angle >= TWO_PI_f && angle < 2.0f * TWO_PI_f) {
+            angle -= TWO_PI_f;
+        } else if (angle <= -TWO_PI_f && angle > -2.0f * TWO_PI_f) {
+            angle += TWO_PI_f;
+        } else if (angle >= TWO_PI_f || angle <= -TWO_PI_f) {
+            angle = std::fmod(angle, TWO_PI_f);
+        }
+        if (!std::isfinite(angle)) angle = 0.0f;
+        for (size_t h = 0; h < nheads_; ++h) {
+            state.angle_state[h][a] = angle;
+        }
+        if (s1 >= d_state_) continue;
+
+        float cos_a = std::cos(angle);
+        float sin_a = std::sin(angle);
+        if (!std::isfinite(cos_a) || !std::isfinite(sin_a)) {
+            cos_a = 1.0f;
+            sin_a = 0.0f;
+        }
 
         for (size_t h = 0; h < nheads_; ++h) {
-            float angle = state.angle_state[h][a] + delta;
-            if (!std::isfinite(angle)) {
-                angle = 0.0f;
-            } else if (angle >= TWO_PI_f && angle < 2.0f * TWO_PI_f) {
-                angle -= TWO_PI_f;
-            } else if (angle <= -TWO_PI_f && angle > -2.0f * TWO_PI_f) {
-                angle += TWO_PI_f;
-            } else if (angle >= TWO_PI_f || angle <= -TWO_PI_f) {
-                angle = std::fmod(angle, TWO_PI_f);
-            }
-            state.angle_state[h][a] = angle;
-
-            if (s1 >= d_state_) continue;
-            const float cos_a = std::cos(angle);
-            const float sin_a = std::sin(angle);
-
             for (size_t g = 0; g < num_bc_heads_; ++g) {
                 for (size_t r = 0; r < mimo_rank_; ++r) {
                     const size_t base = (g * nheads_ + h) * mimo_rank_ * d_state_
@@ -343,24 +372,27 @@ void SSMBlock::step_out_proj_residual(const float* x_ptr, float* output) {
             sum += weights_.D_proj[j] * x_ptr[j];
         }
         sum += u_film_[j];
-        out_[j] = sum;
+        out_[j] = std::isfinite(sum) ? sum : 0.0f;
     }
     simd::scale(output, out_.data(), params_.gain, d_model_);
+    for (size_t j = 0; j < d_model_; ++j) {
+        if (!std::isfinite(output[j])) output[j] = 0.0f;
+    }
 }
 
-void SSMBlock::process_sample(float input, float* output, SSMState& state) {
+void SSMBlock::process_sample(float input, float* output, SSMState& state,
+                              const float* cond_vector, bool cond_active) {
     if (!weights_loaded_) {
         std::memset(output, 0, d_model_ * sizeof(float));
         return;
     }
-
     if (!std::isfinite(input)) {
         input = 0.0f;
     } else {
         input = std::clamp(input, -1e6f, 1e6f);
     }
 
-    step_film_conditioning(input);
+    step_film_conditioning(input, cond_vector, cond_active);
 
     const float* z_ptr = nullptr;
     const float* x_ptr = nullptr;
@@ -369,7 +401,7 @@ void SSMBlock::process_sample(float input, float* output, SSMState& state) {
     const float* angle_ptr = nullptr;
     step_in_proj(z_ptr, x_ptr, B_ptr, C_ptr, angle_ptr);
 
-    step_preprocess_decay_and_dt(C_ptr);
+    step_preprocess_decay_and_dt(C_ptr, cond_vector, cond_active);
 
     const size_t bc_size = nheads_ * mimo_rank_ * d_state_;
     float* B_norm = rope_buf_.data();
@@ -383,8 +415,12 @@ void SSMBlock::process_sample(float input, float* output, SSMState& state) {
     // No periodic state renormalization here — see the header note (D5).
 }
 
+void SSMBlock::process_sample(float input, float* output, SSMState& state) {
+    process_sample(input, output, state, cond_.data(), conditioning_active_);
+}
+
 void SSMBlock::process_sample(float input, float* output) {
-    process_sample(input, output, state_);
+    process_sample(input, output, state_, cond_.data(), conditioning_active_);
 }
 
 // process_block: falls back to per-sample loop until a block-optimized
@@ -406,6 +442,12 @@ void SSMBlock::process_block(const float* input, float* output, size_t size) {
 }
 
 void SSMBlock::set_weights(const SSMWeights& w) {
+    auto sanitize_slice = [](float* p, size_t count) {
+        for (size_t i = 0; i < count; ++i) {
+            if (!std::isfinite(p[i])) p[i] = 0.0f;
+        }
+    };
+
     // Row-by-row copy for in_proj_w: flat memcpy won't work because
     // SSMWeights.in_proj_w has stride MAX_D_MODEL, not d_model.
     // B/C blocks in w.in_proj_w use MAX_MIMO_RANK file stride.
@@ -413,6 +455,7 @@ void SSMBlock::set_weights(const SSMWeights& w) {
                         + nheads_ * 3 + num_rope_angles_;
     for (size_t r = 0; r < in_proj_rows; ++r) {
         std::memcpy(weights_.in_proj_w[r], w.in_proj_w[r], d_model_ * sizeof(float));
+        sanitize_slice(weights_.in_proj_w[r], d_model_);
     }
 
     // 1D arrays (flat memcpy is fine)
@@ -420,6 +463,10 @@ void SSMBlock::set_weights(const SSMWeights& w) {
     std::memcpy(weights_.B_norm_weight, w.B_norm_weight,  d_state_ * sizeof(float));
     std::memcpy(weights_.C_norm_weight, w.C_norm_weight,  d_state_ * sizeof(float));
     std::memcpy(weights_.D_proj,        w.D_proj,         nheads_ * sizeof(float));
+    sanitize_slice(weights_.dt_bias, nheads_);
+    sanitize_slice(weights_.B_norm_weight, d_state_);
+    sanitize_slice(weights_.C_norm_weight, d_state_);
+    sanitize_slice(weights_.D_proj, nheads_);
 
     // Multi-D arrays: per-(head,rank) copy to avoid MAX_* stride corruption
     for (size_t h = 0; h < nheads_; ++h) {
@@ -429,27 +476,36 @@ void SSMBlock::set_weights(const SSMWeights& w) {
             std::memcpy(weights_.mimo_x[h][r],  w.mimo_x[h][r],  headdim_ * sizeof(float));
             std::memcpy(weights_.mimo_z[h][r],  w.mimo_z[h][r],  headdim_ * sizeof(float));
             std::memcpy(weights_.mimo_o[h][r],  w.mimo_o[h][r],  headdim_ * sizeof(float));
+            sanitize_slice(weights_.B_bias[h][r], d_state_);
+            sanitize_slice(weights_.C_bias[h][r], d_state_);
+            sanitize_slice(weights_.mimo_x[h][r], headdim_);
+            sanitize_slice(weights_.mimo_z[h][r], headdim_);
+            sanitize_slice(weights_.mimo_o[h][r], headdim_);
         }
     }
 
     // Row-by-row for out_proj_w [MAX_D_MODEL, MAX_D_INNER]
     for (size_t r = 0; r < d_model_; ++r) {
         std::memcpy(weights_.out_proj_w[r], w.out_proj_w[r], d_inner_ * sizeof(float));
+        sanitize_slice(weights_.out_proj_w[r], d_inner_);
     }
     // Row-by-row for film_proj_w [2*MAX_D_MODEL, COND_DIM]
     for (size_t r = 0; r < 2 * d_model_; ++r) {
         std::memcpy(weights_.film_proj_w[r], w.film_proj_w[r], d_cond_ * sizeof(float));
+        sanitize_slice(weights_.film_proj_w[r], d_cond_);
     }
     // Row-by-row for dt_film_proj_w [2*MAX_NHEADS, COND_DIM]
     for (size_t r = 0; r < 2 * nheads_; ++r) {
         std::memcpy(weights_.dt_film_proj_w[r], w.dt_film_proj_w[r], d_cond_ * sizeof(float));
+        sanitize_slice(weights_.dt_film_proj_w[r], d_cond_);
     }
 
     weights_loaded_ = true;
 }
 
 void SSMBlock::set_params(const SSMBlockParams& params) {
-    params_ = params;
+    params_.gain = std::isfinite(params.gain) ? params.gain : 1.0f;
+    params_.mix = std::isfinite(params.mix) ? params.mix : 1.0f;
 }
 
 // FiLM conditioning: stores the conditioning vector and toggles
@@ -457,10 +513,12 @@ void SSMBlock::set_params(const SSMBlockParams& params) {
 void SSMBlock::set_conditioning(const float* cond_vector) {
     if (cond_vector) {
         size_t n = std::min(d_cond_, cond_.size());
-        std::memcpy(cond_.data(), cond_vector, n * sizeof(float));
+        std::memset(cond_.data(), 0, cond_.size() * sizeof(float));
         bool any_nonzero = false;
         for (size_t i = 0; i < n; ++i) {
-            if (std::fabs(cond_[i]) > 0.0f) { any_nonzero = true; break; }
+            float v = std::isfinite(cond_vector[i]) ? cond_vector[i] : 0.0f;
+            cond_[i] = v;
+            if (std::fabs(v) > 0.0f) any_nonzero = true;
         }
         conditioning_active_ = any_nonzero;
     } else {

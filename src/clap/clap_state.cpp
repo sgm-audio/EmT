@@ -11,8 +11,28 @@
 
 namespace mamba {
 
+static bool all_finite_floats(const float* p, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(p[i])) return false;
+    }
+    return true;
+}
+
+static bool ssm_state_all_finite(const MambaState& s) {
+    for (size_t l = 0; l < MAX_LAYERS; ++l) {
+        const SSMState& st = s.layers[l];
+        if (!all_finite_floats(&st.ssm_real[0][0][0], sizeof(st.ssm_real) / sizeof(float)) ||
+            !all_finite_floats(&st.ssm_imag[0][0][0], sizeof(st.ssm_imag) / sizeof(float)) ||
+            !all_finite_floats(&st.k_state[0][0][0], sizeof(st.k_state) / sizeof(float)) ||
+            !all_finite_floats(&st.angle_state[0][0], sizeof(st.angle_state) / sizeof(float))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static MambaSynth* get_synth(const clap_plugin_t* plugin) {
-    return static_cast<MambaSynth*>(plugin->plugin_data);
+    return plugin ? static_cast<MambaSynth*>(plugin->plugin_data) : nullptr;
 }
 
 // State stream format (binary, little-endian):
@@ -43,6 +63,7 @@ static constexpr uint32_t kStateSchemaV3 = 0x00030000u;
 static bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream) {
     if (!plugin || !stream) return false;
     auto* m = get_synth(plugin);
+    if (!m) return false;
 
     if (!stream_write_u32(stream, kStateMagic)) return false;
     if (!stream_write_u32(stream, kStateVersion)) return false;
@@ -158,19 +179,28 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
         if (schema == kStateSchemaV3) {
             for (uint32_t v = 0; v < num_voices; ++v) {
                 if (!stream_read_all(stream, &voice_states[v], sizeof(VoiceSnapshot))) return false;
-                if (voice_states[v].stage > VOICE_SILENT || !std::isfinite(voice_states[v].env) ||
-                    !std::isfinite(voice_states[v].velocity) ||
+                if (voice_states[v].stage > VOICE_SILENT ||
+                    !std::isfinite(voice_states[v].env) || voice_states[v].env < 0.0f || voice_states[v].env > 1.0f ||
+                    !std::isfinite(voice_states[v].velocity) || voice_states[v].velocity < 0.0f || voice_states[v].velocity > 1.0f ||
+                    voice_states[v].key < -1 || voice_states[v].key > 127 ||
                     !std::isfinite(voice_states[v].attack_rate) || voice_states[v].attack_rate < 0.0f ||
-                    !std::isfinite(voice_states[v].release_rate) || voice_states[v].release_rate < 0.0f) return false;
+                    !std::isfinite(voice_states[v].release_rate) || voice_states[v].release_rate < 0.0f ||
+                    !ssm_state_all_finite(voice_states[v].ssm_state)) {
+                    return false;
+                }
             }
         } else if (schema == kStateSchemaV2) {
             for (uint32_t v = 0; v < num_voices; ++v) {
                 if (!stream_read_all(stream, &voice_states[v].ssm_state, sizeof(MambaState))) return false;
-                if (!stream_read_f32(stream, voice_states[v].env) || !std::isfinite(voice_states[v].env)) return false;
+                if (!ssm_state_all_finite(voice_states[v].ssm_state)) return false;
+                if (!stream_read_f32(stream, voice_states[v].env) ||
+                    !std::isfinite(voice_states[v].env) ||
+                    voice_states[v].env < 0.0f || voice_states[v].env > 1.0f) return false;
                 voice_states[v].stage = voice_states[v].env > 0.0f ? VOICE_SUSTAIN : VOICE_IDLE;
             }
         } else {
             if (!stream_read_all(stream, &voice_states[0].ssm_state, sizeof(MambaState))) return false;
+            if (!ssm_state_all_finite(voice_states[0].ssm_state)) return false;
             voice_states[0].env = 1.0f;
             voice_states[0].stage = VOICE_SUSTAIN;
         }
@@ -226,7 +256,9 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
             m->voice_atomics[v].key.store(saved.key, std::memory_order_relaxed);
             m->voice_atomics[v].channel.store(saved.channel, std::memory_order_relaxed);
             m->voice_atomics[v].velocity.store(saved.velocity, std::memory_order_relaxed);
-            m->next_note_id = std::max(m->next_note_id, saved.note_id + 1);
+            if (saved.note_id < UINT64_MAX) {
+                m->next_note_id = std::max(m->next_note_id, saved.note_id + 1);
+            }
         }
         // Set voice 0 state into core (the core's state doesn't persist
         // across save/load, but set it so audio starts from a valid state).
@@ -269,6 +301,7 @@ static bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream
             }
             m->state_mirror.end_write();
             m->state_mirror.swap();
+            m->state_mirror_idle_published = false;
         }
     }
 

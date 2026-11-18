@@ -5,9 +5,11 @@
 #include "common/double_buffer_seqlock.h"
 #include "common/conditioning_frame.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <new>
 
 namespace mamba {
 
@@ -24,10 +26,16 @@ struct alignas(64) PlaybackRendererContext {
 void PlaybackRenderer_create(PlaybackRenderer* renderer) {
     if (!renderer) return;
 
-    auto* ctx = new PlaybackRendererContext();
+    auto* ctx = new (std::nothrow) PlaybackRendererContext();
+    if (!ctx) return;
     ctx->cfg = MambaConfig::max_config();
     ctx->cfg.num_layers = 1;
-    ctx->core = std::make_unique<SSMInferenceCore>(ctx->cfg);
+    auto* core = new (std::nothrow) SSMInferenceCore(ctx->cfg);
+    if (!core) {
+        delete ctx;
+        return;
+    }
+    ctx->core.reset(core);
     ctx->core->reset();
     ctx->current_sample_position = 0;
     ctx->doc_controller = nullptr;
@@ -120,22 +128,20 @@ void PlaybackRenderer_render_chunked(PlaybackRenderer* renderer,
         size_t this_chunk = std::min(chunk_size, num_samples - processed);
 
         // 1. Extract musical context for this chunk
-        float bpm = 120.0f;
-        float key = 0.0f;
-        float chord[12] = {0.0f};
+        ARAConditioningFrame cond_frame{};
         bool context_extracted = false;
 
         // Try document controller timeline region lookup first
         if (ctx->doc_controller) {
-            context_extracted = ctx->doc_controller->getMusicalContextAtSample(
-                current_pos, bpm, key, chord);
-            if (!context_extracted) {
-                // Fall back to document controller's latest conditioning frame
-                ARAConditioningFrame frame{};
-                if (ctx->doc_controller->readConditioning(frame)) {
-                    bpm = frame.tempo_bpm;
-                    key = frame.key_sig;
-                    std::memcpy(chord, frame.chord_one_hot, sizeof(chord));
+            float bpm = 120.0f;
+            float key = 0.0f;
+            float chord[12] = {0.0f};
+            if (ctx->doc_controller->getMusicalContextAtSample(current_pos, bpm, key, chord)) {
+                cond_frame = ARADocumentControllerStub::convertMusicalContext(bpm, key, chord);
+                context_extracted = true;
+            } else {
+                // Fall back to document controller's latest conditioning frame (preserves f0/semantic)
+                if (ctx->doc_controller->readConditioning(cond_frame)) {
                     context_extracted = true;
                 }
             }
@@ -143,35 +149,29 @@ void PlaybackRenderer_render_chunked(PlaybackRenderer* renderer,
 
         // Next, try explicit context
         if (!context_extracted && ctx->has_explicit_context) {
-            bpm = ctx->current_context.tempo_bpm;
-            key = ctx->current_context.key_sig;
-            std::memcpy(chord, ctx->current_context.chord_one_hot, sizeof(chord));
+            cond_frame = ARADocumentControllerStub::convertMusicalContext(
+                ctx->current_context.tempo_bpm,
+                ctx->current_context.key_sig,
+                ctx->current_context.chord_one_hot);
             context_extracted = true;
         }
 
-        // Next, try double-buffered seqlock
+        // Next, try double-buffered seqlock (preserves full 128-float ARAConditioningFrame)
         if (!context_extracted && ctx->conditioning_db) {
-            ARAConditioningFrame frame{};
-            if (ctx->conditioning_db->read(frame)) {
-                bpm = frame.tempo_bpm;
-                key = frame.key_sig;
-                std::memcpy(chord, frame.chord_one_hot, sizeof(chord));
+            if (ctx->conditioning_db->read(cond_frame)) {
                 context_extracted = true;
             }
         }
 
-        // 2. Convert to ARAConditioningFrame
-        ARAConditioningFrame cond_frame = ARADocumentControllerStub::convertMusicalContext(
-            bpm, key, chord);
+        // 2. Set conditioning on SSMInferenceCore (neutral zero frame when no context exists)
+        ctx->core->set_conditioning(context_extracted ? &cond_frame.tempo_bpm : nullptr);
 
-        // 3. Set conditioning on SSMInferenceCore
-        ctx->core->set_conditioning(&cond_frame.tempo_bpm);
-
-        // 4. Render chunk through SSMInferenceCore
+        // 3. Render chunk through SSMInferenceCore
         for (size_t i = 0; i < this_chunk; ++i) {
             float in_sample = input ? input[processed + i] : 0.0f;
+            if (!std::isfinite(in_sample)) in_sample = 0.0f;
             ctx->core->process_sample(in_sample, sample_buf);
-            output[processed + i] = sample_buf[0];
+            output[processed + i] = std::isfinite(sample_buf[0]) ? sample_buf[0] : 0.0f;
         }
 
         processed += this_chunk;

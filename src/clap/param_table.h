@@ -32,12 +32,12 @@ namespace mamba {
 // Display/parse behavior for params_value_to_text / params_text_to_value.
 // Implemented by param_value_to_text() / param_text_to_value().
 enum class ParamFormat : uint8_t {
-    Plain,       // "%.3f" both ways via strtod; no clamping (FX gain/mix)
+    Plain,       // "%.3f" / finite decimal clamped to [min, max] (FX gain/mix)
     GainDb,      // "%.1f dB" / decimal-or-dB, clamped to [min, max]
     Percent,     // "%.0f%%" / percent-or-fraction, clamped to [min, max]
     Milliseconds,// "%.0f ms" / ms-or-seconds, clamped to [min, max]
-    Bypass,      // "On"/"Off" with '>' 0.5; case-insensitive + numeric (synth)
-    BypassFx,    // "On"/"Off" with '>=' 0.5; "On"/"1" -> 1 else 0, never fails (FX)
+    Bypass,      // "On"/"Off" with '>' 0.5; case-insensitive + finite numeric (synth)
+    BypassFx,    // "On"/"Off" with '>=' 0.5; case-insensitive + finite numeric (FX)
 };
 
 struct ParamDesc {

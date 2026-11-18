@@ -171,11 +171,15 @@ static void win32_paint(HWND hwnd, GuiInstance* g) {
         int track_y = y_row + 9;
         int track_h = 10;
 
-        const ParamSmooth& p = g->synth->params[id];
-        double val = g->synth->param_values[id].load(std::memory_order_relaxed);
-        double norm = (p.max_value > p.min_value)
-            ? std::clamp((val - p.min_value) / (p.max_value - p.min_value), 0.0, 1.0)
-            : 0.0;
+        double val = 0.0;
+        double norm = 0.0;
+        if (g->synth) {
+            const ParamSmooth& p = g->synth->params[id];
+            val = g->synth->param_values[id].load(std::memory_order_relaxed);
+            norm = (p.max_value > p.min_value)
+                ? std::clamp((val - p.min_value) / (p.max_value - p.min_value), 0.0, 1.0)
+                : 0.0;
+        }
         if (id == PARAM_BYPASS) {
             norm = (val > 0.5) ? 1.0 : 0.0;
         }
@@ -358,7 +362,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
         clap_id param_id = CLAP_INVALID_ID;
         int slider_idx = hit_test_slider(w, mx, my, &param_id);
-        if (slider_idx >= 0 && param_id < PARAM_COUNT) {
+        if (g->synth && slider_idx >= 0 && param_id < PARAM_COUNT) {
             g->drag_param = static_cast<int>(param_id);
             g->is_dragging = true;
             SetCapture(hwnd);
@@ -382,7 +386,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     }
 
     case WM_MOUSEMOVE: {
-        if (g->is_dragging && g->drag_param >= 0 && g->drag_param < static_cast<int>(PARAM_COUNT)) {
+        if (g->synth && g->is_dragging && g->drag_param >= 0 && g->drag_param < static_cast<int>(PARAM_COUNT)) {
             int mx = static_cast<int>(static_cast<short>(LOWORD(lParam)));
             RECT cr;
             GetClientRect(hwnd, &cr);
@@ -434,9 +438,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     return DefWindowProcA(hwnd, uMsg, wParam, lParam);
 }
 
+static HMODULE get_plugin_module_handle() {
+    HMODULE hInst = nullptr;
+    GetModuleHandleExA(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCSTR>(&get_plugin_module_handle),
+        &hInst);
+    return hInst ? hInst : GetModuleHandleA(nullptr);
+}
+
+static int& win32_class_refcount() {
+    static int s_refcount = 0;
+    return s_refcount;
+}
+
 static bool register_window_class() {
-    static bool s_registered = false;
-    if (s_registered) return true;
+    if (win32_class_refcount() > 0) {
+        ++win32_class_refcount();
+        return true;
+    }
 
     WNDCLASSEXA wc{};
     wc.cbSize = sizeof(WNDCLASSEXA);
@@ -444,7 +464,7 @@ static bool register_window_class() {
     wc.lpfnWndProc = WndProc;
     wc.cbClsExtra = 0;
     wc.cbWndExtra = 0;
-    wc.hInstance = GetModuleHandleA(nullptr);
+    wc.hInstance = get_plugin_module_handle();
     wc.hIcon = nullptr;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
@@ -458,8 +478,18 @@ static bool register_window_class() {
             return false;
         }
     }
-    s_registered = true;
+    ++win32_class_refcount();
     return true;
+}
+
+static void unregister_window_class_if_unused() {
+    int& count = win32_class_refcount();
+    if (count > 0) {
+        --count;
+        if (count == 0) {
+            UnregisterClassA(kWindowClassName, get_plugin_module_handle());
+        }
+    }
 }
 
 bool gui_backend_is_api_supported(const char* api) {
@@ -471,11 +501,12 @@ const char* gui_backend_preferred_api() {
 }
 
 bool gui_backend_create(GuiInstance* g) {
-    if (!register_window_class()) return false;
-    return true;
+    if (!g) return false;
+    return register_window_class();
 }
 
 void gui_backend_destroy(GuiInstance* g) {
+    if (!g) return;
     if (g->hwnd) {
         if (g->win32_timer_id) {
             KillTimer(g->hwnd, g->win32_timer_id);
@@ -485,14 +516,16 @@ void gui_backend_destroy(GuiInstance* g) {
         g->hwnd = nullptr;
     }
     cleanup_win32_fonts(g);
+    unregister_window_class_if_unused();
 }
 
 void gui_backend_set_size(GuiInstance* g, uint32_t, uint32_t) {
-    if (g->hwnd) {
+    if (g && g->hwnd) {
         SetWindowPos(g->hwnd, nullptr, 0, 0, g->width, g->height,
                      SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         InvalidateRect(g->hwnd, nullptr, FALSE);
-    }}
+    }
+}
 
 bool gui_backend_set_parent(GuiInstance* g, const clap_window_t* window) {
     if (!g || !window || !window->api) return false;
@@ -507,12 +540,7 @@ bool gui_backend_set_parent(GuiInstance* g, const clap_window_t* window) {
         return true;
     }
 
-    HMODULE hInst = nullptr;
-    GetModuleHandleExA(
-        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCSTR>(&gui_backend_set_parent),
-        &hInst);
-    if (!hInst) hInst = GetModuleHandleA(nullptr);
+    HMODULE hInst = get_plugin_module_handle();
 
     g->hwnd = CreateWindowExA(
         0,
@@ -539,7 +567,7 @@ bool gui_backend_set_parent(GuiInstance* g, const clap_window_t* window) {
 }
 
 bool gui_backend_show(GuiInstance* g) {
-    if (!g->hwnd) return false;
+    if (!g || !g->hwnd) return false;
     ShowWindow(g->hwnd, SW_SHOW);
     if (g->timer_id == CLAP_INVALID_ID && !g->win32_timer_id) {
         g->win32_timer_id = SetTimer(g->hwnd, 1, 33, nullptr);
@@ -550,7 +578,7 @@ bool gui_backend_show(GuiInstance* g) {
 }
 
 bool gui_backend_hide(GuiInstance* g) {
-    if (!g->hwnd) return false;
+    if (!g || !g->hwnd) return false;
     ShowWindow(g->hwnd, SW_HIDE);
     if (g->win32_timer_id) {
         KillTimer(g->hwnd, g->win32_timer_id);
@@ -560,8 +588,9 @@ bool gui_backend_hide(GuiInstance* g) {
 }
 
 void gui_backend_on_timer(GuiInstance* g, clap_id id) {
-    if (g->timer_id == id && g->hwnd) {
+    if (g && g->timer_id == id && g->hwnd) {
         InvalidateRect(g->hwnd, nullptr, FALSE);
-    }}
+    }
+}
 
 } // namespace mamba

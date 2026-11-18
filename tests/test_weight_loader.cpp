@@ -672,6 +672,43 @@ TEST(WeightLoaderPath, RejectsEmptyBadQuantZeroDimsAndTruncatedQMeta) {
         EXPECT_EQ(loader.dequantize_layer_to(1, w), LoadError::QMetadataTooSmall);
         loader.unload();
     }
+
+    // 5. Int8PerLayer qparam with non-finite scale must fail dequantize_layer_to.
+    {
+        struct LayerQMetaDisk {
+            float scale;
+            int32_t zero_point;
+            uint8_t reserved[8];
+        };
+        test::TempWeightFile tmp("mamba3_nan_i8_");
+        WeightFileHeader hdr{};
+        hdr.magic = WEIGHT_MAGIC;
+        hdr.version = WEIGHT_VERSION;
+        hdr.d_state = 16; hdr.d_model = 1; hdr.d_inner = 16;
+        hdr.nheads = 2; hdr.num_layers = 1; hdr.headdim = 8;
+        hdr.cond_dim = 4;
+        hdr.quantization = static_cast<uint32_t>(QuantFormat::Int8PerLayer);
+        const uint64_t fpl = test::floats_per_layer_for(
+            hdr.d_state, hdr.d_model, hdr.d_inner, hdr.nheads, hdr.headdim, hdr.cond_dim);
+        hdr.q_metadata_size = sizeof(LayerQMetaDisk);
+        hdr.weight_data_size = fpl;
+
+        LayerQMetaDisk qmeta{std::numeric_limits<float>::infinity(), 0, {}};
+        std::vector<int8_t> payload(fpl, 1);
+
+        std::FILE* f = std::fopen(tmp.path, "wb");
+        ASSERT_NE(f, nullptr);
+        std::fwrite(&hdr, sizeof(hdr), 1, f);
+        std::fwrite(&qmeta, sizeof(qmeta), 1, f);
+        std::fwrite(payload.data(), 1, payload.size(), f);
+        std::fclose(f);
+
+        WeightLoader loader;
+        ASSERT_EQ(loader.load(tmp.path), LoadError::Ok);
+        auto w = std::make_unique<SSMWeights>();
+        EXPECT_EQ(loader.dequantize_layer_to(0, *w), LoadError::BadQuantFormat);
+        loader.unload();
+    }
 }
 
 TEST(WeightLoaderHarden, RejectsTruncatedPayloadsAndPoisonedNaNs) {
@@ -753,4 +790,3 @@ TEST(WeightLoaderHarden, RejectsTruncatedPayloadsAndPoisonedNaNs) {
         loader.unload();
     }
 }
-

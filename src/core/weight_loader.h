@@ -207,7 +207,7 @@ public:
     void unload();
 
     bool is_loaded() const { return mapped_data_ != nullptr; }
-    const WeightFileHeader& header() const { return *header_; }
+    const WeightFileHeader& header() const { return cached_header_; }
 
     QuantFormat quant_format() const {
         return header_ ? static_cast<QuantFormat>(header_->quantization)
@@ -256,6 +256,7 @@ private:
     size_t mapped_size_;
     int fd_;
     const WeightFileHeader* header_;
+    WeightFileHeader cached_header_{};
     const uint8_t* weight_data_;
     size_t weight_data_bytes_;
 

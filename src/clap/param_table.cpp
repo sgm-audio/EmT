@@ -18,37 +18,26 @@
 namespace mamba {
 namespace {
 
-// Accept "On"/"Off" (case-insensitive) and numeric 0/1. Synth bypass
-// semantics: strict '>' threshold, no isfinite check, fails only when no
-// number could be parsed at all.
-bool parse_bypass_strict(const char* text, double* out_value) {
+// Accept "On"/"Off" (case-insensitive) and finite numeric values.
+// Strict '>' 0.5 threshold for Synth bypass; '>=' 0.5 for FX bypass.
+bool parse_bypass_value(const char* text, double* out_value, bool strict_gt) {
     if (text[0] == 'O' || text[0] == 'o') {
         if ((text[1] == 'N' || text[1] == 'n') && text[2] == '\0') {
             *out_value = 1.0;
             return true;
         }
-        if (text[1] == 'f' || text[1] == 'F') {
-            // Allow "Off" / "of" prefix; reject anything else.
-            if (text[2] == 'f' || text[2] == 'F') {
-                if (text[3] == '\0') {
-                    *out_value = 0.0;
-                    return true;
-                }
-            }
+        if ((text[1] == 'f' || text[1] == 'F') &&
+            (text[2] == 'f' || text[2] == 'F') && text[3] == '\0') {
+            *out_value = 0.0;
+            return true;
         }
     }
-    // Fall through to numeric parsing.
     char* end = nullptr;
     double v = std::strtod(text, &end);
-    if (end == text) return false;
-    *out_value = v > 0.5 ? 1.0 : 0.0;
-    return true;
-}
-
-// FX bypass semantics (quirk preserved, see O7): "On"/"1" -> 1, literally
-// anything else -> 0; never fails.
-bool parse_bypass_fx(const char* text, double* out_value) {
-    *out_value = (!std::strcmp(text, "On") || !std::strcmp(text, "1")) ? 1.0 : 0.0;
+    if (end == text || !std::isfinite(v)) return false;
+    while (*end == ' ' || *end == '\t') ++end;
+    if (*end != '\0') return false;
+    *out_value = (strict_gt ? (v > 0.5) : (v >= 0.5)) ? 1.0 : 0.0;
     return true;
 }
 
@@ -58,11 +47,12 @@ bool parse_gain_db(const char* text, double min_value, double max_value,
                    double* out_value) {
     char* end = nullptr;
     double v = std::strtod(text, &end);
-    if (end == text) return false;
-    while (*end == ' ') ++end;
+    if (end == text || !std::isfinite(v)) return false;
+    while (*end == ' ' || *end == '\t') ++end;
     if (*end == 'd' || *end == 'D') {
         // dB
         v = std::pow(10.0, v / 20.0);
+        if (!std::isfinite(v)) return false;
     }
     if (v < min_value) v = min_value;
     if (v > max_value) v = max_value;
@@ -76,7 +66,7 @@ bool parse_percent(const char* text, double min_value, double max_value,
                    double* out_value) {
     char* end = nullptr;
     double v = std::strtod(text, &end);
-    if (end == text) return false;
+    if (end == text || !std::isfinite(v)) return false;
     bool percent = false;
     if (*end == '%') {
         percent = true;
@@ -84,6 +74,7 @@ bool parse_percent(const char* text, double min_value, double max_value,
     }
     while (*end == ' ' || *end == '\t') ++end;
     if (percent || v > 1.0) v = v / 100.0;
+    if (!std::isfinite(v)) return false;
     if (v < min_value) v = min_value;
     if (v > max_value) v = max_value;
     *out_value = v;
@@ -95,14 +86,15 @@ bool parse_milliseconds(const char* text, double min_value, double max_value,
                         double* out_value) {
     char* end = nullptr;
     double v = std::strtod(text, &end);
-    if (end == text) return false;
-    while (*end == ' ') ++end;
+    if (end == text || !std::isfinite(v)) return false;
+    while (*end == ' ' || *end == '\t') ++end;
     if (*end == 'm' || *end == 'M') {
         // already in ms
     } else if (*end == 's' || *end == 'S') {
         v = v * 1000.0;  // seconds -> ms; we're stored in seconds.
     }
     v = v / 1000.0;
+    if (!std::isfinite(v)) return false;
     if (v < min_value) v = min_value;
     if (v > max_value) v = max_value;
     *out_value = v;
@@ -113,9 +105,7 @@ bool parse_milliseconds(const char* text, double min_value, double max_value,
 
 bool param_value_to_text(ParamFormat format, double value, char* out,
                          uint32_t out_capacity) {
-    if (!out || out_capacity == 0) return false;
-    // NOTE: snprintf goes straight into the caller's buffer (no intermediate
-    // fixed buffer), so unclamped Plain values format exactly as before.
+    if (!out || out_capacity == 0 || !std::isfinite(value)) return false;
     switch (format) {
         case ParamFormat::Plain:
             std::snprintf(out, out_capacity, "%.3f", value);
@@ -154,7 +144,9 @@ bool param_text_to_value(ParamFormat format, const char* text, double min_value,
             char* end = nullptr;
             double v = std::strtod(text, &end);
             if (end == text || !std::isfinite(v)) return false;
-            *out_value = v;  // FX plain params never clamped, as-shipped
+            if (v < min_value) v = min_value;
+            if (v > max_value) v = max_value;
+            *out_value = v;
             return true;
         }
         case ParamFormat::GainDb:
@@ -164,9 +156,9 @@ bool param_text_to_value(ParamFormat format, const char* text, double min_value,
         case ParamFormat::Milliseconds:
             return parse_milliseconds(text, min_value, max_value, out_value);
         case ParamFormat::Bypass:
-            return parse_bypass_strict(text, out_value);
+            return parse_bypass_value(text, out_value, true);
         case ParamFormat::BypassFx:
-            return parse_bypass_fx(text, out_value);
+            return parse_bypass_value(text, out_value, false);
         default:
             return false;
     }
